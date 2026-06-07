@@ -1,0 +1,28 @@
+# Python/runtime artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environments
+.venv/
+venv/
+env/
+
+# IDE/project-local metadata
+.idea/
+.vscode/
+
+# Forecast runtime outputs and API caches
+forecast_outputs/
+weather_cache/
+
+# Local logs/temp files
+*.log
+*.tmp
+*.bak
+~$*

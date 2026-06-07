@@ -1,0 +1,114 @@
+from __future__ import annotations
+
+from pathlib import Path
+import os
+
+import pandas as pd
+import yaml
+
+from forecasting.dashboard.app import create_dashboard_app
+from forecasting.utils.output_archive import load_latest_distinct_snapshot
+
+
+def _forecast_weather_frame_from_output(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty or "DT" not in df.columns:
+        return pd.DataFrame()
+    out = pd.DataFrame({"DT": df["DT"]})
+    mapping = {
+        "Temperature": "TempF",
+        "Humidity_Norm": "HumidityPct",
+        "CloudCover_Norm": "CloudCoverPct",
+        "WindSpeed_Mph": "WindSpeedMph",
+        "PrecipIn": "PrecipIn",
+        "Solar_Irradiance": "GHI_Wm2",
+    }
+    for src, dst in mapping.items():
+        if src in df.columns:
+            values = pd.to_numeric(df[src], errors="coerce")
+            if src in {"Humidity_Norm", "CloudCover_Norm"}:
+                values = values * 100.0
+            out[dst] = values
+    return out.dropna(subset=["DT"]).copy()
+
+
+def main():
+    here = Path(__file__).resolve().parents[1]  # forecasting/
+    cfg = yaml.safe_load((here / "config.yaml").read_text(encoding="utf-8"))
+
+    out_dir = Path(cfg.get("project", {}).get("output_dir", "forecast_outputs"))
+    if not out_dir.is_absolute():
+        out_dir = here.parent / out_dir
+
+    forecast_csv = out_dir / "forecast_results.csv"
+    backtest_csv = out_dir / "backtest_results.csv"
+
+    if not forecast_csv.exists():
+        raise SystemExit(f"Missing {forecast_csv}. Run the pipeline with --save-csv first.")
+    if not backtest_csv.exists():
+        raise SystemExit(f"Missing {backtest_csv}. Run the pipeline with --save-csv first.")
+
+    fut = pd.read_csv(forecast_csv, low_memory=False)
+    bt = pd.read_csv(backtest_csv, low_memory=False)
+    previous_forecast = load_latest_distinct_snapshot(
+        out_dir / "forecast_runs",
+        current_df=fut,
+        hash_columns=[
+            "DT",
+            "Forecast",
+            "Forecast_Low_MWH",
+            "Forecast_Expected_MWH",
+            "Forecast_High_MWH",
+            "P10_Forecast_MWH",
+            "P90_Forecast_MWH",
+            "Production_Risk_Code",
+            "Temperature",
+            "Temperature_DailyMax",
+            "CloudCover_Norm",
+            "Solar_Irradiance",
+            "WeatherScenario_Spread_MWH",
+            "WeatherScenario_MaxAbsDelta_MWH",
+            "WeatherScenario_Cap_Applied",
+        ],
+    )
+    cache_dir = Path(str(cfg.get("openmeteo", {}).get("cache_dir") or "weather_cache"))
+    if not cache_dir.is_absolute():
+        cache_dir = here.parent / cache_dir
+    previous_weather = load_latest_distinct_snapshot(
+        cache_dir / "forecast_weather_runs",
+        current_df=_forecast_weather_frame_from_output(fut),
+        hash_columns=["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay"],
+    )
+    diagnostics = {}
+    current_mtime = max(forecast_csv.stat().st_mtime, backtest_csv.stat().st_mtime)
+    stale_scorecards = {}
+    for name in [
+        "production_readiness_scorecard",
+        "band_coverage_summary",
+        "daily_peak_miss_by_stage",
+        "backtest_metrics_by_segment_by_stage",
+        "top_100_underforecast_hours_by_stage",
+    ]:
+        path = out_dir / f"{name}.csv"
+        if path.exists():
+            diagnostics[name] = pd.read_csv(path, low_memory=False)
+            if name.endswith("scorecard") or name == "production_readiness_scorecard":
+                stale_scorecards[name] = path.stat().st_mtime < current_mtime
+    diagnostics["_stale_scorecards"] = stale_scorecards
+
+    app = create_dashboard_app(
+        historical_fit_df=pd.DataFrame(),  # optional for baseline UI; comparable/sensitivity need full history
+        future_results={
+            "display": fut,
+            "previous_forecast_snapshot": previous_forecast,
+            "previous_weather_snapshot": previous_weather,
+        },
+        backtest_results=bt,
+        config=cfg,
+        diagnostics_results=diagnostics,
+    )
+    port = int(os.environ.get("DASH_PORT", "8051"))
+    app.run(host="0.0.0.0", port=port, debug=False)
+
+
+if __name__ == "__main__":
+    main()

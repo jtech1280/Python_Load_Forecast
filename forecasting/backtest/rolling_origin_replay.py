@@ -1,0 +1,1111 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from forecasting.backtest.rolling_backtest import run_rolling_backtest
+from forecasting.diagnostics.forecast_diagnostics import (
+    build_daily_peak_miss_by_stage,
+    build_forecast_stage_metrics,
+    build_metrics_by_group_by_stage,
+    metrics_summary,
+    prep_backtest,
+)
+from forecasting.forecast.forecast_pipeline import (
+    _production_ensemble_weights,
+    apply_origin_available_correction_chain,
+    build_correction_artifacts,
+)
+from forecasting.forecast.weather_scenarios import (
+    add_scenario_summary_columns,
+    apply_weather_scenario_delta_caps,
+    make_weather_scenario_frame,
+    scenario_column_name,
+    scenario_definitions,
+)
+from forecasting.forecast.weather_robustness_hedge import apply_weather_robustness_hedge
+from forecasting.forecast.recursive_engine import recursive_forecast
+from forecasting.data.weather_loader import fetch_previous_run_weather
+from forecasting.features.feature_builder import build_forecast_frame
+from forecasting.features.intraday_load_features import zero_intraday_load_features
+from forecasting.model.catboost_model import catboost_enabled, train_catboost
+from forecasting.model.prophet_model import DEFAULT_PROPHET_REGRESSORS, prophet_enabled, train_prophet
+from forecasting.model.trainers import train_tree_models
+
+
+CONTEXT_COLS = [
+    "DT", "MWH", "Season", "Month", "Hour", "HourGroup", "DOW", "IsWeekend", "IsHoliday",
+    "IsLikelySystemPeakHour", "Temperature", "Temperature_DailyMax", "DailyMaxTempBin",
+    "BTM_Solar_Proxy_MW", "BTM_Solar_Loss_From_ClearSky_MW", "Midday_Overcast_Solar_Loss_MW",
+    "ClearSky_Index", "CloudCover_Norm", "Humidity_Norm", "WindSpeed_Mph", "PrecipIn",
+]
+PRED_COLS = [
+    "DT", "Raw_Forecast_MWH", "XGB_Pred_MWH", "LGB_Pred_MWH", "CatBoost_Pred_MWH",
+    "Prophet_Pred_MWH", "Prophet_Lower_MWH", "Prophet_Upper_MWH",
+]
+BTM_REPLAY_COLS = ["DT", "Nameplate_MW", "Capacity_Ratio_To_Current", "Impact_Cap_MW"]
+WEATHER_FRAME_COLS = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay"]
+WEATHER_REALISM_PREFIX_COLS = [
+    "Raw_Forecast_MWH", "XGB_Pred_MWH", "LGB_Pred_MWH", "CatBoost_Pred_MWH",
+    "Prophet_Pred_MWH", "Residual_MWH", "Final_Backtest_Forecast_MWH", "Final_Residual_MWH",
+    "Final_AbsError_MWH", "Final_APE", "Temperature", "Temperature_DailyMax",
+    "CloudCover_Norm", "BTM_Solar_Proxy_MW", "BTM_Solar_Loss_From_ClearSky_MW",
+    "Midday_Overcast_Solar_Loss_MW", "Forecast_Weather_Lead_Days",
+]
+
+
+def _replay_cfg(config: dict | None) -> dict[str, Any]:
+    return ((config or {}).get("training", {}) or {}).get("rolling_origin_replay", {}) or {}
+
+
+def _as_int(value: Any, default: int, minimum: int = 1) -> int:
+    try:
+        return max(minimum, int(value))
+    except Exception:
+        return max(minimum, int(default))
+
+
+def _season_from_month(month: int) -> str:
+    m = int(month)
+    if m in (12, 1, 2):
+        return "Winter"
+    if m in (3, 4, 5):
+        return "Spring"
+    if m in (6, 7, 8, 9):
+        return "Summer"
+    return "Fall"
+
+
+def _balanced_seasonal_origins(candidates: list[pd.Timestamp], config: dict) -> list[pd.Timestamp]:
+    cfg = _replay_cfg(config)
+    max_origins = _as_int(cfg.get("max_origins"), 12)
+    per_season = _as_int(cfg.get("origins_per_season"), max(1, max_origins // 4))
+
+    chosen: list[pd.Timestamp] = []
+    for season in ["Winter", "Spring", "Summer", "Fall"]:
+        season_candidates = [origin for origin in candidates if _season_from_month(origin.month) == season]
+        chosen.extend(season_candidates[:per_season])
+    if len(chosen) < max_origins:
+        chosen.extend(origin for origin in candidates if origin not in chosen)
+    return chosen[:max_origins]
+
+
+def _fixed_origin_values(cfg: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    raw = cfg.get("fixed_origins") or cfg.get("origin_dates") or []
+    if isinstance(raw, str):
+        values.extend(part.strip() for part in raw.replace(";", ",").split(",") if part.strip())
+    elif isinstance(raw, (list, tuple)):
+        values.extend(str(part).strip() for part in raw if str(part).strip())
+
+    file_path = str(cfg.get("fixed_origins_file") or cfg.get("origin_dates_file") or "").strip()
+    if file_path:
+        path = Path(file_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Fixed replay origins file not found: {path}")
+        values.extend(
+            line.strip().lstrip("\ufeff")
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip().lstrip("\ufeff") and not line.strip().lstrip("\ufeff").startswith("#")
+        )
+    return values
+
+
+def _parse_fixed_origins(cfg: dict[str, Any], first_dt: pd.Timestamp) -> list[pd.Timestamp]:
+    raw_values = _fixed_origin_values(cfg)
+    if not raw_values:
+        return []
+
+    parsed: list[pd.Timestamp] = []
+    target_tz = first_dt.tz
+    for raw in raw_values:
+        ts = pd.Timestamp(raw)
+        if pd.isna(ts):
+            continue
+        if ts.tz is None and target_tz is not None:
+            ts = ts.tz_localize(target_tz)
+        elif ts.tz is not None and target_tz is not None:
+            ts = ts.tz_convert(target_tz)
+        parsed.append(ts.normalize())
+
+    return list(dict.fromkeys(parsed))
+
+
+def _origin_candidates(train_df: pd.DataFrame, config: dict) -> list[pd.Timestamp]:
+    cfg = _replay_cfg(config)
+    horizon_days = _as_int(cfg.get("horizon_days"), 16)
+    origin_step_days = _as_int(cfg.get("origin_step_days"), 28)
+    max_origins = _as_int(cfg.get("max_origins"), 12)
+    min_train_days = _as_int(cfg.get("min_train_days"), 365)
+    calibration_days = _as_int(cfg.get("calibration_days"), 45)
+
+    dt = pd.to_datetime(train_df["DT"], errors="coerce").dropna()
+    if dt.empty:
+        return []
+    first_dt = dt.min()
+    latest_origin = dt.max().normalize() - pd.Timedelta(days=horizon_days - 1)
+    earliest_origin = first_dt.normalize() + pd.Timedelta(days=min_train_days + calibration_days)
+
+    fixed_origins = _parse_fixed_origins(cfg, first_dt)
+    if fixed_origins:
+        valid_fixed: list[pd.Timestamp] = []
+        for origin in fixed_origins:
+            horizon_end = origin + pd.Timedelta(days=horizon_days)
+            if origin < earliest_origin or origin > latest_origin:
+                continue
+            if ((dt >= origin) & (dt < horizon_end)).sum() >= 24:
+                valid_fixed.append(origin)
+        return valid_fixed[:max_origins]
+
+    origins: list[pd.Timestamp] = []
+    origin = latest_origin
+    while origin >= earliest_origin:
+        horizon_end = origin + pd.Timedelta(days=horizon_days)
+        if ((dt >= origin) & (dt < horizon_end)).sum() >= 24:
+            origins.append(origin)
+        origin -= pd.Timedelta(days=origin_step_days)
+
+    selection = str(cfg.get("origin_selection", "seasonal_balanced")).strip().lower()
+    if selection == "seasonal_balanced":
+        origins = _balanced_seasonal_origins(origins, config)
+    else:
+        origins = origins[:max_origins]
+    return list(reversed(origins))
+
+
+def _horizon_bucket(day: int) -> str:
+    if int(day) <= 1:
+        return "Day1"
+    if int(day) <= 7:
+        return "Days2to7"
+    if int(day) <= 16:
+        return "Days8to16"
+    return "Days17Plus"
+
+
+def _weather_realism_cfg(config: dict | None) -> dict[str, Any]:
+    return (_replay_cfg(config).get("weather_realism", {}) or {}) if isinstance(config, dict) else {}
+
+
+def _add_origin_metadata(out: pd.DataFrame, origin_dt: pd.Timestamp, origin_number: int) -> pd.DataFrame:
+    out = out.sort_values("DT").reset_index(drop=True).copy()
+    out["Replay_Origin_ID"] = f"origin_{origin_number:02d}"
+    out["Replay_Origin_DT"] = origin_dt
+    out["Replay_Origin_Year"] = int(origin_dt.year)
+    out["Replay_Origin_Month"] = int(origin_dt.month)
+    out["Replay_Origin_Season"] = _season_from_month(origin_dt.month)
+    out["Forecast_Lead_Hour"] = np.arange(1, len(out) + 1, dtype=int)
+    out["Forecast_Day"] = ((out["Forecast_Lead_Hour"] - 1) // 24 + 1).astype(int)
+    out["Replay_Horizon_Bucket"] = out["Forecast_Day"].map(_horizon_bucket)
+    return out
+
+
+def _btm_from_feature_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    cols = [col for col in BTM_REPLAY_COLS if col in frame.columns]
+    if len(cols) < len(BTM_REPLAY_COLS):
+        return pd.DataFrame(columns=BTM_REPLAY_COLS)
+    out = frame[cols].copy().sort_values("DT")
+    out["Replay_PeriodStart"] = pd.to_datetime(out["DT"]).dt.tz_localize(None).dt.to_period("M").dt.to_timestamp()
+    out = out.drop_duplicates(subset=["Replay_PeriodStart"], keep="last").drop(columns=["Replay_PeriodStart"])
+    return out.reset_index(drop=True)
+
+
+def _previous_run_future_frame(target: pd.DataFrame, config: dict, origin_dt: pd.Timestamp) -> pd.DataFrame:
+    cfg = _weather_realism_cfg(config)
+    if not bool(cfg.get("enabled", False)):
+        return pd.DataFrame()
+    max_previous_days = _as_int(cfg.get("max_previous_days"), 7)
+    # Hard ceiling on how far back the previous-runs weather provider can supply a
+    # fixed-lead forecast. Open-Meteo's previous-runs API historically supports ~7 days;
+    # raise provider_max_days only if your provider/plan returns longer leads (otherwise
+    # the extra leads simply return empty and are skipped). Days beyond this remain
+    # OUTSIDE the production-weather-validated window (see scorecard summary flag).
+    provider_max_days = _as_int(cfg.get("provider_max_days"), 7)
+    last_eligible = min(int(max_previous_days), int(provider_max_days))
+    target_dt = pd.to_datetime(target["DT"], errors="coerce")
+    lead_days = (target_dt.dt.normalize() - pd.Timestamp(origin_dt).normalize()).dt.days + 1
+    eligible = target.loc[lead_days.between(1, last_eligible)].copy()
+    if eligible.empty:
+        return pd.DataFrame()
+
+    try:
+        previous = fetch_previous_run_weather(
+            config,
+            start_dt=eligible["DT"].min(),
+            end_dt=eligible["DT"].max(),
+            max_previous_days=last_eligible,
+        )
+    except Exception as exc:
+        print(f"WARNING: previous-run weather realism fetch failed for replay origin {origin_dt}. Details: {exc}")
+        return pd.DataFrame()
+    if previous.empty:
+        return pd.DataFrame()
+
+    selector = eligible[["DT"]].copy()
+    selector["Forecast_Weather_Lead_Days"] = (
+        pd.to_datetime(selector["DT"], errors="coerce").dt.normalize() - pd.Timestamp(origin_dt).normalize()
+    ).dt.days + 1
+    previous = previous.rename(columns={"Previous_Run_Lead_Days": "Forecast_Weather_Lead_Days"})
+    weather_cols = [col for col in WEATHER_FRAME_COLS if col in previous.columns]
+    selected_weather = selector.merge(
+        previous[weather_cols + ["Forecast_Weather_Lead_Days"]],
+        on=["DT", "Forecast_Weather_Lead_Days"],
+        how="inner",
+    )
+    if selected_weather.empty:
+        return pd.DataFrame()
+    btm = _btm_from_feature_frame(target)
+    if btm.empty:
+        return pd.DataFrame()
+    future = build_forecast_frame(selected_weather[weather_cols], btm)
+    future = future.merge(
+        selected_weather[["DT", "Forecast_Weather_Lead_Days"]],
+        on="DT",
+        how="left",
+    )
+    return future.sort_values("DT").reset_index(drop=True)
+
+
+def _raw_prediction_frame(
+    target: pd.DataFrame,
+    future_frame: pd.DataFrame,
+    hist: pd.DataFrame,
+    features: list[str],
+    ensemble_weights: dict[str, float],
+    xgb_model,
+    lgb_model,
+    prophet_fit,
+    prophet_features: list[str],
+    catboost_model,
+    origin_dt: pd.Timestamp,
+    origin_number: int,
+    config: dict | None = None,
+) -> pd.DataFrame:
+    if target.empty or future_frame.empty:
+        return pd.DataFrame()
+    target_actual = target[["DT", "MWH"]].copy()
+    future = future_frame[future_frame["DT"].isin(target_actual["DT"])].copy()
+    if future.empty:
+        return pd.DataFrame()
+    five_min_cfg = ((config or {}).get("five_min_load", {}) or {})
+    if not bool(five_min_cfg.get("future_model_features_enabled", False)):
+        future = zero_intraday_load_features(future)
+    raw = recursive_forecast(
+        future_frame=future.drop(columns=["MWH"], errors="ignore"),
+        historical_seed=hist[["DT", "MWH"]].copy(),
+        xgb_model=xgb_model,
+        lgb_model=lgb_model,
+        features=features,
+        ensemble_weights=ensemble_weights,
+        prophet_fit=prophet_fit,
+        prophet_features=prophet_features,
+        catboost_model=catboost_model,
+    )
+
+    context_cols = [c for c in CONTEXT_COLS if c in future.columns and c != "MWH"]
+    for extra in ["Forecast_Weather_Lead_Days"]:
+        if extra in future.columns:
+            context_cols.append(extra)
+    pred_cols = [c for c in PRED_COLS if c in raw.columns]
+    out = target_actual.rename(columns={"MWH": "Actual_MWH"}).merge(
+        future[context_cols],
+        on="DT",
+        how="left",
+    ).merge(raw[pred_cols], on="DT", how="left")
+    out["Residual_MWH"] = pd.to_numeric(out["Actual_MWH"], errors="coerce") - pd.to_numeric(out["Raw_Forecast_MWH"], errors="coerce")
+    out["AbsError_MWH"] = out["Residual_MWH"].abs()
+    out["APE"] = np.where(
+        pd.to_numeric(out["Actual_MWH"], errors="coerce").abs() > 1e-9,
+        out["AbsError_MWH"] / pd.to_numeric(out["Actual_MWH"], errors="coerce").abs() * 100.0,
+        np.nan,
+    )
+    return _add_origin_metadata(out, origin_dt, origin_number)
+
+
+def _origin_raw_forecasts(
+    train_df: pd.DataFrame,
+    features: list[str],
+    config: dict,
+    origin_dt: pd.Timestamp,
+    horizon_days: int,
+    origin_number: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame]]:
+    hist = train_df[train_df["DT"] < origin_dt].copy()
+    target = train_df[(train_df["DT"] >= origin_dt) & (train_df["DT"] < origin_dt + pd.Timedelta(days=horizon_days))].copy()
+    if hist.empty or target.empty:
+        return pd.DataFrame(), pd.DataFrame(), {}
+
+    stage_name = f"rolling-origin replay {origin_number} @ {origin_dt}"
+    xgb_model, lgb_model, trained_features = train_tree_models(hist, features, config=config, stage_name=stage_name)
+    prophet_fit = train_prophet(hist, DEFAULT_PROPHET_REGRESSORS, config=config) if prophet_enabled(config) else None
+    prophet_features = prophet_fit.regressors if prophet_fit is not None else []
+    catboost_model, _ = train_catboost(hist, trained_features, config=config) if catboost_enabled(config) else (None, trained_features)
+    ensemble_weights = _production_ensemble_weights(config)
+    realized = _raw_prediction_frame(
+        target=target,
+        future_frame=target.drop(columns=["MWH"]).copy(),
+        hist=hist,
+        features=trained_features,
+        ensemble_weights=ensemble_weights,
+        xgb_model=xgb_model,
+        lgb_model=lgb_model,
+        prophet_fit=prophet_fit,
+        prophet_features=prophet_features,
+        catboost_model=catboost_model,
+        origin_dt=origin_dt,
+        origin_number=origin_number,
+        config=config,
+    )
+    weather_realism_future = _previous_run_future_frame(target, config, origin_dt)
+    weather_realism = _raw_prediction_frame(
+        target=target,
+        future_frame=weather_realism_future,
+        hist=hist,
+        features=trained_features,
+        ensemble_weights=ensemble_weights,
+        xgb_model=xgb_model,
+        lgb_model=lgb_model,
+        prophet_fit=prophet_fit,
+        prophet_features=prophet_features,
+        catboost_model=catboost_model,
+        origin_dt=origin_dt,
+        origin_number=origin_number,
+        config=config,
+    )
+    weather_scenarios: dict[str, pd.DataFrame] = {}
+    if not weather_realism_future.empty:
+        for scenario in scenario_definitions(config):
+            name = str(scenario.get("name", "scenario"))
+            scenario_frame = make_weather_scenario_frame(weather_realism_future, scenario)
+            scenario_raw = _raw_prediction_frame(
+                target=target,
+                future_frame=scenario_frame,
+                hist=hist,
+                features=trained_features,
+                ensemble_weights=ensemble_weights,
+                xgb_model=xgb_model,
+                lgb_model=lgb_model,
+                prophet_fit=prophet_fit,
+                prophet_features=prophet_features,
+                catboost_model=catboost_model,
+                origin_dt=origin_dt,
+                origin_number=origin_number,
+                config=config,
+            )
+            if not scenario_raw.empty:
+                weather_scenarios[name] = scenario_raw
+    return realized, weather_realism, weather_scenarios
+
+
+def _merge_weather_realism(corrected: pd.DataFrame, realism: pd.DataFrame) -> pd.DataFrame:
+    if corrected.empty or realism.empty:
+        return corrected
+    scenario_cols = [col for col in realism.columns if col.startswith("WeatherScenario_")]
+    cols = ["DT", "Replay_Origin_ID"] + [col for col in WEATHER_REALISM_PREFIX_COLS if col in realism.columns] + scenario_cols
+    suffix = realism[cols].copy().rename(
+        columns={col: f"WeatherRealism_{col}" for col in cols if col not in {"DT", "Replay_Origin_ID"}}
+    )
+    return corrected.merge(suffix, on=["DT", "Replay_Origin_ID"], how="left")
+
+
+def run_rolling_origin_replay(train_df: pd.DataFrame, features: list[str], config: dict) -> pd.DataFrame:
+    """Replay multi-origin production horizons with pre-origin correction residual windows."""
+    if train_df is None or train_df.empty:
+        return pd.DataFrame()
+
+    cfg = _replay_cfg(config)
+    horizon_days = _as_int(cfg.get("horizon_days"), 16)
+    calibration_days = _as_int(cfg.get("calibration_days"), 45)
+    work = train_df.copy().sort_values("DT").reset_index(drop=True)
+    origins = _origin_candidates(work, config)
+    frames: list[pd.DataFrame] = []
+
+    for origin_number, origin_dt in enumerate(origins, start=1):
+        print(
+            "Rolling-origin replay origin "
+            f"{origin_number}/{len(origins)}: {origin_dt} "
+            f"({_season_from_month(origin_dt.month)})",
+            flush=True,
+        )
+        pre_origin = work[work["DT"] < origin_dt].copy()
+        raw_calibration = run_rolling_backtest(
+            train_df=pre_origin,
+            features=features,
+            ensemble_weights=_production_ensemble_weights(config),
+            backtest_days=calibration_days,
+            config=config,
+        )
+        artifacts = build_correction_artifacts(raw_calibration, config)
+        raw_origin, raw_weather_realism, raw_weather_scenarios = _origin_raw_forecasts(
+            work,
+            features,
+            config,
+            origin_dt,
+            horizon_days,
+            origin_number,
+        )
+        if raw_origin.empty:
+            continue
+        corrected = apply_origin_available_correction_chain(raw_origin, config, artifacts)
+        if not raw_weather_realism.empty:
+            corrected_weather_realism = apply_origin_available_correction_chain(raw_weather_realism, config, artifacts)
+            scenario_columns: list[str] = []
+            for scenario_name, raw_scenario in raw_weather_scenarios.items():
+                corrected_scenario = apply_origin_available_correction_chain(raw_scenario, config, artifacts)
+                col = scenario_column_name(scenario_name)
+                scenario_values = corrected_scenario[["DT", "Replay_Origin_ID", "Final_Backtest_Forecast_MWH"]].copy()
+                scenario_values.rename(columns={"Final_Backtest_Forecast_MWH": col}, inplace=True)
+                corrected_weather_realism = corrected_weather_realism.merge(
+                    scenario_values,
+                    on=["DT", "Replay_Origin_ID"],
+                    how="left",
+                )
+                scenario_columns.append(col)
+            corrected_weather_realism = apply_weather_scenario_delta_caps(
+                corrected_weather_realism,
+                scenario_columns,
+                config=config,
+                base_col="Final_Backtest_Forecast_MWH",
+            )
+            corrected_weather_realism = add_scenario_summary_columns(corrected_weather_realism, scenario_columns)
+            # V12.9: apply the same weather-uncertainty peak hedge the production
+            # pipeline applies, so the realism (forecast-weather) scorecard measures it.
+            # The realism frame is built on forecast weather, so Temperature_DailyMax
+            # here is the forecasted daily max (the operationally-available gate).
+            corrected_weather_realism = apply_weather_robustness_hedge(
+                corrected_weather_realism,
+                config=config,
+                base_col="Final_Backtest_Forecast_MWH",
+                also_update_cols=(),
+            )
+            corrected = _merge_weather_realism(corrected, corrected_weather_realism)
+        corrected["Replay_Calibration_Days"] = calibration_days
+        corrected["Replay_Calibration_Start_DT"] = raw_calibration["DT"].min() if not raw_calibration.empty else pd.NaT
+        corrected["Replay_Calibration_End_DT"] = raw_calibration["DT"].max() if not raw_calibration.empty else pd.NaT
+        frames.append(corrected)
+        print(
+            "Rolling-origin replay completed origin "
+            f"{origin_number}/{len(origins)}: rows={len(corrected)}",
+            flush=True,
+        )
+
+    return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+
+
+def _daily_peak_by_origin(df: pd.DataFrame) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    if df.empty or "Replay_Origin_ID" not in df.columns:
+        return pd.DataFrame()
+    for origin_id, group in df.groupby("Replay_Origin_ID", dropna=False):
+        peak = build_daily_peak_miss_by_stage(group)
+        if peak.empty:
+            continue
+        peak.insert(0, "Replay_Origin_ID", origin_id)
+        peak.insert(1, "Replay_Origin_DT", group["Replay_Origin_DT"].iloc[0] if "Replay_Origin_DT" in group.columns else pd.NaT)
+        frames.append(peak)
+    return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+
+
+def _origin_coverage(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "Replay_Origin_ID" not in df.columns:
+        return pd.DataFrame()
+
+    rows = []
+    for origin_id, group in df.groupby("Replay_Origin_ID", dropna=False):
+        rows.append({
+            "Replay_Origin_ID": origin_id,
+            "Replay_Origin_DT": group["Replay_Origin_DT"].iloc[0] if "Replay_Origin_DT" in group.columns else pd.NaT,
+            "Replay_Origin_Year": group["Replay_Origin_Year"].iloc[0] if "Replay_Origin_Year" in group.columns else np.nan,
+            "Replay_Origin_Month": group["Replay_Origin_Month"].iloc[0] if "Replay_Origin_Month" in group.columns else np.nan,
+            "Replay_Origin_Season": group["Replay_Origin_Season"].iloc[0] if "Replay_Origin_Season" in group.columns else np.nan,
+            "Scored_Start_DT": group["DT"].min() if "DT" in group.columns else pd.NaT,
+            "Scored_End_DT": group["DT"].max() if "DT" in group.columns else pd.NaT,
+            "Rows": int(len(group)),
+            "Forecast_Days": int(pd.to_numeric(group.get("Forecast_Day"), errors="coerce").nunique()) if "Forecast_Day" in group.columns else np.nan,
+            "Horizon_Buckets": "|".join(sorted(str(x) for x in group.get("Replay_Horizon_Bucket", pd.Series(dtype=object)).dropna().unique())),
+            "Replay_Calibration_Days": group["Replay_Calibration_Days"].iloc[0] if "Replay_Calibration_Days" in group.columns else np.nan,
+            "Replay_Calibration_Start_DT": group["Replay_Calibration_Start_DT"].iloc[0] if "Replay_Calibration_Start_DT" in group.columns else pd.NaT,
+            "Replay_Calibration_End_DT": group["Replay_Calibration_End_DT"].iloc[0] if "Replay_Calibration_End_DT" in group.columns else pd.NaT,
+        })
+    return pd.DataFrame(rows).sort_values("Replay_Origin_DT").reset_index(drop=True)
+
+
+def _ensure_origin_context(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "Replay_Origin_DT" not in out.columns:
+        return out
+    origin_dt = pd.to_datetime(out["Replay_Origin_DT"], errors="coerce")
+    if "Replay_Origin_Year" not in out.columns:
+        out["Replay_Origin_Year"] = origin_dt.dt.year
+    if "Replay_Origin_Month" not in out.columns:
+        out["Replay_Origin_Month"] = origin_dt.dt.month
+    if "Replay_Origin_Season" not in out.columns:
+        out["Replay_Origin_Season"] = origin_dt.dt.month.map(
+            lambda month: _season_from_month(month) if pd.notna(month) else np.nan
+        )
+    return out
+
+
+def _scorecard_slice(df: pd.DataFrame, slice_name: str, slice_group: str, slice_value: str) -> pd.DataFrame:
+    metrics = build_forecast_stage_metrics(df)
+    if metrics.empty:
+        return metrics
+    metrics.insert(0, "Slice", slice_name)
+    metrics.insert(1, "SliceGroup", slice_group)
+    metrics.insert(2, "SliceValue", slice_value)
+    return metrics
+
+
+def _scorecard_by_values(df: pd.DataFrame, key: str, prefix: str) -> list[pd.DataFrame]:
+    frames = []
+    if key not in df.columns:
+        return frames
+    for value, group in df.groupby(key, dropna=False):
+        value_label = "<missing>" if pd.isna(value) else str(value)
+        frames.append(_scorecard_slice(group, f"{prefix}:{value_label}", key, value_label))
+    return frames
+
+
+def _event_slices(bt: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    daily_max_temp = (
+        pd.to_numeric(bt["Temperature_DailyMax"], errors="coerce")
+        if "Temperature_DailyMax" in bt.columns
+        else pd.Series(np.nan, index=bt.index)
+    )
+    hour = pd.to_numeric(bt.get("Hour"), errors="coerce")
+    forecast_day = pd.to_numeric(bt.get("Forecast_Day"), errors="coerce")
+    return {
+        "PeakWindowHours14to18": bt[hour.between(14, 18)].copy(),
+        "HotPeakDailyMax90Plus": bt[bt["HourGroup"].eq("Peak") & daily_max_temp.ge(90.0)].copy(),
+        "ShoulderSeasonHeatTransition": bt[
+            bt["Season"].isin(["Spring", "Fall"])
+            & hour.between(12, 22)
+            & daily_max_temp.ge(75.0)
+            & daily_max_temp.le(93.0)
+        ].copy(),
+        "CloudSolarMidday": bt[
+            bt["HourGroup"].eq("Midday")
+            & (
+                bt["CloudCoverBucket"].isin(["Mostly Cloudy", "Overcast"])
+                | bt["SolarLossBucket"].isin(["High", "Extreme"])
+            )
+        ].copy(),
+        "WeekendHours": bt[pd.to_numeric(bt.get("IsWeekend"), errors="coerce").fillna(0).eq(1)].copy(),
+        "HolidayHours": bt[pd.to_numeric(bt.get("IsHoliday"), errors="coerce").fillna(0).eq(1)].copy(),
+        "LongHorizonDays8to16": bt[forecast_day.between(8, 16)].copy(),
+    }
+
+
+def _seasonal_scorecard(bt: pd.DataFrame, event_slices: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    frames = [
+        _scorecard_slice(bt, "Overall", "all", "all"),
+    ]
+    slice_values = {
+        "PeakWindowHours14to18": "peak_window",
+        "HotPeakDailyMax90Plus": "hot_peak",
+        "ShoulderSeasonHeatTransition": "shoulder_season_heat_transition",
+        "CloudSolarMidday": "cloud_solar_midday",
+        "WeekendHours": "weekend",
+        "HolidayHours": "holiday",
+        "LongHorizonDays8to16": "days8to16",
+    }
+    frames.extend(
+        _scorecard_slice(frame, name, "event_slice", slice_values.get(name, name))
+        for name, frame in event_slices.items()
+    )
+    frames.extend(_scorecard_by_values(bt, "Season", "ScoredSeason"))
+    frames.extend(_scorecard_by_values(bt, "Replay_Origin_Season", "OriginSeason"))
+    frames.extend(_scorecard_by_values(bt, "Replay_Horizon_Bucket", "Horizon"))
+    frames = [frame for frame in frames if frame is not None and not frame.empty]
+    return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+
+
+def _weather_realism_metric_frame(bt: pd.DataFrame, use_previous_run_weather: bool) -> pd.DataFrame:
+    required = "WeatherRealism_Final_Backtest_Forecast_MWH"
+    if bt.empty or required not in bt.columns:
+        return pd.DataFrame()
+    eligible = bt[pd.to_numeric(bt[required], errors="coerce").notna()].copy()
+    if eligible.empty:
+        return pd.DataFrame()
+    if not use_previous_run_weather:
+        eligible["WeatherInputBasis"] = "realized_historical_weather"
+        return eligible
+
+    mappings = {
+        "WeatherRealism_Raw_Forecast_MWH": "Raw_Forecast_MWH",
+        "WeatherRealism_XGB_Pred_MWH": "XGB_Pred_MWH",
+        "WeatherRealism_LGB_Pred_MWH": "LGB_Pred_MWH",
+        "WeatherRealism_CatBoost_Pred_MWH": "CatBoost_Pred_MWH",
+        "WeatherRealism_Prophet_Pred_MWH": "Prophet_Pred_MWH",
+        "WeatherRealism_Residual_MWH": "Residual_MWH",
+        "WeatherRealism_Final_Backtest_Forecast_MWH": "Final_Backtest_Forecast_MWH",
+        "WeatherRealism_Final_Residual_MWH": "Final_Residual_MWH",
+        "WeatherRealism_Final_AbsError_MWH": "Final_AbsError_MWH",
+        "WeatherRealism_Final_APE": "Final_APE",
+        "WeatherRealism_Temperature": "Temperature",
+        "WeatherRealism_Temperature_DailyMax": "Temperature_DailyMax",
+        "WeatherRealism_CloudCover_Norm": "CloudCover_Norm",
+        "WeatherRealism_BTM_Solar_Proxy_MW": "BTM_Solar_Proxy_MW",
+        "WeatherRealism_BTM_Solar_Loss_From_ClearSky_MW": "BTM_Solar_Loss_From_ClearSky_MW",
+        "WeatherRealism_Midday_Overcast_Solar_Loss_MW": "Midday_Overcast_Solar_Loss_MW",
+    }
+    for source, target in mappings.items():
+        if source in eligible.columns:
+            eligible[target] = eligible[source]
+    # Only the component models and the Final (stage-selected) forecast are genuinely
+    # recomputed on forecast weather in the realism path. The intermediate correction
+    # stages below are NOT recomputed, so reporting their (realized-weather) values under
+    # the production-weather basis is misleading -- null them so the scorecard omits them.
+    # Weather-independent baselines are left intact.
+    not_recomputed_stage_cols = [
+        "Targeted_Meta_Adjusted_Forecast_MWH",
+        "Residual_Calibrated_Forecast_MWH",
+        "Heat_Adjusted_Forecast_MWH",
+        "Warm_Ramp_Adjusted_Forecast_MWH",
+        "Cloud_Solar_Adjusted_Forecast_MWH",
+        "Peak_Risk_Adjusted_Forecast_MWH",
+        "Recent_Corrected_Forecast_MWH",
+        "Stage_Selected_Forecast_MWH",
+    ]
+    for col in not_recomputed_stage_cols:
+        if col in eligible.columns:
+            eligible[col] = np.nan
+    eligible["WeatherInputBasis"] = "previous_run_fixed_lead_weather"
+    return prep_backtest(eligible)
+
+
+def _weather_realism_scorecard(bt: pd.DataFrame) -> pd.DataFrame:
+    frames = []
+    for use_previous in [False, True]:
+        frame = _weather_realism_metric_frame(bt, use_previous)
+        if frame.empty:
+            continue
+        scorecard = _seasonal_scorecard(frame, _event_slices(frame))
+        if scorecard.empty:
+            continue
+        scorecard.insert(0, "WeatherInputBasis", frame["WeatherInputBasis"].iloc[0])
+        frames.append(scorecard)
+    return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+
+
+def _weather_input_error_by_lead(bt: pd.DataFrame) -> pd.DataFrame:
+    specs = {
+        "Temperature": ("Temperature", "WeatherRealism_Temperature"),
+        "Temperature_DailyMax": ("Temperature_DailyMax", "WeatherRealism_Temperature_DailyMax"),
+        "CloudCover_Norm": ("CloudCover_Norm", "WeatherRealism_CloudCover_Norm"),
+        "BTM_Solar_Proxy_MW": ("BTM_Solar_Proxy_MW", "WeatherRealism_BTM_Solar_Proxy_MW"),
+        "BTM_Solar_Loss_From_ClearSky_MW": (
+            "BTM_Solar_Loss_From_ClearSky_MW",
+            "WeatherRealism_BTM_Solar_Loss_From_ClearSky_MW",
+        ),
+    }
+    group_cols = ["Weather_Variable", "Forecast_Weather_Lead_Days", "Replay_Horizon_Bucket"]
+    frames = []
+    for variable, (realized_col, previous_col) in specs.items():
+        lead_col = "WeatherRealism_Forecast_Weather_Lead_Days"
+        if not {realized_col, previous_col, lead_col}.issubset(bt.columns):
+            continue
+        work = bt[[realized_col, previous_col, lead_col, "Replay_Horizon_Bucket"]].copy()
+        work["Realized_Value"] = pd.to_numeric(work[realized_col], errors="coerce")
+        work["Previous_Run_Value"] = pd.to_numeric(work[previous_col], errors="coerce")
+        work["Forecast_Weather_Lead_Days"] = pd.to_numeric(work[lead_col], errors="coerce")
+        work = work.dropna(subset=["Realized_Value", "Previous_Run_Value", "Forecast_Weather_Lead_Days"])
+        if work.empty:
+            continue
+        work["Weather_Variable"] = variable
+        work["Weather_Error"] = work["Previous_Run_Value"] - work["Realized_Value"]
+        work["Abs_Weather_Error"] = work["Weather_Error"].abs()
+        frames.append(work[group_cols + ["Realized_Value", "Previous_Run_Value", "Weather_Error", "Abs_Weather_Error"]])
+    if not frames:
+        return pd.DataFrame()
+    detail = pd.concat(frames, ignore_index=True, sort=False)
+    return detail.groupby(group_cols, dropna=False).agg(
+        N=("Weather_Error", "size"),
+        Realized_Mean=("Realized_Value", "mean"),
+        Previous_Run_Mean=("Previous_Run_Value", "mean"),
+        Bias_PreviousMinusRealized=("Weather_Error", "mean"),
+        MAE_PreviousVsRealized=("Abs_Weather_Error", "mean"),
+        P90_AbsError=("Abs_Weather_Error", lambda values: float(values.quantile(0.90))),
+    ).reset_index()
+
+
+def _bucket_abs(values: pd.Series, bins: list[float], labels: list[str]) -> pd.Series:
+    v = pd.to_numeric(values, errors="coerce").abs()
+    return pd.cut(v, bins=bins, labels=labels, include_lowest=True).astype("object")
+
+
+def _weather_event_label(row: pd.Series) -> str:
+    forecast_day = pd.to_numeric(pd.Series([row.get("Forecast_Day")]), errors="coerce").iloc[0]
+    hour = pd.to_numeric(pd.Series([row.get("Hour")]), errors="coerce").iloc[0]
+    daily_max = pd.to_numeric(pd.Series([row.get("Temperature_DailyMax")]), errors="coerce").iloc[0]
+    solar_loss = pd.to_numeric(pd.Series([row.get("BTM_Solar_Loss_From_ClearSky_MW")]), errors="coerce").iloc[0]
+    cloud = pd.to_numeric(pd.Series([row.get("CloudCover_Norm")]), errors="coerce").iloc[0]
+    if np.isfinite(cloud) and cloud > 1.5:
+        cloud = cloud / 100.0
+    season = str(row.get("Season"))
+    hour_group = str(row.get("HourGroup"))
+    if np.isfinite(forecast_day) and forecast_day >= 8:
+        return "long_horizon_days8to16"
+    if hour_group == "Peak" and np.isfinite(daily_max) and daily_max >= 90.0:
+        return "hot_peak"
+    if hour_group == "Midday" and (
+        (np.isfinite(solar_loss) and solar_loss >= 1.25) or (np.isfinite(cloud) and cloud >= 0.60)
+    ):
+        return "cloudy_solar_loss_midday"
+    if season in {"Spring", "Fall"} and np.isfinite(hour) and 12 <= hour <= 22 and np.isfinite(daily_max) and 75.0 <= daily_max <= 93.0:
+        return "shoulder_heat_transition"
+    if int(pd.to_numeric(pd.Series([row.get("IsHoliday", 0)]), errors="coerce").fillna(0).iloc[0]) == 1:
+        return "holiday"
+    if int(pd.to_numeric(pd.Series([row.get("IsWeekend", 0)]), errors="coerce").fillna(0).iloc[0]) == 1:
+        return "weekend"
+    return "normal"
+
+
+def _weather_error_driver(row: pd.Series) -> str:
+    temp = abs(float(row.get("Weather_DailyMaxTemp_Error_F", np.nan)))
+    cloud = abs(float(row.get("Weather_CloudCover_Error_Norm", np.nan)))
+    solar = abs(float(row.get("Weather_Solar_Loss_Error_MW", np.nan)))
+    triggers = []
+    if np.isfinite(temp) and temp >= 5.0:
+        triggers.append(("temp", temp / 5.0))
+    if np.isfinite(cloud) and cloud >= 0.35:
+        triggers.append(("cloud", cloud / 0.35))
+    if np.isfinite(solar) and solar >= 3.0:
+        triggers.append(("solar_loss", solar / 3.0))
+    if len(triggers) >= 2:
+        return "multi_weather_error"
+    if len(triggers) == 1:
+        return triggers[0][0]
+
+    medium = []
+    if np.isfinite(temp) and temp >= 2.0:
+        medium.append(("temp_moderate", temp / 2.0))
+    if np.isfinite(cloud) and cloud >= 0.20:
+        medium.append(("cloud_moderate", cloud / 0.20))
+    if np.isfinite(solar) and solar >= 1.25:
+        medium.append(("solar_loss_moderate", solar / 1.25))
+    if not medium:
+        return "low_weather_error"
+    return max(medium, key=lambda item: item[1])[0]
+
+
+def _add_weather_input_sensitivity_columns(bt: pd.DataFrame) -> pd.DataFrame:
+    out = bt.copy()
+    required = {"WeatherRealism_Final_Backtest_Forecast_MWH", "Final_Backtest_Forecast_MWH"}
+    if not required.issubset(out.columns):
+        return out
+
+    pairs = {
+        "Weather_Temp_Error_F": ("WeatherRealism_Temperature", "Temperature"),
+        "Weather_DailyMaxTemp_Error_F": ("WeatherRealism_Temperature_DailyMax", "Temperature_DailyMax"),
+        "Weather_CloudCover_Error_Norm": ("WeatherRealism_CloudCover_Norm", "CloudCover_Norm"),
+        "Weather_Solar_Proxy_Error_MW": ("WeatherRealism_BTM_Solar_Proxy_MW", "BTM_Solar_Proxy_MW"),
+        "Weather_Solar_Loss_Error_MW": ("WeatherRealism_BTM_Solar_Loss_From_ClearSky_MW", "BTM_Solar_Loss_From_ClearSky_MW"),
+        "Weather_Midday_Solar_Loss_Error_MW": ("WeatherRealism_Midday_Overcast_Solar_Loss_MW", "Midday_Overcast_Solar_Loss_MW"),
+    }
+    for out_col, (previous_col, realized_col) in pairs.items():
+        if {previous_col, realized_col}.issubset(out.columns):
+            out[out_col] = pd.to_numeric(out[previous_col], errors="coerce") - pd.to_numeric(out[realized_col], errors="coerce")
+
+    prev_forecast = pd.to_numeric(out["WeatherRealism_Final_Backtest_Forecast_MWH"], errors="coerce")
+    realized_forecast = pd.to_numeric(out["Final_Backtest_Forecast_MWH"], errors="coerce")
+    actual = pd.to_numeric(out.get("Actual_MWH"), errors="coerce")
+    out["Weather_Input_Forecast_Delta_MWH"] = prev_forecast - realized_forecast
+    out["Weather_Input_Residual_Delta_MWH"] = (actual - prev_forecast) - (actual - realized_forecast)
+    out["Weather_Input_AbsError_Delta_MWH"] = (actual - prev_forecast).abs() - (actual - realized_forecast).abs()
+    out["Weather_Input_PctAbsError_Delta"] = np.where(
+        actual.abs() > 1e-9,
+        out["Weather_Input_AbsError_Delta_MWH"] / actual.abs() * 100.0,
+        np.nan,
+    )
+
+    lead = pd.to_numeric(out.get("WeatherRealism_Forecast_Weather_Lead_Days"), errors="coerce")
+    out["Weather_Forecast_Lead_Bucket"] = pd.cut(
+        lead,
+        bins=[-np.inf, 1, 3, 7, np.inf],
+        labels=["day1", "days2to3", "days4to7", "days8plus"],
+        include_lowest=True,
+    ).astype("object")
+    if "Weather_DailyMaxTemp_Error_F" in out.columns:
+        out["Weather_DailyMaxTemp_AbsError_Bucket"] = _bucket_abs(
+            out["Weather_DailyMaxTemp_Error_F"],
+            [-np.inf, 2.0, 5.0, 8.0, np.inf],
+            ["0-2F", "2-5F", "5-8F", "8F+"],
+        )
+    if "Weather_CloudCover_Error_Norm" in out.columns:
+        out["Weather_CloudCover_AbsError_Bucket"] = _bucket_abs(
+            out["Weather_CloudCover_Error_Norm"],
+            [-np.inf, 0.20, 0.35, 0.60, np.inf],
+            ["0-20pp", "20-35pp", "35-60pp", "60pp+"],
+        )
+    if "Weather_Solar_Loss_Error_MW" in out.columns:
+        out["Weather_SolarLoss_AbsError_Bucket"] = _bucket_abs(
+            out["Weather_Solar_Loss_Error_MW"],
+            [-np.inf, 1.25, 3.0, 6.0, np.inf],
+            ["0-1.25MW", "1.25-3MW", "3-6MW", "6MW+"],
+        )
+
+    eligible = pd.to_numeric(out["WeatherRealism_Final_Backtest_Forecast_MWH"], errors="coerce").notna()
+    out.loc[eligible, "Weather_Input_Event_Slice"] = out.loc[eligible].apply(_weather_event_label, axis=1)
+    out.loc[eligible, "Weather_Input_Risk_Class"] = out.loc[eligible].apply(_weather_error_driver, axis=1)
+    return out
+
+
+def _weather_input_sensitivity_detail(bt: pd.DataFrame) -> pd.DataFrame:
+    work = _add_weather_input_sensitivity_columns(bt)
+    required = "WeatherRealism_Final_Backtest_Forecast_MWH"
+    if required not in work.columns:
+        return pd.DataFrame()
+    detail = work[pd.to_numeric(work[required], errors="coerce").notna()].copy()
+    if detail.empty:
+        return pd.DataFrame()
+    cols = [
+        "DT",
+        "Replay_Origin_ID",
+        "Replay_Origin_DT",
+        "Replay_Origin_Season",
+        "Season",
+        "Forecast_Day",
+        "Forecast_Lead_Hour",
+        "WeatherRealism_Forecast_Weather_Lead_Days",
+        "Replay_Horizon_Bucket",
+        "Hour",
+        "HourGroup",
+        "Weather_Forecast_Lead_Bucket",
+        "Weather_Input_Event_Slice",
+        "Weather_Input_Risk_Class",
+        "Actual_MWH",
+        "Final_Backtest_Forecast_MWH",
+        "WeatherRealism_Final_Backtest_Forecast_MWH",
+        "Final_AbsError_MWH",
+        "WeatherRealism_Final_AbsError_MWH",
+        "Weather_Input_Forecast_Delta_MWH",
+        "Weather_Input_Residual_Delta_MWH",
+        "Weather_Input_AbsError_Delta_MWH",
+        "Weather_Input_PctAbsError_Delta",
+        "Temperature_DailyMax",
+        "WeatherRealism_Temperature_DailyMax",
+        "Weather_DailyMaxTemp_Error_F",
+        "Weather_DailyMaxTemp_AbsError_Bucket",
+        "CloudCover_Norm",
+        "WeatherRealism_CloudCover_Norm",
+        "Weather_CloudCover_Error_Norm",
+        "Weather_CloudCover_AbsError_Bucket",
+        "BTM_Solar_Loss_From_ClearSky_MW",
+        "WeatherRealism_BTM_Solar_Loss_From_ClearSky_MW",
+        "Weather_Solar_Loss_Error_MW",
+        "Weather_SolarLoss_AbsError_Bucket",
+    ]
+    return detail[[c for c in cols if c in detail.columns]].copy()
+
+
+def _weather_sensitivity_metrics(group: pd.DataFrame) -> pd.Series:
+    actual = pd.to_numeric(group["Actual_MWH"], errors="coerce")
+    realized_forecast = pd.to_numeric(group["Final_Backtest_Forecast_MWH"], errors="coerce")
+    previous_forecast = pd.to_numeric(group["WeatherRealism_Final_Backtest_Forecast_MWH"], errors="coerce")
+    mask = actual.notna() & realized_forecast.notna() & previous_forecast.notna()
+    if not mask.any():
+        return pd.Series(dtype=float)
+    actual = actual[mask]
+    realized_forecast = realized_forecast[mask]
+    previous_forecast = previous_forecast[mask]
+    realized_resid = actual - realized_forecast
+    previous_resid = actual - previous_forecast
+    realized_abs = realized_resid.abs()
+    previous_abs = previous_resid.abs()
+    abs_delta = previous_abs - realized_abs
+    out = {
+        "N": int(mask.sum()),
+        "RealizedWeather_MAE_MWH": float(realized_abs.mean()),
+        "PreviousRunWeather_MAE_MWH": float(previous_abs.mean()),
+        "WeatherInput_MAE_Delta_MWH": float(abs_delta.mean()),
+        "WeatherInput_MAPE_Delta_PCT": float(((previous_abs - realized_abs) / actual.abs() * 100.0).replace([np.inf, -np.inf], np.nan).mean()),
+        "PreviousRunWeather_Bias_MWH": float(previous_resid.mean()),
+        "RealizedWeather_Bias_MWH": float(realized_resid.mean()),
+        "P90_WeatherInput_AbsError_Delta_MWH": float(abs_delta.quantile(0.90)),
+        "WeatherInput_Harm_Rate_PCT": float((abs_delta > 0).mean() * 100.0),
+        "Forecast_Delta_Bias_MWH": float((previous_forecast - realized_forecast).mean()),
+        "P90_Abs_Forecast_Delta_MWH": float((previous_forecast - realized_forecast).abs().quantile(0.90)),
+    }
+    for col in ["Weather_DailyMaxTemp_Error_F", "Weather_CloudCover_Error_Norm", "Weather_Solar_Loss_Error_MW"]:
+        if col in group.columns:
+            values = pd.to_numeric(group.loc[mask, col], errors="coerce")
+            out[f"Mean_{col}"] = float(values.mean())
+            out[f"MAE_{col}"] = float(values.abs().mean())
+            out[f"P90_Abs_{col}"] = float(values.abs().quantile(0.90))
+    return pd.Series(out)
+
+
+def _weather_input_sensitivity_scorecard(bt: pd.DataFrame) -> pd.DataFrame:
+    detail = _weather_input_sensitivity_detail(bt)
+    if detail.empty:
+        return pd.DataFrame()
+    frames = []
+
+    def add_slice(name: str, group: str, value: str, frame: pd.DataFrame):
+        if frame.empty:
+            return
+        metrics = _weather_sensitivity_metrics(frame)
+        if metrics.empty:
+            return
+        row = metrics.to_frame().T
+        row.insert(0, "Slice", name)
+        row.insert(1, "SliceGroup", group)
+        row.insert(2, "SliceValue", value)
+        frames.append(row)
+
+    add_slice("Overall", "all", "all", detail)
+    for col, prefix in [
+        ("Weather_Forecast_Lead_Bucket", "WeatherLead"),
+        ("Replay_Horizon_Bucket", "Horizon"),
+        ("Forecast_Day", "ForecastDay"),
+        ("Season", "ScoredSeason"),
+        ("Replay_Origin_Season", "OriginSeason"),
+        ("HourGroup", "HourGroup"),
+        ("Weather_Input_Event_Slice", "Event"),
+        ("Weather_Input_Risk_Class", "RiskClass"),
+        ("Weather_DailyMaxTemp_AbsError_Bucket", "DailyMaxTempError"),
+        ("Weather_CloudCover_AbsError_Bucket", "CloudCoverError"),
+        ("Weather_SolarLoss_AbsError_Bucket", "SolarLossError"),
+    ]:
+        if col not in detail.columns:
+            continue
+        for value, group_df in detail.groupby(col, dropna=False):
+            label = "<missing>" if pd.isna(value) else str(value)
+            add_slice(f"{prefix}:{label}", col, label, group_df)
+
+    for keys, prefix in [
+        (["Weather_Forecast_Lead_Bucket", "Weather_Input_Event_Slice"], "LeadEvent"),
+        (["Replay_Horizon_Bucket", "Weather_Input_Risk_Class"], "HorizonRiskClass"),
+        (["Season", "Weather_Input_Risk_Class"], "SeasonRiskClass"),
+    ]:
+        if not all(k in detail.columns for k in keys):
+            continue
+        for values, group_df in detail.groupby(keys, dropna=False):
+            values_tuple = values if isinstance(values, tuple) else (values,)
+            label = "|".join("<missing>" if pd.isna(v) else str(v) for v in values_tuple)
+            add_slice(f"{prefix}:{label}", "+".join(keys), label, group_df)
+
+    return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+
+
+def _scorecard_summary(bt: pd.DataFrame, coverage: pd.DataFrame, config: dict) -> dict[str, Any]:
+    cfg = _replay_cfg(config)
+    min_per_season = _as_int(cfg.get("scorecard_min_origins_per_season"), 2)
+    seasons = ["Winter", "Spring", "Summer", "Fall"]
+    season_counts = (
+        coverage["Replay_Origin_Season"].value_counts(dropna=False).to_dict()
+        if not coverage.empty and "Replay_Origin_Season" in coverage.columns
+        else {}
+    )
+    by_season = {season: int(season_counts.get(season, 0)) for season in seasons}
+    return {
+        "origin_selection": str(cfg.get("origin_selection", "seasonal_balanced")),
+        "origins_per_season_target": _as_int(cfg.get("origins_per_season"), 3),
+        "scorecard_min_origins_per_season": min_per_season,
+        "scorecard_ready": bool(all(count >= min_per_season for count in by_season.values())),
+        "origin_count_by_season": by_season,
+        "scored_seasons": sorted(str(x) for x in bt.get("Season", pd.Series(dtype=object)).dropna().unique()),
+    }
+
+
+def build_rolling_origin_replay_bundle(replay_df: pd.DataFrame, config: dict) -> dict[str, Any]:
+    """Build focused replay diagnostics for horizon, peak, weather, and solar risk slices."""
+    if replay_df is None or replay_df.empty:
+        return {
+            "rolling_origin_replay_summary": {
+                "row_count": 0,
+                "origin_count": 0,
+                "weather_input_basis": "historical weather features; archived forecast weather not configured",
+            }
+        }
+
+    bt = _add_weather_input_sensitivity_columns(_ensure_origin_context(prep_backtest(replay_df)))
+    coverage = _origin_coverage(bt)
+    event_slices = _event_slices(bt)
+    peak_window = event_slices["PeakWindowHours14to18"]
+    hot_peak = event_slices["HotPeakDailyMax90Plus"]
+    shoulder_heat = event_slices["ShoulderSeasonHeatTransition"]
+    cloud_solar_midday = event_slices["CloudSolarMidday"]
+    weekend = event_slices["WeekendHours"]
+    holiday = event_slices["HolidayHours"]
+    long_horizon = event_slices["LongHorizonDays8to16"]
+    weather_realism_count = int(pd.to_numeric(
+        bt.get("WeatherRealism_Final_Backtest_Forecast_MWH", pd.Series(np.nan, index=bt.index)),
+        errors="coerce",
+    ).notna().sum())
+
+    summary = metrics_summary(bt)
+    summary.update({
+        "origin_count": int(bt["Replay_Origin_ID"].nunique()) if "Replay_Origin_ID" in bt.columns else 0,
+        "horizon_buckets": sorted(str(x) for x in bt.get("Replay_Horizon_Bucket", pd.Series(dtype=object)).dropna().unique()),
+        "weather_input_basis": (
+            "historical weather features primary; previous-run fixed-lead forecast weather comparison available for Days1to7"
+            if weather_realism_count
+            else "historical weather features; previous-run forecast weather comparison unavailable"
+        ),
+        "weather_realism_rows": weather_realism_count,
+        "weather_realism_max_previous_days": int(_weather_realism_cfg(config).get("max_previous_days", 7)),
+        # Leads beyond the realism window are NOT validated against operational forecast
+        # weather; their point forecasts (and the weather-uncertainty hedge sizing at those
+        # leads) rest on extrapolation, not measured forecast-weather error.
+        "weather_realism_validated_horizon_days": "1-{}".format(
+            min(int(_weather_realism_cfg(config).get("max_previous_days", 7)),
+                int(_weather_realism_cfg(config).get("provider_max_days", 7)))
+        ),
+        "weather_realism_unvalidated_horizon_days": "{}-{}".format(
+            min(int(_weather_realism_cfg(config).get("max_previous_days", 7)),
+                int(_weather_realism_cfg(config).get("provider_max_days", 7))) + 1,
+            int(((config.get("forecast", {}) or {}).get("horizons", {}) or {}).get("full_days", 16)),
+        ),
+        "recent_residual_basis": "pre-origin correction window only",
+    })
+    summary.update(_scorecard_summary(bt, coverage, config))
+    return {
+        "rolling_origin_replay_summary": summary,
+        "rolling_origin_replay_results": bt,
+        "rolling_origin_replay_origin_coverage": coverage,
+        "rolling_origin_replay_scorecard": _seasonal_scorecard(bt, event_slices),
+        "rolling_origin_replay_weather_realism_scorecard": _weather_realism_scorecard(bt),
+        "rolling_origin_replay_weather_input_error_by_lead": _weather_input_error_by_lead(bt),
+        "rolling_origin_replay_weather_input_sensitivity_scorecard": _weather_input_sensitivity_scorecard(bt),
+        "rolling_origin_replay_weather_input_sensitivity_detail": _weather_input_sensitivity_detail(bt),
+        "rolling_origin_replay_stage_metrics": build_forecast_stage_metrics(bt),
+        "rolling_origin_replay_origin_metrics_by_stage": build_metrics_by_group_by_stage(
+            bt, ["Replay_Origin_ID", "Replay_Origin_DT", "Replay_Origin_Year", "Replay_Origin_Season", "Replay_Origin_Month"], min_count=1,
+        ),
+        "rolling_origin_replay_scored_season_metrics_by_stage": build_metrics_by_group_by_stage(
+            bt, ["Season", "Replay_Horizon_Bucket"], min_count=1,
+        ),
+        "rolling_origin_replay_origin_season_metrics_by_stage": build_metrics_by_group_by_stage(
+            bt, ["Replay_Origin_Season", "Replay_Horizon_Bucket"], min_count=1,
+        ),
+        "rolling_origin_replay_horizon_metrics_by_stage": build_metrics_by_group_by_stage(
+            bt, ["Replay_Horizon_Bucket"], min_count=1,
+        ),
+        "rolling_origin_replay_peak_window_metrics_by_stage": build_metrics_by_group_by_stage(
+            peak_window, ["Replay_Horizon_Bucket", "Hour"], min_count=1,
+        ),
+        "rolling_origin_replay_hot_peak_metrics_by_stage": build_metrics_by_group_by_stage(
+            hot_peak, ["Replay_Horizon_Bucket", "DailyMaxTempBucket", "Hour"], min_count=1,
+        ),
+        "rolling_origin_replay_shoulder_heat_metrics_by_stage": build_metrics_by_group_by_stage(
+            shoulder_heat, ["Replay_Horizon_Bucket", "Season", "DailyMaxTempBucket", "HourGroup"], min_count=1,
+        ),
+        "rolling_origin_replay_cloud_solar_midday_metrics_by_stage": build_metrics_by_group_by_stage(
+            cloud_solar_midday, ["Replay_Horizon_Bucket", "CloudCoverBucket", "SolarLossBucket", "Hour"], min_count=1,
+        ),
+        "rolling_origin_replay_weekend_metrics_by_stage": build_metrics_by_group_by_stage(
+            weekend, ["Replay_Horizon_Bucket", "Season", "HourGroup"], min_count=1,
+        ),
+        "rolling_origin_replay_holiday_metrics_by_stage": build_metrics_by_group_by_stage(
+            holiday, ["Replay_Horizon_Bucket", "Season", "HourGroup"], min_count=1,
+        ),
+        "rolling_origin_replay_long_horizon_metrics_by_stage": build_metrics_by_group_by_stage(
+            long_horizon, ["Season", "HourGroup", "DailyMaxTempBucket"], min_count=1,
+        ),
+        "rolling_origin_replay_daily_peak_miss_by_stage": _daily_peak_by_origin(bt),
+    }
