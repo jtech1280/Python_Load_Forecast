@@ -62,9 +62,11 @@ def _move_to_device(data: Any, target_device: str) -> Any:
     """
     if target_device == "cpu":
         # Ensure data is on CPU (numpy/pandas are already CPU)
-        if hasattr(data, "get"):  # CuPy array
+        if isinstance(data, (pd.DataFrame, pd.Series)):
+            return data
+        if hasattr(data, "get") and data.__class__.__module__.startswith("cupy"):  # CuPy array
             try:
-                return np.asarray(data)
+                return np.asarray(data.get())
             except Exception:
                 return data
         return data
