@@ -5,6 +5,7 @@ import pandas as pd
 
 from forecasting.model.ensemble import blend_predictions
 from forecasting.model.prophet_model import predict_prophet
+from forecasting.utils.device_utils import prepare_for_prediction
 
 
 def _last(values: list[float], n: int) -> float:
@@ -88,8 +89,13 @@ def recursive_forecast(
         row["MWH_SameHour7DayMean"] = _same_hour_7day_mean(base_series)
 
         X_row = _prepare_x(row, features)
-        xgb_p = float(xgb_model.predict(X_row)[0])
-        lgb_p = float(lgb_model.predict(X_row)[0])
+        
+        # Prepare data for GPU/CPU consistency with trained models
+        X_row_xgb = prepare_for_prediction(X_row, xgb_model)
+        X_row_lgb = prepare_for_prediction(X_row, lgb_model)
+        
+        xgb_p = float(xgb_model.predict(X_row_xgb)[0])
+        lgb_p = float(lgb_model.predict(X_row_lgb)[0])
         prop_p = np.nan
         if "Prophet_Pred_MWH" in prophet_components.columns and i < len(prophet_components):
             prop_p = float(prophet_components.loc[i, "Prophet_Pred_MWH"])
@@ -97,7 +103,8 @@ def recursive_forecast(
         cat_p = np.nan
         if catboost_model is not None:
             try:
-                cat_p = float(catboost_model.predict(X_row)[0])
+                X_row_cat = prepare_for_prediction(X_row, catboost_model)
+                cat_p = float(catboost_model.predict(X_row_cat)[0])
             except Exception as exc:
                 if i == 0:
                     print(f"WARNING: CatBoost prediction failed; continuing without CatBoost benchmark. Details: {exc}")
