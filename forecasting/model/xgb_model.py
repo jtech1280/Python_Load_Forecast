@@ -12,6 +12,7 @@ import xgboost as xgb
 
 from forecasting.features.intraday_load_features import INTRADAY_LOAD_FEATURES
 from forecasting.utils.performance import resolve_n_jobs
+from forecasting.utils.device_utils import ensure_device_consistency
 
 BASE_FEATURES = [
     # Weather response. Tree ensembles are robust to correlated split candidates, and
@@ -378,6 +379,10 @@ def train_xgb(df: pd.DataFrame, features: list[str] | None = None, config: dict 
             }
             if actual_backend in {"cuda", "gpu_hist"}:
                 print(f"XGBoost GPU training succeeded using backend '{actual_backend}'.")
+            
+            # Verify device consistency to catch GPU/CPU mismatch issues early
+            ensure_device_consistency(model, cfg)
+            
             return model, features
         except Exception as exc:
             msg = f"{backend_name}: {type(exc).__name__}: {exc}"
