@@ -32,8 +32,14 @@ def _scorecard_path(output_dir: Path, label: str | None) -> Path:
 
 
 def _num(row: pd.Series, col: str) -> float | None:
-    value = pd.to_numeric(pd.Series([row.get(col)]), errors="coerce").iloc[0]
-    return None if pd.isna(value) else float(value)
+    """Convert column to numeric, return None if NaN (optimized)."""
+    try:
+        value = float(row.get(col))
+        return value if pd.notna(value) else None
+    except (TypeError, ValueError):
+        # Fall back to pandas conversion if direct conversion fails
+        value = pd.to_numeric(pd.Series([row.get(col)]), errors="coerce").iloc[0]
+        return None if pd.isna(value) else float(value)
 
 
 def main() -> int:
@@ -46,10 +52,13 @@ def main() -> int:
     output_dir = Path(args.output_dir)
     path = _scorecard_path(output_dir, args.label)
     df = pd.read_csv(path)
+    
+    # Pre-convert Test column to string for faster comparison
+    df["Test"] = df["Test"].astype(str)
 
     rows = []
     for test in KEY_TESTS:
-        match = df[df["Test"].astype(str).eq(test)]
+        match = df[df["Test"].eq(test)]
         if match.empty:
             continue
         row = match.iloc[0]

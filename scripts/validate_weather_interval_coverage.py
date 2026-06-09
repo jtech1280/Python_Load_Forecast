@@ -35,17 +35,16 @@ def _latest_replay_label(output_dir: Path) -> str:
     raise FileNotFoundError("No labeled rolling_origin_replay_results_*.csv file found.")
 
 
-def _hour_group(hour: int) -> str:
-    h = int(hour)
-    if 0 <= h <= 5:
-        return "Overnight"
-    if 6 <= h <= 9:
-        return "Morning"
-    if 10 <= h <= 15:
-        return "Midday"
-    if 16 <= h <= 20:
-        return "Peak"
-    return "LateEvening"
+def _hour_group(hours: np.ndarray) -> np.ndarray:
+    """Vectorized hour grouping."""
+    groups = np.empty(len(hours), dtype=object)
+    h = hours.astype(int)
+    groups[(h >= 0) & (h <= 5)] = "Overnight"
+    groups[(h >= 6) & (h <= 9)] = "Morning"
+    groups[(h >= 10) & (h <= 15)] = "Midday"
+    groups[(h >= 16) & (h <= 20)] = "Peak"
+    groups[(h >= 21) | (h < 0)] = "LateEvening"
+    return groups
 
 
 def _add_daily_max_bin(df: pd.DataFrame) -> pd.DataFrame:
@@ -60,6 +59,7 @@ def _add_daily_max_bin(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _read_replay(path: Path) -> pd.DataFrame:
+    """Read replay with optimized dtype handling."""
     df = pd.read_csv(path, low_memory=False)
     for col in ["DT", "Replay_Origin_DT", "Replay_Calibration_Start_DT", "Replay_Calibration_End_DT"]:
         if col in df.columns:
@@ -91,8 +91,16 @@ def _make_operational_weather_frame(replay: pd.DataFrame) -> pd.DataFrame:
         target = source.removeprefix("WeatherRealism_")
         work[target] = pd.to_numeric(work[source], errors="coerce")
     work["Calibrated_Forecast_MWH"] = pd.to_numeric(work["WeatherRealism_Final_Backtest_Forecast_MWH"], errors="coerce")
-    work["Hour"] = pd.to_numeric(work.get("Hour"), errors="coerce").fillna(pd.to_datetime(work["DT"]).dt.hour).astype(int)
-    work["HourGroup"] = work["Hour"].map(_hour_group)
+    
+    # Vectorized hour extraction
+    work["Hour"] = pd.to_numeric(work.get("Hour"), errors="coerce")
+    missing_hour = work["Hour"].isna()
+    if missing_hour.any():
+        work.loc[missing_hour, "Hour"] = pd.to_datetime(work.loc[missing_hour, "DT"]).dt.hour
+    work["Hour"] = work["Hour"].astype(int)
+    
+    # Vectorized hour grouping
+    work["HourGroup"] = _hour_group(work["Hour"].to_numpy())
     work["Month"] = pd.to_datetime(work["DT"]).dt.month.astype(int)
     work["Season"] = work.get("Season", np.nan)
     work["CloudSolarEventClass"] = ""
@@ -224,7 +232,7 @@ def _apply_walk_forward_conformal_weather_policy(current_detail: pd.DataFrame, b
     out["Weather_Input_Risk_Class"] = out.get("Weather_Input_Risk_Class", "none").astype(str)
     out["Replay_Horizon_Bucket"] = out.get("Replay_Horizon_Bucket", "").astype(str)
     out = out.sort_values([origin_col, "DT"]).copy()
-    origins = [origin for origin in out[origin_col].dropna().sort_values().unique()]
+    origins = sorted(out[origin_col].dropna().unique())
 
     for origin in origins:
         origin_mask = out[origin_col].eq(origin)
@@ -233,17 +241,29 @@ def _apply_walk_forward_conformal_weather_policy(current_detail: pd.DataFrame, b
             out.loc[origin_mask, "Conformal_Weather_Source"] = "insufficient_prior"
             continue
 
-        for idx, row in out.loc[origin_mask].iterrows():
+        # Vectorized conformal quantile calculation
+        origin_rows = out.loc[origin_mask].copy()
+        risk_classes = origin_rows["Weather_Input_Risk_Class"].to_numpy()
+        horizon_buckets = origin_rows["Replay_Horizon_Bucket"].to_numpy()
+        origin_indices = origin_rows.index.to_numpy()
+        
+        # Batch compute quantiles
+        quantiles = []
+        sources = []
+        for idx, (risk_class, horizon_bucket) in enumerate(zip(risk_classes, horizon_buckets)):
             q, source = _conformal_quantile(
                 calibration,
-                str(row.get("Weather_Input_Risk_Class", "none")),
-                str(row.get("Replay_Horizon_Bucket", "")),
+                str(risk_class),
+                str(horizon_bucket),
                 quantile,
                 min_group_rows,
                 min_global_rows,
             )
-            out.loc[idx, "Conformal_Weather_Band_MWH"] = q
-            out.loc[idx, "Conformal_Weather_Source"] = source
+            quantiles.append(q)
+            sources.append(source)
+        
+        out.loc[origin_indices, "Conformal_Weather_Band_MWH"] = quantiles
+        out.loc[origin_indices, "Conformal_Weather_Source"] = sources
 
     current = out["Pre_Conformal_Band_MWH"].astype(float)
     multiplier = pd.to_numeric(out.get("Weather_Input_Risk_Multiplier", 1.0), errors="coerce").replace(0.0, np.nan).fillna(1.0)
@@ -278,23 +298,42 @@ def _apply_walk_forward_conformal_weather_policy(current_detail: pd.DataFrame, b
     return out
 
 
-def _event_slice(row: pd.Series) -> str:
-    hour_group = str(row.get("HourGroup"))
-    season = str(row.get("Season"))
-    hour = pd.to_numeric(pd.Series([row.get("Hour")]), errors="coerce").iloc[0]
-    day = pd.to_numeric(pd.Series([row.get("Forecast_Day")]), errors="coerce").iloc[0]
-    temp = pd.to_numeric(pd.Series([row.get("Temperature_DailyMax")]), errors="coerce").iloc[0]
-    cloud = pd.to_numeric(pd.Series([row.get("CloudCover_Norm")]), errors="coerce").iloc[0]
-    loss = pd.to_numeric(pd.Series([row.get("BTM_Solar_Loss_From_ClearSky_MW")]), errors="coerce").iloc[0]
-    if np.isfinite(day) and day >= 8:
-        return "long_horizon_days8to16"
-    if hour_group == "Peak" and np.isfinite(temp) and temp >= 90:
-        return "hot_peak"
-    if hour_group == "Midday" and ((np.isfinite(cloud) and cloud >= 0.60) or (np.isfinite(loss) and loss >= 1.25)):
-        return "cloudy_solar_loss_midday"
-    if season in {"Spring", "Fall"} and np.isfinite(hour) and 12 <= hour <= 22 and np.isfinite(temp) and 75 <= temp <= 93:
-        return "shoulder_heat_transition"
-    return "normal"
+def _event_slice_vectorized(frame: pd.DataFrame) -> np.ndarray:
+    """Vectorized event slicing."""
+    hour_group = frame["HourGroup"].to_numpy(dtype=str)
+    season = frame["Season"].to_numpy(dtype=str)
+    hour = pd.to_numeric(frame["Hour"], errors="coerce").to_numpy(dtype=float)
+    day = pd.to_numeric(frame["Forecast_Day"], errors="coerce").to_numpy(dtype=float)
+    temp = pd.to_numeric(frame["Temperature_DailyMax"], errors="coerce").to_numpy(dtype=float)
+    cloud = pd.to_numeric(frame["CloudCover_Norm"], errors="coerce").to_numpy(dtype=float)
+    loss = pd.to_numeric(frame["BTM_Solar_Loss_From_ClearSky_MW"], errors="coerce").to_numpy(dtype=float)
+    
+    result = np.empty(len(frame), dtype=object)
+    result[:] = "normal"
+    
+    # Long horizon
+    long_horizon = np.isfinite(day) & (day >= 8)
+    result[long_horizon] = "long_horizon_days8to16"
+    
+    # Hot peak
+    hot_peak = (hour_group == "Peak") & np.isfinite(temp) & (temp >= 90)
+    result[hot_peak] = "hot_peak"
+    
+    # Cloud/solar midday
+    cloud_solar = (hour_group == "Midday") & (
+        (np.isfinite(cloud) & (cloud >= 0.60)) | (np.isfinite(loss) & (loss >= 1.25))
+    )
+    result[cloud_solar] = "cloudy_solar_loss_midday"
+    
+    # Shoulder heat
+    shoulder = (
+        np.isin(season, ["Spring", "Fall"]) & 
+        np.isfinite(hour) & (hour >= 12) & (hour <= 22) & 
+        np.isfinite(temp) & (temp >= 75) & (temp <= 93)
+    )
+    result[shoulder] = "shoulder_heat_transition"
+    
+    return result
 
 
 def _coverage_metrics(group: pd.DataFrame) -> pd.Series:
@@ -385,7 +424,10 @@ def main() -> None:
         labels=["day1", "days2to3", "days4to7", "days8plus"],
         include_lowest=True,
     ).astype("object")
-    base_detail["Interval_Event_Slice"] = base_detail.apply(_event_slice, axis=1)
+    
+    # Vectorized event slicing
+    base_detail["Interval_Event_Slice"] = _event_slice_vectorized(base_detail)
+    
     current = base_detail[base_detail["Policy"].eq("current_weather_risk")].copy()
     conformal = _apply_walk_forward_conformal_weather_policy(current, bands_cfg)
     detail = pd.concat([base_detail, conformal], ignore_index=True, sort=False)

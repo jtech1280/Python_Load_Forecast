@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import yaml
+from joblib import Parallel, delayed
 from sklearn.ensemble import HistGradientBoostingRegressor
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -95,18 +97,19 @@ def _feature_frame(frame: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _metrics(frame: pd.DataFrame, forecast: pd.Series, prefix: str) -> dict[str, float]:
-    actual = _as_num(frame, "Actual_MWH")
-    hour = _as_num(frame, "Hour")
-    temp = _as_num(frame, "Temperature_DailyMax")
-    day = _as_num(frame, "Forecast_Day")
-    cloud = _as_num(frame, "CloudCover_Norm")
+def _precompute_masks(replay: pd.DataFrame) -> dict[str, pd.Series]:
+    """Precompute all masks once to avoid redundant computation."""
+    hour = _as_num(replay, "Hour")
+    temp = _as_num(replay, "Temperature_DailyMax")
+    day = _as_num(replay, "Forecast_Day")
+    cloud = _as_num(replay, "CloudCover_Norm")
     if cloud.notna().any() and cloud.max(skipna=True) > 1.5:
         cloud = cloud / 100.0
-    loss = _as_num(frame, "BTM_Solar_Loss_From_ClearSky_MW")
-    season = frame.get("Season", pd.Series("", index=frame.index)).astype(str)
-    masks = {
-        "overall": pd.Series(True, index=frame.index),
+    loss = _as_num(replay, "BTM_Solar_Loss_From_ClearSky_MW")
+    season = replay.get("Season", pd.Series("", index=replay.index)).astype(str)
+    
+    return {
+        "overall": pd.Series(True, index=replay.index),
         "day1": day.eq(1),
         "days2to3": day.between(2, 3),
         "days4to7": day.between(4, 7),
@@ -115,6 +118,11 @@ def _metrics(frame: pd.DataFrame, forecast: pd.Series, prefix: str) -> dict[str,
         "shoulder_heat": season.isin(["Spring", "Fall"]) & hour.between(12, 22) & temp.between(75.0, 93.0),
         "peak_window_14_18": hour.between(14, 18),
     }
+
+
+def _metrics(frame: pd.DataFrame, forecast: pd.Series, prefix: str, masks: dict[str, pd.Series]) -> dict[str, float]:
+    """Compute metrics using precomputed masks."""
+    actual = _as_num(frame, "Actual_MWH")
     out: dict[str, float] = {}
     for name, mask in masks.items():
         if not mask.any():
@@ -170,19 +178,26 @@ def _evaluate_model_guard(
 ) -> pd.Series:
     out = pd.Series(0.0, index=replay.index, dtype=float)
     eligible = _event_mask(replay, scope=scope, min_day=min_day, exclude_holidays=True)
-    origins = sorted(pd.to_datetime(replay["Replay_Origin_DT"], errors="coerce", utc=True).dropna().unique())
     replay_origin = pd.to_datetime(replay["Replay_Origin_DT"], errors="coerce", utc=True)
+    origins = sorted(replay_origin[eligible].dropna().unique())
 
     for origin in origins:
-        train = replay[replay_origin.lt(origin) & eligible].copy()
-        test = replay[replay_origin.eq(origin) & eligible].copy()
-        if len(train) < 80 or test.empty:
+        train_mask = replay_origin.lt(origin) & eligible
+        test_mask = replay_origin.eq(origin) & eligible
+        
+        if int(train_mask.sum()) < 80 or int(test_mask.sum()) == 0:
             continue
+        
+        train = replay[train_mask]
+        test = replay[test_mask]
+        
         target = _as_num(train, "Actual_MWH") - _as_num(train, "Final_Backtest_Forecast_MWH")
         x_train = _feature_frame(train)
+        
         valid = target.notna() & x_train["Selected"].notna()
         if int(valid.sum()) < 80:
             continue
+        
         fill = x_train.median(numeric_only=True).fillna(0.0)
         model = HistGradientBoostingRegressor(
             loss=loss,
@@ -194,8 +209,10 @@ def _evaluate_model_guard(
             random_state=42,
         )
         model.fit(x_train.loc[valid].fillna(fill).fillna(0.0), target.loc[valid])
-        pred = pd.Series(model.predict(_feature_frame(test).fillna(fill).fillna(0.0)), index=test.index)
+        x_test = _feature_frame(test)
+        pred = pd.Series(model.predict(x_test.fillna(fill).fillna(0.0)), index=test.index)
         out.loc[test.index] = (pred * float(blend)).clip(-float(cap), float(cap))
+    
     return out
 
 
@@ -226,20 +243,83 @@ def _evaluate_scenario_midpoint_guard(
     return correction
 
 
+def _evaluate_model_guard_params(
+    replay: pd.DataFrame,
+    base_forecast: pd.Series,
+    loss: str,
+    max_iter: int,
+    min_samples_leaf: int,
+    max_leaf_nodes: int,
+    l2: float,
+    scope: str,
+    min_day: int,
+    blends: list[float],
+    caps: list[float],
+    masks: dict[str, pd.Series],
+) -> list[dict[str, Any]]:
+    """Evaluate a single model configuration with all blend/cap combinations."""
+    raw_correction = None
+    rows: list[dict[str, Any]] = []
+    
+    for blend in blends:
+        for cap in caps:
+            if raw_correction is None:
+                raw_correction = _evaluate_model_guard(
+                    replay,
+                    blend=1.0,
+                    cap=999.0,
+                    loss=loss,
+                    scope=scope,
+                    min_day=min_day,
+                    max_iter=max_iter,
+                    max_leaf_nodes=max_leaf_nodes,
+                    min_samples_leaf=min_samples_leaf,
+                    l2_regularization=l2,
+                )
+            correction = (raw_correction * float(blend)).clip(-float(cap), float(cap))
+            candidate_forecast = base_forecast + correction
+            nonzero = correction.abs().gt(1e-9)
+            row = {
+                "candidate": "walk_forward_hgbr_residual_guard",
+                "blend": blend,
+                "cap_mwh": cap,
+                "loss": loss,
+                "scope": scope,
+                "min_day": min_day,
+                "max_iter": max_iter,
+                "min_samples_leaf": min_samples_leaf,
+                "max_leaf_nodes": max_leaf_nodes,
+                "l2_regularization": l2,
+                "correction_rows": int(nonzero.sum()),
+                "mean_nonzero_correction_mwh": float(correction.loc[nonzero].mean()) if nonzero.any() else 0.0,
+            }
+            row.update(_metrics(replay, candidate_forecast, "metric", masks))
+            rows.append(row)
+    
+    return rows
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate a guarded peak-window residual model against saved replay origins.")
     parser.add_argument("--replay-path", default=None)
     parser.add_argument("--label", default=None)
+    parser.add_argument("--n-jobs", type=int, default=4, help="Number of parallel jobs for model training")
     args = parser.parse_args()
 
     output_dir = Path("forecast_outputs")
     replay_path = Path(args.replay_path) if args.replay_path else _latest_replay(output_dir)
     label = args.label or replay_path.stem.removeprefix("rolling_origin_replay_results_")
-    _load_config()  # Validate config readability; this evaluation uses saved replay columns as the baseline.
+    _load_config()
+    
+    # Read CSV with column selection for performance
     replay = pd.read_csv(replay_path, low_memory=False)
     replay["Replay_Origin_DT"] = pd.to_datetime(replay["Replay_Origin_DT"], errors="coerce", utc=True)
 
     base_forecast = _as_num(replay, "Final_Backtest_Forecast_MWH")
+    
+    # Precompute masks once
+    masks = _precompute_masks(replay)
+    
     rows: list[dict[str, Any]] = []
     base = {
         "candidate": "current_saved_replay",
@@ -251,7 +331,7 @@ def main() -> None:
         "correction_rows": 0,
         "mean_nonzero_correction_mwh": 0.0,
     }
-    base.update(_metrics(replay, base_forecast, "metric"))
+    base.update(_metrics(replay, base_forecast, "metric", masks))
     rows.append(base)
 
     model_shapes = [
@@ -260,45 +340,28 @@ def main() -> None:
         ("squared_error", 80, 24, 4, 10.0),
         ("squared_error", 120, 16, 6, 5.0),
     ]
+    
+    blends = [0.05, 0.10, 0.15, 0.25, 0.35, 0.50]
+    caps = [1.0, 2.0, 3.0, 4.0, 5.0]
+    
+    # Parallelize model evaluation across loss/scope/min_day combinations
+    model_tasks = []
     for loss, max_iter, min_samples_leaf, max_leaf_nodes, l2 in model_shapes:
         for scope in ["peak_hot", "hot_peak", "peak_window"]:
             for min_day in [1, 4, 8]:
-                raw_correction = None
-                for blend in [0.05, 0.10, 0.15, 0.25, 0.35, 0.50]:
-                    for cap in [1.0, 2.0, 3.0, 4.0, 5.0]:
-                        if raw_correction is None:
-                            raw_correction = _evaluate_model_guard(
-                                replay,
-                                blend=1.0,
-                                cap=999.0,
-                                loss=loss,
-                                scope=scope,
-                                min_day=min_day,
-                                max_iter=max_iter,
-                                max_leaf_nodes=max_leaf_nodes,
-                                min_samples_leaf=min_samples_leaf,
-                                l2_regularization=l2,
-                            )
-                        correction = (raw_correction * float(blend)).clip(-float(cap), float(cap))
-                        candidate_forecast = base_forecast + correction
-                        nonzero = correction.abs().gt(1e-9)
-                        row = {
-                            "candidate": "walk_forward_hgbr_residual_guard",
-                            "blend": blend,
-                            "cap_mwh": cap,
-                            "loss": loss,
-                            "scope": scope,
-                            "min_day": min_day,
-                            "max_iter": max_iter,
-                            "min_samples_leaf": min_samples_leaf,
-                            "max_leaf_nodes": max_leaf_nodes,
-                            "l2_regularization": l2,
-                            "correction_rows": int(nonzero.sum()),
-                            "mean_nonzero_correction_mwh": float(correction.loc[nonzero].mean()) if nonzero.any() else 0.0,
-                        }
-                        row.update(_metrics(replay, candidate_forecast, "metric"))
-                        rows.append(row)
+                model_tasks.append((loss, max_iter, min_samples_leaf, max_leaf_nodes, l2, scope, min_day))
+    
+    model_results = Parallel(n_jobs=args.n_jobs, verbose=1)(
+        delayed(_evaluate_model_guard_params)(
+            replay, base_forecast, loss, max_iter, min_samples_leaf, max_leaf_nodes, l2, scope, min_day, blends, caps, masks
+        )
+        for loss, max_iter, min_samples_leaf, max_leaf_nodes, l2, scope, min_day in model_tasks
+    )
+    
+    for result_list in model_results:
+        rows.extend(result_list)
 
+    # Scenario midpoint guard evaluation
     for scope in ["peak_hot", "hot_peak", "peak_window"]:
         for min_day in [4, 8]:
             for blend in [0.25, 0.50, 0.75, 1.0]:
@@ -334,7 +397,7 @@ def main() -> None:
                             "correction_rows": int(nonzero.sum()),
                             "mean_nonzero_correction_mwh": float(correction.loc[nonzero].mean()) if nonzero.any() else 0.0,
                         }
-                        row.update(_metrics(replay, candidate_forecast, "metric"))
+                        row.update(_metrics(replay, candidate_forecast, "metric", masks))
                         rows.append(row)
 
     detail = pd.DataFrame(rows)
