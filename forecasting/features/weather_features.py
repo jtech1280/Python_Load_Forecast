@@ -133,6 +133,33 @@ def add_weather_features(df: pd.DataFrame) -> pd.DataFrame:
     out["HeatIndex_CDD"] = (out["HeatIndexF"] - BASE_TEMP).clip(lower=0.0)
     out["Cooling_Stress"] = out["CDD"] * out["IsLikelySystemPeakHour"]
     out["DailyMax_x_PeakHour"] = out["Temperature_DailyMax"] * out["IsLikelySystemPeakHour"]
+    peak_window_14_18 = out["Hour"].between(14, 18).astype(float)
+    hot_peak_16_20 = (out["Hour"].between(16, 20) & out["Temperature_DailyMax"].ge(90.0)).astype(float)
+    non_business_hot_peak = (
+        hot_peak_16_20.eq(1.0)
+        & pd.to_numeric(out.get("IsLikelySystemPeakHour", 0), errors="coerce").fillna(0).eq(0)
+    ).astype(float)
+    daily_max_excess_90 = (out["Temperature_DailyMax"] - 90.0).clip(lower=0.0)
+    daily_max_excess_95 = (out["Temperature_DailyMax"] - 95.0).clip(lower=0.0)
+
+    # Scorecard-aligned heat interactions. The existing IsLikelySystemPeakHour
+    # excludes weekends/holidays and starts at HE16; the production gates score
+    # HE14-18 peak windows and HE16-20 hot days regardless of business-day status.
+    out["IsPeakWindow14to18"] = peak_window_14_18
+    out["IsHotPeakWindow16to20"] = hot_peak_16_20
+    out["DailyMaxTempExcess90"] = daily_max_excess_90
+    out["DailyMaxTempExcess95"] = daily_max_excess_95
+    out["DailyMax_x_PeakWindow14to18"] = out["Temperature_DailyMax"] * peak_window_14_18
+    out["CDD_x_PeakWindow14to18"] = out["CDD"] * peak_window_14_18
+    out["CDD_x_HotPeakWindow16to20"] = out["CDD"] * hot_peak_16_20
+    out["DailyMaxExcess90_x_PeakWindow14to18"] = daily_max_excess_90 * peak_window_14_18
+    out["DailyMaxExcess90_x_HotPeakWindow16to20"] = daily_max_excess_90 * hot_peak_16_20
+    out["DailyMaxExcess95_x_HotPeakWindow16to20"] = daily_max_excess_95 * hot_peak_16_20
+    out["HeatIndexCDD_x_HotPeakWindow16to20"] = out["HeatIndex_CDD"] * hot_peak_16_20
+    out["NonBusinessHotPeakWindow16to20"] = non_business_hot_peak
+    out["DailyMaxExcess90_x_NonBusinessHotPeak"] = daily_max_excess_90 * non_business_hot_peak
+    for h in range(14, 21):
+        out[f"DailyMaxExcess90_x_HE{h}"] = daily_max_excess_90 * out["Hour"].eq(h).astype(float)
     # Weather interactions that help capture cloudy/humid/rainy load shape shifts.
     out["Humidity_x_Temp"] = out["Humidity_Norm"] * out["Temperature"]
     out["Wind_x_Temp"] = out["WindSpeed_Mph"] * out["Temperature"]

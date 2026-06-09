@@ -78,7 +78,12 @@ def _as_num(x) -> pd.Series:
 
 
 def _cfg(config: dict | None) -> dict:
-    return (((config or {}).get("calibration", {}) or {}).get("weather_robustness_hedge", {}) or {})
+    raw = config or {}
+    if "calibration" in raw:
+        return ((raw.get("calibration", {}) or {}).get("weather_robustness_hedge", {}) or {})
+    if "weather_robustness_hedge" in raw:
+        return raw.get("weather_robustness_hedge", {}) or {}
+    return raw
 
 
 def _sigma_by_lead_lookup(cfg: dict) -> tuple[dict[int, float], float, float]:
@@ -95,6 +100,11 @@ def _sigma_by_lead_lookup(cfg: dict) -> tuple[dict[int, float], float, float]:
         ref_lead = max(mae_by_lead)
     sigma_ref = mae_by_lead[ref_lead] * mae_to_sigma
     return mae_by_lead, mae_to_sigma, sigma_ref
+
+
+def _bias_by_lead_lookup(cfg: dict) -> dict[int, float]:
+    raw = cfg.get("dailymax_temp_bias_by_lead_f", {}) or {}
+    return {int(k): float(v) for k, v in raw.items()}
 
 
 def _lead_series(df: pd.DataFrame, lead_col: str | None) -> pd.Series:
@@ -133,6 +143,12 @@ def apply_weather_robustness_hedge(
     cfg = _cfg(config)
     out["Weather_Robustness_Hedge_MWH"] = 0.0
     out["Weather_Robustness_Hedge_Source"] = "none"
+    out["Weather_Robustness_Jensen_MWH"] = 0.0
+    out["Weather_Robustness_Upper_MWH"] = 0.0
+    out["Weather_Robustness_Warmer_Delta_MWH"] = 0.0
+    out["Weather_Robustness_Temp_Sigma_F"] = np.nan
+    out["Weather_Robustness_Temp_Bias_Damping"] = np.nan
+    out["Weather_Robustness_Gate"] = 0
 
     if not bool(cfg.get("enabled", True)) or out.empty:
         return out
@@ -149,8 +165,11 @@ def apply_weather_robustness_hedge(
     upper_blend = float(cfg.get("upper_scenario_blend", 0.30))
     cap = float(cfg.get("cap_mwh", 16.0))
     warmer_bound_mult = float(cfg.get("max_fraction_of_warmer_delta", 1.25))
+    min_bias_damping = float(cfg.get("min_signed_bias_damping", 0.35))
+    exclude_holidays = bool(cfg.get("exclude_holidays", False))
 
     mae_by_lead, mae_to_sigma, sigma_ref = _sigma_by_lead_lookup(cfg)
+    bias_by_lead = _bias_by_lead_lookup(cfg)
     max_lead = max(mae_by_lead)
 
     def _sigma(l: float) -> float:
@@ -159,6 +178,14 @@ def apply_weather_robustness_hedge(
         li = int(round(l))
         mae = mae_by_lead.get(li, mae_by_lead[max_lead])
         return mae * mae_to_sigma
+
+    def _signed_bias(l: float) -> float:
+        if not bias_by_lead:
+            return 0.0
+        if pd.isna(l):
+            return bias_by_lead.get(max_lead, 0.0)
+        li = int(round(l))
+        return bias_by_lead.get(li, bias_by_lead.get(max_lead, 0.0))
 
     base = _as_num(out[base_col])
     warmer = _as_num(out[warmer_col])
@@ -174,16 +201,24 @@ def apply_weather_robustness_hedge(
     forecast_day = _as_num(out["Forecast_Day"]) if "Forecast_Day" in out.columns else lead
 
     sigma = lead.map(_sigma)
+    signed_bias = lead.map(_signed_bias)
     sigma2 = sigma ** 2
     sigma_norm = (sigma / sigma_ref).clip(lower=0.0)
+    # Prior previous-run replay shows the weather feed is often warm-biased at
+    # longer leads. If the point weather is already biased warm, a one-sided hot
+    # uplift overcorrects; damp the convexity hedge by that signed lead bias.
+    bias_damping = (1.0 - signed_bias.clip(lower=0.0) / sigma.replace(0.0, np.nan)).clip(
+        lower=min_bias_damping,
+        upper=1.0,
+    ).fillna(1.0)
 
     # Local curvature of the load-temperature response from the +/-deltaF scenarios.
     warmer_delta = (warmer - base)
     cooler_delta = (cooler - base)
     fpp = (warmer_delta + cooler_delta) / (scenario_delta ** 2)
 
-    jensen = 0.5 * sigma2 * fpp * jensen_scale
-    upper = upper_blend * sigma_norm * warmer_delta.clip(lower=0.0)
+    jensen = 0.5 * sigma2 * fpp * jensen_scale * bias_damping
+    upper = upper_blend * sigma_norm * warmer_delta.clip(lower=0.0) * bias_damping
 
     hedge = (jensen + upper).clip(lower=0.0, upper=cap)
     # Never exceed a small multiple of the warmer-scenario uplift itself.
@@ -194,13 +229,24 @@ def apply_weather_robustness_hedge(
         & fmax.ge(min_maxtemp)
         & forecast_day.between(min_day, max_day)
     )
+    if exclude_holidays and "IsHoliday" in out.columns:
+        is_holiday = pd.to_numeric(out["IsHoliday"], errors="coerce").fillna(0).ne(0)
+        gate = gate & ~is_holiday
     hedge = hedge.where(gate, 0.0).fillna(0.0)
 
     out["Weather_Robustness_Hedge_MWH"] = hedge
+    out["Weather_Robustness_Jensen_MWH"] = jensen.clip(lower=0.0, upper=cap).where(gate, 0.0).fillna(0.0)
+    out["Weather_Robustness_Upper_MWH"] = upper.clip(lower=0.0, upper=cap).where(gate, 0.0).fillna(0.0)
+    out["Weather_Robustness_Warmer_Delta_MWH"] = warmer_delta.clip(lower=0.0).where(gate, 0.0).fillna(0.0)
+    out["Weather_Robustness_Temp_Sigma_F"] = sigma.where(gate, np.nan)
+    out["Weather_Robustness_Temp_Bias_Damping"] = bias_damping.where(gate, np.nan)
+    out["Weather_Robustness_Gate"] = gate.astype(int)
     out["Weather_Robustness_Hedge_Source"] = np.where(
         hedge.to_numpy() > 0.0, "weather_uncertainty_peak_hedge", "none"
     )
     out[base_col] = (base + hedge).clip(lower=0.0)
+    if base_col == "Final_Backtest_Forecast_MWH" and "Final_Forecast_MWH" in out.columns:
+        out["Final_Forecast_MWH"] = out[base_col]
     for col in also_update_cols:
         if col in out.columns:
             out[col] = (_as_num(out[col]) + hedge).clip(lower=0.0)

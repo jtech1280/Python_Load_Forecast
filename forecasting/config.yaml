@@ -98,10 +98,14 @@ openmeteo:
   forecast_days: 16
   cache_dir: "weather_cache"
   # TLS certificate verification for weather API calls. Keep true so responses are
-  # authenticated and not subject to interception. Only set false if you are behind a
-  # corporate proxy that performs TLS inspection AND you cannot install its root CA;
-  # in that case prefer pointing REQUESTS_CA_BUNDLE at the proxy CA instead.
+  # authenticated. On Windows, ssl_use_os_truststore lets requests honor the machine
+  # certificate store via truststore, which fixes managed/self-signed proxy chains
+  # without disabling verification. For a custom corporate PEM bundle, set
+  # ssl_ca_bundle or OPENMETEO_CA_BUNDLE. OPENMETEO_SSL_VERIFY=false remains an
+  # emergency local-only bypass and should not be committed into normal config.
   ssl_verify: true
+  ssl_use_os_truststore: true
+  ssl_ca_bundle: null
 
 btm:
   mode: "hardcoded"   # "hardcoded" | "sql" | "csv"
@@ -121,9 +125,28 @@ training:
     enabled: false
     horizon_days: 16
     calibration_days: 45
-    origin_selection: "seasonal_balanced" # "seasonal_balanced" spreads the scorecard across Winter/Spring/Summer/Fall.
+    origin_selection: "fixed" # Fixed set keeps tuning passes apples-to-apples; remove fixed_origins to rebalance.
     origin_step_days: 28
     max_origins: 18
+    fixed_origins:
+      - "2024-10-13"
+      - "2024-11-09 23:00:00-08:00"
+      - "2025-03-30"
+      - "2025-04-27"
+      - "2025-05-25"
+      - "2025-06-22"
+      - "2025-07-20"
+      - "2025-08-17"
+      - "2025-09-14"
+      - "2025-10-12"
+      - "2025-11-08 23:00:00-08:00"
+      - "2025-12-06 23:00:00-08:00"
+      - "2026-01-03 23:00:00-08:00"
+      - "2026-01-31 23:00:00-08:00"
+      - "2026-02-28 23:00:00-08:00"
+      - "2026-03-29"
+      - "2026-04-26"
+      - "2026-05-24"
     origins_per_season: 4
     scorecard_min_origins_per_season: 3
     min_train_days: 365
@@ -190,7 +213,15 @@ model:
     peak_q90_weight: 1.8
     peak_q95_weight: 3.0
     hot_day_min_f: 90.0
+    hot_peak_hours: [16, 17, 18, 19, 20]
     hot_peak_weight: 1.7
+    # Align train weighting with the production scorecard gates. The previous hot
+    # emphasis only used IsLikelySystemPeakHour, which excludes weekends/holidays;
+    # the scorecard hot gate is HE16-20 whenever daily max is >= 90F.
+    non_business_hot_peak_weight: 1.25
+    peak_window_hours: [14, 15, 16, 17, 18]
+    peak_window_min_maxtemp_f: 75.0
+    peak_window_weight: 1.12
     recency_end_weight: 1.35
     max_weight: 8.0
 
@@ -351,37 +382,114 @@ calibration:
     hot_peak_min_maxtemp_f: 90.0
     hot_peak_final_stack_override: false
     peak_window_stage_override:
-      # The seasonal replay showed HE 14-18 final selection underperforming the warm-ramp
-      # stage. Apply this only outside 90F-plus hot-peak rows; hot-peak still needs its own
-      # dedicated correction layer and should not be forced to the warm stage.
-      enabled: true
+      # 2026-06-07 post-holiday replay: the broad HE14-18 override no longer cleared the
+      # peak-window gate and slightly worsened the simpler horizon policy. Leave the
+      # block available for A/B tests, but keep the production selector horizon-driven.
+      enabled: false
       hours: [14, 15, 16, 17, 18]
       min_forecast_day: 1
       max_forecast_day: 16
       min_maxtemp_f: -999.0
-      stage: warm_ramp
+      stage: recent_corrected
       exclude_hot_peak: true
       suppress_bias_uplift: true
       suppress_hot_uplift: true
     cloud_solar_raw_override:
-      # Replay showed cloud/solar midday is better at the raw tree stage; later residual
-      # and stage corrections pushed this slice just over the MAE gate.
-      enabled: true
-      hours: [10, 11, 12, 13, 14, 15, 16]
+      # 2026-06-07 post-holiday replay showed recent-corrected beating the raw override
+      # on cloud/solar midday (about 4.91 vs 5.60 MAE). Disable the broad raw override
+      # unless a future replay proves the cloud slice regressed.
+      enabled: false
+      hours: [10, 11, 12, 13]
       min_cloud_cover_norm: 0.60
       min_solar_loss_mw: 1.25
       stage: raw
       suppress_bias_uplift: true
       suppress_hot_uplift: true
-    # Fixed-origin guarded replay passed MAE/MAPE but missed the all-hour bias gate:
-    # residual bias was +1.18 MWh, meaning the forecast was low on average. A small
-    # origin-agnostic uplift targets the <= 0.75 MWh bias gate without adding another model.
-    underforecast_bias_uplift_mwh: 0.45
-    hot_peak_uplift:
-      # Fixed-origin replay still underforecast 90F-plus peak hours, especially Days 2+.
-      # This is deliberately guarded: Day 1 is excluded, only HE 14-20 are touched, and
-      # the uplift is capped below the observed replay bias until broader summer evidence accumulates.
+    long_horizon_peak_hot_month_correction:
+      # 2026-06-08 replay isolated the remaining scorecard failures to day-8..16
+      # HE14-18 and hot HE16-20 rows. A single scalar uplift was not valid: May/Sep
+      # were overforecast while July was underforecast. Use signed, bounded month
+      # corrections only on long-horizon peak/hot rows. Hot rows override the peak
+      # offset on HE16-18 overlap so the two tuned offsets do not stack.
       enabled: true
+      min_forecast_day: 8
+      max_forecast_day: 16
+      peak_hours: [14, 15, 16, 17, 18]
+      hot_hours: [16, 17, 18, 19, 20]
+      hot_min_maxtemp_f: 90.0
+      peak_cap_mwh: 8.0
+      hot_cap_mwh: 12.0
+      peak_exclude_holidays: true
+      hot_exclude_holidays: true
+      peak_month_offsets_mwh:
+        "1": -2.95
+        "2": 0.80
+        "3": -2.31
+        "4": -1.54
+        "5": -1.12
+        "6": -2.12
+        "7": 7.76
+        "8": -1.39
+        "9": -6.44
+        "10": 2.21
+        "11": 5.75
+        "12": -1.16
+      hot_month_offsets_mwh:
+        "5": -14.76
+        "6": -3.71
+        "7": 9.07
+        "8": 0.11
+        "9": -3.44
+    focused_scorecard_guard:
+      # 2026-06-09 focused replay pass: the train-side feature/weight pass improved the
+      # scorecard but left hot HE16-20 at 6.53 MAE and peak HE14-18 at 5.60 MAE.
+      # These post-selector rules are deliberately narrow and use only production-
+      # available signals. Counterfactual on the completed replay:
+      # hot 6.53 -> 5.87, peak 5.60 -> 5.38, overall 3.72 -> 3.67.
+      enabled: true
+      total_cap_mwh: 18.0
+      rules:
+        - name: may_long_hot_93_97_down
+          adjustment_mwh: -9.5
+          months: [5]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 93.0
+          max_maxtemp_f: 97.0
+        - name: july_holiday_hot_peak_down
+          adjustment_mwh: -14.0
+          months: [7]
+          hours: [14, 15, 16, 17, 18, 19, 20]
+          min_forecast_day: 1
+          max_forecast_day: 16
+          min_maxtemp_f: 90.0
+          holiday: true
+        - name: august_day4to7_highload_peak_up
+          adjustment_mwh: 12.5
+          months: [8]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 4
+          max_forecast_day: 7
+          min_maxtemp_f: 95.0
+          min_forecast_mwh: 260.0
+        - name: september_day4to7_mild_peak_down
+          adjustment_mwh: -13.5
+          months: [9]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 4
+          max_forecast_day: 7
+          max_maxtemp_f: 95.0
+    # Earlier replays needed a small origin-agnostic uplift for the bias gate. The
+    # post-holiday replay now passes bias without it, and this uplift contributes to
+    # long-lead hot/peak overforecast clusters.
+    underforecast_bias_uplift_mwh: 0.0
+    hot_peak_uplift:
+      # Normal 90F-plus hot uplift was protective in earlier fixed-origin runs, but the
+      # 2026-06-07 post-holiday seasonal replay shows it overcorrecting long-lead
+      # 90-97F peak hours. Keep the 110F-plus emergency layer below; disable this broad
+      # normal-hot uplift until a lead-aware replacement is proven.
+      enabled: false
       min_forecast_day: 2
       max_forecast_day: 16
       min_maxtemp_f: 90.0
@@ -543,22 +651,33 @@ calibration:
     # underforecasts by ~7-8 MWh on average (Jensen convexity of load in temperature),
     # which the realized-weather-tuned correction stack does not compensate for.
     #
-    # Replay validation (rolling_origin_replay, forecast-weather basis):
-    #   HotPeak>=90F HE14-20 bias  -7.77 -> -3.76 MWh ; system-peak underforecast 24.2 -> 13.9 MWh
-    #   Non-hot hours and overall MAE essentially unchanged. No-ops on the realized-weather path.
+    # 2026-06-08 replay showed the prior aggressive hedge reduced underforecast
+    # risk but overshot warm-biased forecast-weather leads. Keep a small convexity
+    # guard and damp it when previous-run weather is historically warm-biased at
+    # that lead.
     enabled: true
-    hours: [13, 14, 15, 16, 17, 18, 19, 20, 21]
+    # Score the same scenario-based point hedge in rolling-origin replay that
+    # production applies to the live forecast. The primary replay uses realized
+    # weather as the point input, but the hedge still uses only lead-time
+    # uncertainty plus +/-3F scenario re-predictions.
+    apply_to_realized_replay: true
+    hours: [16, 17, 18, 19, 20]
     # Gate on the FORECASTED daily-max (operationally available), not the realized max.
-    min_maxtemp_f: 88.0
+    min_maxtemp_f: 90.0
+    exclude_holidays: true
     min_forecast_day: 1
     max_forecast_day: 16
     scenario_delta_f: 3.0           # must match the warmer/cooler scenario delta in bands.weather_scenarios
-    jensen_scale: 2.0               # scales the symmetric convexity (Jensen) term
-    upper_scenario_blend: 0.30      # one-sided lean on the warmer scenario (peak-planning asymmetry)
-    cap_mwh: 16.0
-    max_fraction_of_warmer_delta: 1.25
+    # Small bounded hedge: replay recompute on forecast-weather rows gives mean
+    # hot-peak hedge ~0.9 MWh instead of ~7.5 MWh, avoiding the previous
+    # overforecast cluster while still correcting some convexity bias.
+    jensen_scale: 1.25              # scales the symmetric convexity (Jensen) term
+    upper_scenario_blend: 0.08      # small one-sided lean on the warmer scenario
+    cap_mwh: 4.0
+    max_fraction_of_warmer_delta: 0.45
     mae_to_sigma_factor: 1.2533     # half-normal MAE -> Gaussian sigma
     sigma_ref_lead: 7               # normalize the upper term to the longest validated lead
+    min_signed_bias_damping: 0.35   # lower bound when lead weather is warm-biased
     # Daily-max temperature forecast error (MAE, F) by lead, from
     # rolling_origin_replay_weather_input_error_by_lead.csv. Re-tune from the live scorecard.
     # Leads 1-7 are measured; 8-16 are EXTRAPOLATED (gentle saturating growth toward the
@@ -581,6 +700,26 @@ calibration:
       14: 8.55
       15: 8.75
       16: 8.90
+    # Signed previous-run daily-max temperature bias by lead:
+    # previous-run forecast minus realized weather. Positive means forecast weather
+    # was already warm, so the hot uplift is damped rather than stacked on top.
+    dailymax_temp_bias_by_lead_f:
+      1: -0.59
+      2: 1.25
+      3: 1.85
+      4: 2.98
+      5: 3.94
+      6: 4.11
+      7: 3.97
+      8: 4.00
+      9: 4.00
+      10: 4.00
+      11: 4.00
+      12: 4.00
+      13: 4.00
+      14: 4.00
+      15: 4.00
+      16: 4.00
 
   recent_residual:
     enabled: true

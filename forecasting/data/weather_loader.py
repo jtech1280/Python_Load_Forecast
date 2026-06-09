@@ -21,6 +21,8 @@ OPENMETEO_RENAME = {
     "shortwave_radiation": "GHI_Wm2",
     "is_day": "IsDay",
 }
+_TRUSTSTORE_INJECTED = False
+_TRUSTSTORE_WARNING_EMITTED = False
 
 def _today_local(tz_name: str) -> dt.date:
     return dt.datetime.now(ZoneInfo(tz_name)).date()
@@ -57,7 +59,7 @@ def _normalize_hourly(payload: dict, captured_at_utc: pd.Timestamp) -> pd.DataFr
     out.sort_values("ValidTimeUTC", inplace=True)
     return out
 
-def _fetch_json(url: str, params: dict, verify: bool, timeout_seconds: int = 30, retries: int = 1, backoff_seconds: float = 2.0) -> dict:
+def _fetch_json(url: str, params: dict, verify: bool | str, timeout_seconds: int = 30, retries: int = 1, backoff_seconds: float = 2.0) -> dict:
     last_exc: Exception | None = None
     for attempt in range(max(1, int(retries))):
         try:
@@ -71,6 +73,44 @@ def _fetch_json(url: str, params: dict, verify: bool, timeout_seconds: int = 30,
     if last_exc is not None:
         raise last_exc
     raise RuntimeError("Weather request failed without an exception")
+
+def _ssl_verify(config: dict) -> bool | str:
+    openmeteo_cfg = config.get("openmeteo", {}) or {}
+    override = os.getenv("OPENMETEO_SSL_VERIFY")
+    if override is not None:
+        return str(override).strip().lower() not in {"0", "false", "no", "off"}
+    ca_bundle = os.getenv("OPENMETEO_CA_BUNDLE") or str(openmeteo_cfg.get("ssl_ca_bundle") or "").strip()
+    if ca_bundle:
+        return ca_bundle
+    return bool(openmeteo_cfg.get("ssl_verify", True))
+
+def _weather_request_verify(config: dict) -> bool | str:
+    verify = _ssl_verify(config)
+    if verify is True:
+        _inject_os_truststore(config)
+    return verify
+
+def _inject_os_truststore(config: dict) -> None:
+    global _TRUSTSTORE_INJECTED, _TRUSTSTORE_WARNING_EMITTED
+    if _TRUSTSTORE_INJECTED:
+        return
+    openmeteo_cfg = config.get("openmeteo", {}) or {}
+    if not bool(openmeteo_cfg.get("ssl_use_os_truststore", True)):
+        return
+    try:
+        import truststore
+
+        truststore.inject_into_ssl()
+        _TRUSTSTORE_INJECTED = True
+    except Exception as exc:
+        if not _TRUSTSTORE_WARNING_EMITTED:
+            warnings.warn(
+                "Open-Meteo SSL OS trust-store injection failed "
+                f"({exc}); falling back to Python/Certifi CA validation. "
+                "Install truststore or set OPENMETEO_CA_BUNDLE to a PEM CA bundle if weather API TLS fails.",
+                RuntimeWarning,
+            )
+            _TRUSTSTORE_WARNING_EMITTED = True
 
 def _weather_cache_dir(config: dict) -> Path:
     cache_dir = str(config.get("openmeteo", {}).get("cache_dir") or "weather_cache")
@@ -176,7 +216,7 @@ def fetch_historical_weather(config: dict) -> pd.DataFrame:
     start = dt.date.fromisoformat(config["openmeteo"]["historical_start"])
     end = _historical_end(config)
     url = config["openmeteo"]["historical_url"]
-    verify = bool(config["openmeteo"]["ssl_verify"])
+    verify = _weather_request_verify(config)
     cache_stem = f"historical_weather_{start.isoformat()}_{end.isoformat()}"
     cache_path = _weather_cache_path(config, cache_stem)
     latest_cache_path = _weather_cache_path(config, "historical_weather_latest")
@@ -226,7 +266,7 @@ def fetch_forecast_weather(config: dict) -> pd.DataFrame:
     if past_hours_i > 0:
         params.update({"past_hours": past_hours_i})
     url = config["openmeteo"]["forecast_url"]
-    verify = bool(config["openmeteo"]["ssl_verify"])
+    verify = _weather_request_verify(config)
     latest_cache_path = _weather_cache_path(config, "forecast_weather_latest")
 
     try:
@@ -289,7 +329,7 @@ def fetch_previous_run_weather(
         "hourly": ",".join(previous_hourly),
     })
     url = str(config.get("openmeteo", {}).get("previous_runs_url") or "https://previous-runs-api.open-meteo.com/v1/forecast")
-    verify = bool(config["openmeteo"]["ssl_verify"])
+    verify = _weather_request_verify(config)
     payload = _fetch_json(url, params, verify, timeout_seconds=90, retries=3, backoff_seconds=4.0)
     hourly = payload.get("hourly", {}) or {}
     times = hourly.get("time", [])

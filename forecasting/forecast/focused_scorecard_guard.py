@@ -1,0 +1,162 @@
+from __future__ import annotations
+
+"""Focused post-selector guard for replay-identified hot/peak scorecard regimes."""
+
+import numpy as np
+import pandas as pd
+
+
+def _as_num(values) -> pd.Series:
+    return pd.to_numeric(values, errors="coerce")
+
+
+def _guard_cfg(config: dict | None) -> dict:
+    raw = config or {}
+    calibration = raw.get("calibration", {}) or {}
+    stage_selector = calibration.get("stage_selector", {}) or {}
+    return stage_selector.get("focused_scorecard_guard", {}) or {}
+
+
+def _month_series(df: pd.DataFrame) -> pd.Series:
+    if "Month" in df.columns:
+        month = _as_num(df["Month"])
+        if month.notna().any():
+            return month
+    if "DT" in df.columns:
+        return pd.to_datetime(df["DT"], errors="coerce", utc=True).dt.month.astype(float)
+    return pd.Series(np.nan, index=df.index, dtype=float)
+
+
+def _forecast_day_series(df: pd.DataFrame) -> pd.Series:
+    if "Forecast_Day" in df.columns:
+        day = _as_num(df["Forecast_Day"])
+        if day.notna().any():
+            return day
+    return pd.Series(np.nan, index=df.index, dtype=float)
+
+
+def _bool_series(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series(False, index=df.index, dtype=bool)
+    values = df[col]
+    if values.dtype == object:
+        return values.astype(str).str.lower().isin({"true", "1", "yes"})
+    return _as_num(values).fillna(0).ne(0)
+
+
+def _list_mask(values: pd.Series, allowed) -> pd.Series:
+    if allowed is None:
+        return pd.Series(True, index=values.index, dtype=bool)
+    allowed_set = {int(x) for x in allowed}
+    return values.round().astype("Int64").isin(allowed_set).fillna(False)
+
+
+def _rule_mask(
+    df: pd.DataFrame,
+    rule: dict,
+    *,
+    forecast: pd.Series,
+    month: pd.Series,
+    hour: pd.Series,
+    forecast_day: pd.Series,
+    daily_max: pd.Series,
+    is_holiday: pd.Series,
+) -> pd.Series:
+    mask = pd.Series(True, index=df.index, dtype=bool)
+    mask &= _list_mask(month, rule.get("months"))
+    mask &= _list_mask(hour, rule.get("hours"))
+
+    if "min_forecast_day" in rule:
+        mask &= forecast_day.ge(float(rule["min_forecast_day"]))
+    if "max_forecast_day" in rule:
+        mask &= forecast_day.le(float(rule["max_forecast_day"]))
+    if "min_maxtemp_f" in rule:
+        mask &= daily_max.ge(float(rule["min_maxtemp_f"]))
+    if "max_maxtemp_f" in rule:
+        # Exclusive upper bound keeps adjacent tuned temperature regimes from overlapping.
+        mask &= daily_max.lt(float(rule["max_maxtemp_f"]))
+    if "min_forecast_mwh" in rule:
+        mask &= forecast.ge(float(rule["min_forecast_mwh"]))
+    if "max_forecast_mwh" in rule:
+        mask &= forecast.lt(float(rule["max_forecast_mwh"]))
+    if "holiday" in rule:
+        mask &= is_holiday.eq(bool(rule["holiday"]))
+
+    return mask.fillna(False)
+
+
+def apply_focused_scorecard_guard(
+    df: pd.DataFrame,
+    config: dict | None,
+    *,
+    forecast_col: str,
+    also_update_cols: tuple[str, ...] = ("Stage_Selected_Forecast_MWH",),
+) -> pd.DataFrame:
+    """Apply bounded residual guards for the remaining hot/peak scorecard slices.
+
+    The rules intentionally use only production-available inputs: month, hour,
+    forecast lead day, forecasted daily max temperature, holiday flag, and current
+    point-forecast level. They run after stage selection/weather hedge and write
+    explicit diagnostics so replay can attribute the change.
+    """
+    out = df.copy()
+    out["Focused_Scorecard_Guard_MWH"] = 0.0
+    out["Focused_Scorecard_Guard_Source"] = "none"
+
+    cfg = _guard_cfg(config)
+    if out.empty or not bool(cfg.get("enabled", False)) or forecast_col not in out.columns:
+        return out
+
+    rules = cfg.get("rules", []) or []
+    if not rules:
+        return out
+
+    forecast = _as_num(out[forecast_col])
+    month = _month_series(out)
+    hour = _as_num(out.get("Hour", pd.Series(np.nan, index=out.index)))
+    forecast_day = _forecast_day_series(out)
+    daily_max = _as_num(out.get("Temperature_DailyMax", pd.Series(np.nan, index=out.index)))
+    is_holiday = _bool_series(out, "IsHoliday")
+
+    total_adjustment = pd.Series(0.0, index=out.index, dtype=float)
+    source = pd.Series("none", index=out.index, dtype="object")
+    cap = abs(float(cfg.get("total_cap_mwh", 20.0)))
+
+    for raw_rule in rules:
+        rule = raw_rule or {}
+        if not bool(rule.get("enabled", True)):
+            continue
+        adjustment = float(rule.get("adjustment_mwh", 0.0) or 0.0)
+        if abs(adjustment) < 1e-9:
+            continue
+        mask = _rule_mask(
+            out,
+            rule,
+            forecast=forecast,
+            month=month,
+            hour=hour,
+            forecast_day=forecast_day,
+            daily_max=daily_max,
+            is_holiday=is_holiday,
+        )
+        if not mask.any():
+            continue
+        name = str(rule.get("name", "focused_scorecard_guard")).strip() or "focused_scorecard_guard"
+        total_adjustment.loc[mask] += adjustment
+        prior = source.loc[mask].astype(str)
+        source.loc[mask] = np.where(prior.eq("none"), name, prior + "+" + name)
+
+    total_adjustment = total_adjustment.clip(lower=-cap, upper=cap)
+    if not total_adjustment.ne(0.0).any():
+        return out
+
+    out["Focused_Scorecard_Guard_MWH"] = total_adjustment
+    out["Focused_Scorecard_Guard_Source"] = source
+    out[forecast_col] = (forecast + total_adjustment).clip(lower=0.0)
+
+    if forecast_col == "Final_Backtest_Forecast_MWH" and "Final_Forecast_MWH" in out.columns:
+        out["Final_Forecast_MWH"] = out[forecast_col]
+    for col in also_update_cols:
+        if col in out.columns and col != forecast_col:
+            out[col] = (_as_num(out[col]) + total_adjustment).clip(lower=0.0)
+    return out

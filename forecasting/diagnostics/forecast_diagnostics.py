@@ -1008,9 +1008,11 @@ def export_diagnostics_bundle(bundle: dict[str, Any], output_dir: str | Path) ->
 
     for name, value in (bundle or {}).items():
         if isinstance(value, pd.DataFrame):
-            if value.empty:
-                continue
             file_path = output_path / f"{name}.csv"
+            if value.empty:
+                if file_path.exists():
+                    file_path.unlink()
+                continue
             value.to_csv(file_path, index=False)
             written[name] = str(file_path)
         elif isinstance(value, dict):

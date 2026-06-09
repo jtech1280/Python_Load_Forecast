@@ -32,14 +32,16 @@ def _observed_fixed_holiday(year: int, month: int, day: int) -> pd.Timestamp:
 def roseville_holidays(year: int) -> set[pd.Timestamp]:
     """
     Roseville Electric-style holiday set used for calendar/load behavior features.
-    Includes: New Year's Day, MLK Day, Presidents' Day, Memorial Day, Labor Day,
-    Columbus Day, Veterans Day, Thanksgiving Day, and Christmas Day.
+    Includes: New Year's Day, MLK Day, Presidents' Day, Memorial Day,
+    Independence Day, Labor Day, Columbus Day, Veterans Day, Thanksgiving Day,
+    and Christmas Day.
     """
     return {
         _observed_fixed_holiday(year, 1, 1),        # New Year's Day
         _nth_weekday(year, 1, 0, 3),                # Martin Luther King Jr. Day
         _nth_weekday(year, 2, 0, 3),                # Presidents' Day
         _last_weekday(year, 5, 0),                  # Memorial Day
+        _observed_fixed_holiday(year, 7, 4),        # Independence Day
         _nth_weekday(year, 9, 0, 1),                # Labor Day
         _nth_weekday(year, 10, 0, 2),               # Columbus Day
         _observed_fixed_holiday(year, 11, 11),      # Veterans Day
@@ -49,7 +51,12 @@ def roseville_holidays(year: int) -> set[pd.Timestamp]:
 
 
 def _holiday_frame(dates: pd.Series) -> pd.DataFrame:
-    d = pd.to_datetime(dates).dt.normalize()
+    local_dt = pd.to_datetime(dates, errors="coerce")
+    if getattr(local_dt.dt, "tz", None) is not None:
+        # Compare local calendar dates. Holiday lookup timestamps are timezone-naive,
+        # while forecast/replay DT values are local tz-aware.
+        local_dt = local_dt.dt.tz_localize(None)
+    d = local_dt.dt.normalize()
     years = sorted(set(d.dt.year.dropna().astype(int).tolist()))
     holiday_dates = set()
     for y in years:

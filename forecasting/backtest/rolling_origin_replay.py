@@ -19,6 +19,7 @@ from forecasting.forecast.forecast_pipeline import (
     apply_origin_available_correction_chain,
     build_correction_artifacts,
 )
+from forecasting.forecast.focused_scorecard_guard import apply_focused_scorecard_guard
 from forecasting.forecast.weather_scenarios import (
     add_scenario_summary_columns,
     apply_weather_scenario_delta_caps,
@@ -54,6 +55,11 @@ WEATHER_REALISM_PREFIX_COLS = [
     "Final_AbsError_MWH", "Final_APE", "Temperature", "Temperature_DailyMax",
     "CloudCover_Norm", "BTM_Solar_Proxy_MW", "BTM_Solar_Loss_From_ClearSky_MW",
     "Midday_Overcast_Solar_Loss_MW", "Forecast_Weather_Lead_Days",
+    "Weather_Robustness_Hedge_MWH", "Weather_Robustness_Hedge_Source",
+    "Weather_Robustness_Jensen_MWH", "Weather_Robustness_Upper_MWH",
+    "Weather_Robustness_Warmer_Delta_MWH", "Weather_Robustness_Temp_Sigma_F",
+    "Weather_Robustness_Temp_Bias_Damping", "Weather_Robustness_Gate",
+    "Focused_Scorecard_Guard_MWH", "Focused_Scorecard_Guard_Source",
 ]
 
 
@@ -122,6 +128,7 @@ def _parse_fixed_origins(cfg: dict[str, Any], first_dt: pd.Timestamp) -> list[pd
     parsed: list[pd.Timestamp] = []
     target_tz = first_dt.tz
     for raw in raw_values:
+        raw_text = str(raw).strip()
         ts = pd.Timestamp(raw)
         if pd.isna(ts):
             continue
@@ -129,7 +136,8 @@ def _parse_fixed_origins(cfg: dict[str, Any], first_dt: pd.Timestamp) -> list[pd
             ts = ts.tz_localize(target_tz)
         elif ts.tz is not None and target_tz is not None:
             ts = ts.tz_convert(target_tz)
-        parsed.append(ts.normalize())
+        has_explicit_time = any(sep in raw_text for sep in (" ", "T")) and len(raw_text) > 10
+        parsed.append(ts if has_explicit_time else ts.normalize())
 
     return list(dict.fromkeys(parsed))
 
@@ -332,11 +340,11 @@ def _origin_raw_forecasts(
     origin_dt: pd.Timestamp,
     horizon_days: int,
     origin_number: int,
-) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame]]:
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
     hist = train_df[train_df["DT"] < origin_dt].copy()
     target = train_df[(train_df["DT"] >= origin_dt) & (train_df["DT"] < origin_dt + pd.Timedelta(days=horizon_days))].copy()
     if hist.empty or target.empty:
-        return pd.DataFrame(), pd.DataFrame(), {}
+        return pd.DataFrame(), pd.DataFrame(), {}, {}
 
     stage_name = f"rolling-origin replay {origin_number} @ {origin_dt}"
     xgb_model, lgb_model, trained_features = train_tree_models(hist, features, config=config, stage_name=stage_name)
@@ -359,6 +367,31 @@ def _origin_raw_forecasts(
         origin_number=origin_number,
         config=config,
     )
+    scenario_defs = scenario_definitions(config)
+    realized_scenarios: dict[str, pd.DataFrame] = {}
+    hedge_cfg = ((config.get("calibration", {}) or {}).get("weather_robustness_hedge", {}) or {})
+    if bool(hedge_cfg.get("apply_to_realized_replay", True)) and bool(hedge_cfg.get("enabled", True)):
+        realized_future = target.drop(columns=["MWH"]).copy()
+        for scenario in scenario_defs:
+            name = str(scenario.get("name", "scenario"))
+            scenario_frame = make_weather_scenario_frame(realized_future, scenario)
+            scenario_raw = _raw_prediction_frame(
+                target=target,
+                future_frame=scenario_frame,
+                hist=hist,
+                features=trained_features,
+                ensemble_weights=ensemble_weights,
+                xgb_model=xgb_model,
+                lgb_model=lgb_model,
+                prophet_fit=prophet_fit,
+                prophet_features=prophet_features,
+                catboost_model=catboost_model,
+                origin_dt=origin_dt,
+                origin_number=origin_number,
+                config=config,
+            )
+            if not scenario_raw.empty:
+                realized_scenarios[name] = scenario_raw
     weather_realism_future = _previous_run_future_frame(target, config, origin_dt)
     weather_realism = _raw_prediction_frame(
         target=target,
@@ -377,7 +410,7 @@ def _origin_raw_forecasts(
     )
     weather_scenarios: dict[str, pd.DataFrame] = {}
     if not weather_realism_future.empty:
-        for scenario in scenario_definitions(config):
+        for scenario in scenario_defs:
             name = str(scenario.get("name", "scenario"))
             scenario_frame = make_weather_scenario_frame(weather_realism_future, scenario)
             scenario_raw = _raw_prediction_frame(
@@ -397,7 +430,7 @@ def _origin_raw_forecasts(
             )
             if not scenario_raw.empty:
                 weather_scenarios[name] = scenario_raw
-    return realized, weather_realism, weather_scenarios
+    return realized, weather_realism, realized_scenarios, weather_scenarios
 
 
 def _merge_weather_realism(corrected: pd.DataFrame, realism: pd.DataFrame) -> pd.DataFrame:
@@ -411,6 +444,68 @@ def _merge_weather_realism(corrected: pd.DataFrame, realism: pd.DataFrame) -> pd
     return corrected.merge(suffix, on=["DT", "Replay_Origin_ID"], how="left")
 
 
+def _recompute_final_errors(df: pd.DataFrame, forecast_col: str = "Final_Backtest_Forecast_MWH") -> pd.DataFrame:
+    out = df.copy()
+    if "Actual_MWH" not in out.columns or forecast_col not in out.columns:
+        return out
+    actual = pd.to_numeric(out["Actual_MWH"], errors="coerce")
+    forecast = pd.to_numeric(out[forecast_col], errors="coerce")
+    out["Final_Residual_MWH"] = actual - forecast
+    out["Final_AbsError_MWH"] = out["Final_Residual_MWH"].abs()
+    out["Final_APE"] = np.where(
+        actual.abs() > 1e-9,
+        out["Final_AbsError_MWH"] / actual.abs() * 100.0,
+        np.nan,
+    )
+    return out
+
+
+def _apply_weather_scenarios_and_hedge(
+    corrected: pd.DataFrame,
+    raw_scenarios: dict[str, pd.DataFrame],
+    config: dict,
+    artifacts: dict | None,
+    *,
+    apply_hedge: bool,
+    also_update_stage: bool = False,
+) -> pd.DataFrame:
+    out = corrected.copy()
+    scenario_columns: list[str] = []
+    for scenario_name, raw_scenario in raw_scenarios.items():
+        corrected_scenario = apply_origin_available_correction_chain(raw_scenario, config, artifacts)
+        col = scenario_column_name(scenario_name)
+        scenario_values = corrected_scenario[["DT", "Replay_Origin_ID", "Final_Backtest_Forecast_MWH"]].copy()
+        scenario_values.rename(columns={"Final_Backtest_Forecast_MWH": col}, inplace=True)
+        out = out.merge(
+            scenario_values,
+            on=["DT", "Replay_Origin_ID"],
+            how="left",
+        )
+        scenario_columns.append(col)
+    out = apply_weather_scenario_delta_caps(
+        out,
+        scenario_columns,
+        config=config,
+        base_col="Final_Backtest_Forecast_MWH",
+    )
+    out = add_scenario_summary_columns(out, scenario_columns)
+    if apply_hedge:
+        out = apply_weather_robustness_hedge(
+            out,
+            config=config,
+            base_col="Final_Backtest_Forecast_MWH",
+            also_update_cols=("Stage_Selected_Forecast_MWH",) if also_update_stage else (),
+        )
+        out = apply_focused_scorecard_guard(
+            out,
+            config=config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+            also_update_cols=("Stage_Selected_Forecast_MWH",) if also_update_stage else (),
+        )
+        out = _recompute_final_errors(out, forecast_col="Final_Backtest_Forecast_MWH")
+    return out
+
+
 def run_rolling_origin_replay(train_df: pd.DataFrame, features: list[str], config: dict) -> pd.DataFrame:
     """Replay multi-origin production horizons with pre-origin correction residual windows."""
     if train_df is None or train_df.empty:
@@ -419,6 +514,8 @@ def run_rolling_origin_replay(train_df: pd.DataFrame, features: list[str], confi
     cfg = _replay_cfg(config)
     horizon_days = _as_int(cfg.get("horizon_days"), 16)
     calibration_days = _as_int(cfg.get("calibration_days"), 45)
+    hedge_cfg = ((config.get("calibration", {}) or {}).get("weather_robustness_hedge", {}) or {})
+    apply_primary_weather_hedge = bool(hedge_cfg.get("apply_to_realized_replay", True))
     work = train_df.copy().sort_values("DT").reset_index(drop=True)
     origins = _origin_candidates(work, config)
     frames: list[pd.DataFrame] = []
@@ -439,7 +536,7 @@ def run_rolling_origin_replay(train_df: pd.DataFrame, features: list[str], confi
             config=config,
         )
         artifacts = build_correction_artifacts(raw_calibration, config)
-        raw_origin, raw_weather_realism, raw_weather_scenarios = _origin_raw_forecasts(
+        raw_origin, raw_weather_realism, raw_realized_scenarios, raw_weather_scenarios = _origin_raw_forecasts(
             work,
             features,
             config,
@@ -450,36 +547,25 @@ def run_rolling_origin_replay(train_df: pd.DataFrame, features: list[str], confi
         if raw_origin.empty:
             continue
         corrected = apply_origin_available_correction_chain(raw_origin, config, artifacts)
+        if apply_primary_weather_hedge and raw_realized_scenarios:
+            corrected = _apply_weather_scenarios_and_hedge(
+                corrected,
+                raw_realized_scenarios,
+                config,
+                artifacts,
+                apply_hedge=True,
+                also_update_stage=True,
+            )
         if not raw_weather_realism.empty:
             corrected_weather_realism = apply_origin_available_correction_chain(raw_weather_realism, config, artifacts)
-            scenario_columns: list[str] = []
-            for scenario_name, raw_scenario in raw_weather_scenarios.items():
-                corrected_scenario = apply_origin_available_correction_chain(raw_scenario, config, artifacts)
-                col = scenario_column_name(scenario_name)
-                scenario_values = corrected_scenario[["DT", "Replay_Origin_ID", "Final_Backtest_Forecast_MWH"]].copy()
-                scenario_values.rename(columns={"Final_Backtest_Forecast_MWH": col}, inplace=True)
-                corrected_weather_realism = corrected_weather_realism.merge(
-                    scenario_values,
-                    on=["DT", "Replay_Origin_ID"],
-                    how="left",
-                )
-                scenario_columns.append(col)
-            corrected_weather_realism = apply_weather_scenario_delta_caps(
+            # V12.9: apply the same weather-uncertainty peak hedge the production pipeline applies.
+            corrected_weather_realism = _apply_weather_scenarios_and_hedge(
                 corrected_weather_realism,
-                scenario_columns,
-                config=config,
-                base_col="Final_Backtest_Forecast_MWH",
-            )
-            corrected_weather_realism = add_scenario_summary_columns(corrected_weather_realism, scenario_columns)
-            # V12.9: apply the same weather-uncertainty peak hedge the production
-            # pipeline applies, so the realism (forecast-weather) scorecard measures it.
-            # The realism frame is built on forecast weather, so Temperature_DailyMax
-            # here is the forecasted daily max (the operationally-available gate).
-            corrected_weather_realism = apply_weather_robustness_hedge(
-                corrected_weather_realism,
-                config=config,
-                base_col="Final_Backtest_Forecast_MWH",
-                also_update_cols=(),
+                raw_weather_scenarios,
+                config,
+                artifacts,
+                apply_hedge=True,
+                also_update_stage=False,
             )
             corrected = _merge_weather_realism(corrected, corrected_weather_realism)
         corrected["Replay_Calibration_Days"] = calibration_days
@@ -651,6 +737,16 @@ def _weather_realism_metric_frame(bt: pd.DataFrame, use_previous_run_weather: bo
         "WeatherRealism_BTM_Solar_Proxy_MW": "BTM_Solar_Proxy_MW",
         "WeatherRealism_BTM_Solar_Loss_From_ClearSky_MW": "BTM_Solar_Loss_From_ClearSky_MW",
         "WeatherRealism_Midday_Overcast_Solar_Loss_MW": "Midday_Overcast_Solar_Loss_MW",
+        "WeatherRealism_Weather_Robustness_Hedge_MWH": "Weather_Robustness_Hedge_MWH",
+        "WeatherRealism_Weather_Robustness_Hedge_Source": "Weather_Robustness_Hedge_Source",
+        "WeatherRealism_Weather_Robustness_Jensen_MWH": "Weather_Robustness_Jensen_MWH",
+        "WeatherRealism_Weather_Robustness_Upper_MWH": "Weather_Robustness_Upper_MWH",
+        "WeatherRealism_Weather_Robustness_Warmer_Delta_MWH": "Weather_Robustness_Warmer_Delta_MWH",
+        "WeatherRealism_Weather_Robustness_Temp_Sigma_F": "Weather_Robustness_Temp_Sigma_F",
+        "WeatherRealism_Weather_Robustness_Temp_Bias_Damping": "Weather_Robustness_Temp_Bias_Damping",
+        "WeatherRealism_Weather_Robustness_Gate": "Weather_Robustness_Gate",
+        "WeatherRealism_Focused_Scorecard_Guard_MWH": "Focused_Scorecard_Guard_MWH",
+        "WeatherRealism_Focused_Scorecard_Guard_Source": "Focused_Scorecard_Guard_Source",
     }
     for source, target in mappings.items():
         if source in eligible.columns:

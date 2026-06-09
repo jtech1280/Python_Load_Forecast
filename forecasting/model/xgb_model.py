@@ -23,6 +23,15 @@ BASE_FEATURES = [
     "Extreme_Heat_80", "Extreme_Heat_85", "Extreme_Heat_90", "Extreme_Heat_95", "Extreme_Heat_100",
     "Temp_Bin", "DailyMaxTempBin",
     "HeatIndexF", "HeatIndex_CDD", "DailyMax_x_PeakHour",
+    "IsPeakWindow14to18", "IsHotPeakWindow16to20",
+    "DailyMaxTempExcess90", "DailyMaxTempExcess95",
+    "DailyMax_x_PeakWindow14to18", "CDD_x_PeakWindow14to18", "CDD_x_HotPeakWindow16to20",
+    "DailyMaxExcess90_x_PeakWindow14to18", "DailyMaxExcess90_x_HotPeakWindow16to20",
+    "DailyMaxExcess95_x_HotPeakWindow16to20", "HeatIndexCDD_x_HotPeakWindow16to20",
+    "NonBusinessHotPeakWindow16to20", "DailyMaxExcess90_x_NonBusinessHotPeak",
+    "DailyMaxExcess90_x_HE14", "DailyMaxExcess90_x_HE15", "DailyMaxExcess90_x_HE16",
+    "DailyMaxExcess90_x_HE17", "DailyMaxExcess90_x_HE18", "DailyMaxExcess90_x_HE19",
+    "DailyMaxExcess90_x_HE20",
     "PriorDay_DailyMaxTemp", "PriorDay_DailyMinTemp",
     "DailyMaxTemp_Ramp_1Day", "DailyMinTemp_Ramp_1Day",
     "DailyMaxTemp_2DayMean", "DailyMaxTemp_3DayMean",
@@ -134,11 +143,27 @@ def build_sample_weights(df: pd.DataFrame, config: dict | None = None) -> np.nda
     weights[y >= q95] *= float(sw_cfg.get("peak_q95_weight", 3.0))
 
     if "Temperature_DailyMax" in df.columns:
-        hot_peak_mask = (
-            (pd.to_numeric(df["Temperature_DailyMax"], errors="coerce") >= float(sw_cfg.get("hot_day_min_f", 90.0)))
-            & (pd.to_numeric(df.get("IsLikelySystemPeakHour", 0), errors="coerce").fillna(0).astype(int) == 1)
-        )
-        weights[hot_peak_mask.to_numpy()] *= float(sw_cfg.get("hot_peak_weight", 1.7))
+        daily_max = pd.to_numeric(df["Temperature_DailyMax"], errors="coerce")
+        hour = pd.to_numeric(df.get("Hour", pd.Series(np.nan, index=df.index)), errors="coerce")
+        likely_peak = pd.to_numeric(df.get("IsLikelySystemPeakHour", 0), errors="coerce").fillna(0).astype(int).eq(1)
+        hot_min = float(sw_cfg.get("hot_day_min_f", 90.0))
+        hot_hours = {int(h) for h in sw_cfg.get("hot_peak_hours", [16, 17, 18, 19, 20])}
+        peak_hours = {int(h) for h in sw_cfg.get("peak_window_hours", [14, 15, 16, 17, 18])}
+
+        scorecard_hot_peak = daily_max.ge(hot_min) & hour.astype("Int64").isin(hot_hours)
+        if not scorecard_hot_peak.any():
+            scorecard_hot_peak = daily_max.ge(hot_min) & likely_peak
+        business_hot_peak = scorecard_hot_peak & likely_peak
+        non_business_hot_peak = scorecard_hot_peak & ~likely_peak
+
+        weights[business_hot_peak.to_numpy()] *= float(sw_cfg.get("hot_peak_weight", 1.7))
+        weights[non_business_hot_peak.to_numpy()] *= float(sw_cfg.get("non_business_hot_peak_weight", 1.0))
+
+        peak_window_weight = float(sw_cfg.get("peak_window_weight", 1.0))
+        if peak_window_weight > 1.0:
+            peak_min_temp = float(sw_cfg.get("peak_window_min_maxtemp_f", -999.0))
+            peak_window = hour.astype("Int64").isin(peak_hours) & daily_max.ge(peak_min_temp)
+            weights[peak_window.to_numpy()] *= peak_window_weight
 
     recency_end_weight = float(sw_cfg.get("recency_end_weight", 1.35))
     if recency_end_weight > 1 and len(df) > 1:
