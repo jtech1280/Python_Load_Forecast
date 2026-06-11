@@ -493,13 +493,19 @@ def apply_operational_stage_selector(df: pd.DataFrame, config: dict, forecast_co
         if month_values is None:
             dt_values = out.get("DT", pd.Series(pd.NaT, index=out.index))
             month_values = pd.to_datetime(dt_values, errors="coerce").dt.month
+        numeric_month = pd.to_numeric(month_values, errors="coerce")
+        hot_min_by_month = _configured_numeric_lookup(
+            numeric_month,
+            long_horizon_cfg.get("hot_min_maxtemp_f_by_month", {}),
+            default=hot_min_maxtemp,
+        )
         peak_corr = _configured_numeric_lookup(
-            pd.to_numeric(month_values, errors="coerce"),
+            numeric_month,
             long_horizon_cfg.get("peak_month_offsets_mwh", {}),
             default=0.0,
         )
         hot_corr = _configured_numeric_lookup(
-            pd.to_numeric(month_values, errors="coerce"),
+            numeric_month,
             long_horizon_cfg.get("hot_month_offsets_mwh", {}),
             default=0.0,
         )
@@ -528,7 +534,7 @@ def apply_operational_stage_selector(df: pd.DataFrame, config: dict, forecast_co
         hot_month_mask = (
             long_horizon
             & hour.isin(hot_hours)
-            & daily_max.ge(hot_min_maxtemp)
+            & daily_max.ge(hot_min_by_month)
             & hot_corr.ne(0.0)
         )
         if peak_month_mask.any():

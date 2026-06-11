@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 from typing import Any
 
 import numpy as np
@@ -211,6 +212,67 @@ def _add_origin_metadata(out: pd.DataFrame, origin_dt: pd.Timestamp, origin_numb
     return out
 
 
+def _append_timing_row(
+    timing_rows: list[dict[str, Any]] | None,
+    *,
+    origin_number: int,
+    origin_dt: pd.Timestamp,
+    stage: str,
+    elapsed_sec: float,
+    status: str = "completed",
+    rows: int | None = None,
+    scenario_count: int | None = None,
+    detail: str = "",
+) -> None:
+    if timing_rows is None:
+        return
+    timing_rows.append({
+        "Replay_Origin_ID": f"origin_{origin_number:02d}",
+        "Replay_Origin_Number": int(origin_number),
+        "Replay_Origin_DT": origin_dt,
+        "Replay_Origin_Year": int(origin_dt.year),
+        "Replay_Origin_Month": int(origin_dt.month),
+        "Replay_Origin_Season": _season_from_month(origin_dt.month),
+        "Stage": str(stage),
+        "Status": str(status),
+        "Elapsed_Sec": round(float(elapsed_sec), 3),
+        "Rows": np.nan if rows is None else int(rows),
+        "Scenario_Count": np.nan if scenario_count is None else int(scenario_count),
+        "Detail": str(detail or ""),
+    })
+
+
+def _log_and_record_timing(
+    timing_rows: list[dict[str, Any]] | None,
+    *,
+    origin_number: int,
+    origin_dt: pd.Timestamp,
+    stage: str,
+    started: float,
+    log_timing: bool,
+    status: str = "completed",
+    rows: int | None = None,
+    scenario_count: int | None = None,
+    detail: str = "",
+) -> float:
+    elapsed = time.perf_counter() - started
+    if log_timing:
+        suffix = f" completed in {elapsed:.1f}s" if status == "completed" else f" {status} in {elapsed:.1f}s"
+        print(f"Rolling-origin replay origin {origin_number}: {stage}{suffix}", flush=True)
+    _append_timing_row(
+        timing_rows,
+        origin_number=origin_number,
+        origin_dt=origin_dt,
+        stage=stage,
+        elapsed_sec=elapsed,
+        status=status,
+        rows=rows,
+        scenario_count=scenario_count,
+        detail=detail,
+    )
+    return elapsed
+
+
 def _btm_from_feature_frame(frame: pd.DataFrame) -> pd.DataFrame:
     cols = [col for col in BTM_REPLAY_COLS if col in frame.columns]
     if len(cols) < len(BTM_REPLAY_COLS):
@@ -340,18 +402,69 @@ def _origin_raw_forecasts(
     origin_dt: pd.Timestamp,
     horizon_days: int,
     origin_number: int,
+    timing_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame], dict[str, pd.DataFrame]]:
     hist = train_df[train_df["DT"] < origin_dt].copy()
     target = train_df[(train_df["DT"] >= origin_dt) & (train_df["DT"] < origin_dt + pd.Timedelta(days=horizon_days))].copy()
     if hist.empty or target.empty:
         return pd.DataFrame(), pd.DataFrame(), {}, {}
 
+    replay_cfg = _replay_cfg(config)
+    log_timing = bool(replay_cfg.get("log_timing", True))
+    skip_prophet = bool(replay_cfg.get("skip_prophet", False))
+    skip_catboost = bool(replay_cfg.get("skip_catboost", False))
+
+    def _log_stage(
+        stage: str,
+        started: float,
+        *,
+        status: str = "completed",
+        rows: int | None = None,
+        scenario_count: int | None = None,
+        detail: str = "",
+    ) -> None:
+        _log_and_record_timing(
+            timing_rows,
+            origin_number=origin_number,
+            origin_dt=origin_dt,
+            stage=stage,
+            started=started,
+            log_timing=log_timing,
+            status=status,
+            rows=rows,
+            scenario_count=scenario_count,
+            detail=detail,
+        )
+
     stage_name = f"rolling-origin replay {origin_number} @ {origin_dt}"
+    started = time.perf_counter()
     xgb_model, lgb_model, trained_features = train_tree_models(hist, features, config=config, stage_name=stage_name)
-    prophet_fit = train_prophet(hist, DEFAULT_PROPHET_REGRESSORS, config=config) if prophet_enabled(config) else None
+    _log_stage("tree training", started, rows=len(hist), detail=f"features={len(trained_features)}")
+
+    started = time.perf_counter()
+    if skip_prophet and prophet_enabled(config):
+        prophet_fit = None
+        _log_stage("Prophet training", started, status="skipped", detail="skip_prophet=true")
+    else:
+        prophet_fit = train_prophet(hist, DEFAULT_PROPHET_REGRESSORS, config=config) if prophet_enabled(config) else None
+        _log_stage(
+            "Prophet training",
+            started,
+            rows=len(hist),
+            detail=f"regressors={len(prophet_fit.regressors) if prophet_fit is not None else 0}",
+        )
     prophet_features = prophet_fit.regressors if prophet_fit is not None else []
-    catboost_model, _ = train_catboost(hist, trained_features, config=config) if catboost_enabled(config) else (None, trained_features)
+
+    started = time.perf_counter()
+    if skip_catboost and catboost_enabled(config):
+        catboost_model = None
+        _log_stage("CatBoost training", started, status="skipped", detail="skip_catboost=true")
+    else:
+        catboost_model, _ = train_catboost(hist, trained_features, config=config) if catboost_enabled(config) else (None, trained_features)
+        _log_stage("CatBoost training", started, rows=len(hist))
+
     ensemble_weights = _production_ensemble_weights(config)
+    started = time.perf_counter()
     realized = _raw_prediction_frame(
         target=target,
         future_frame=target.drop(columns=["MWH"]).copy(),
@@ -367,10 +480,12 @@ def _origin_raw_forecasts(
         origin_number=origin_number,
         config=config,
     )
+    _log_stage("realized base forecast", started, rows=len(realized))
     scenario_defs = scenario_definitions(config)
     realized_scenarios: dict[str, pd.DataFrame] = {}
     hedge_cfg = ((config.get("calibration", {}) or {}).get("weather_robustness_hedge", {}) or {})
     if bool(hedge_cfg.get("apply_to_realized_replay", True)) and bool(hedge_cfg.get("enabled", True)):
+        started = time.perf_counter()
         realized_future = target.drop(columns=["MWH"]).copy()
         for scenario in scenario_defs:
             name = str(scenario.get("name", "scenario"))
@@ -392,7 +507,19 @@ def _origin_raw_forecasts(
             )
             if not scenario_raw.empty:
                 realized_scenarios[name] = scenario_raw
+        _log_stage(
+            "realized weather scenarios",
+            started,
+            rows=sum(len(frame) for frame in realized_scenarios.values()),
+            scenario_count=len(realized_scenarios),
+        )
+    else:
+        started = time.perf_counter()
+        _log_stage("realized weather scenarios", started, status="skipped", scenario_count=0, detail="weather hedge disabled")
+    started = time.perf_counter()
     weather_realism_future = _previous_run_future_frame(target, config, origin_dt)
+    _log_stage("previous-run weather fetch/frame", started, rows=len(weather_realism_future))
+    started = time.perf_counter()
     weather_realism = _raw_prediction_frame(
         target=target,
         future_frame=weather_realism_future,
@@ -408,8 +535,10 @@ def _origin_raw_forecasts(
         origin_number=origin_number,
         config=config,
     )
+    _log_stage("previous-run weather forecast", started, rows=len(weather_realism))
     weather_scenarios: dict[str, pd.DataFrame] = {}
     if not weather_realism_future.empty:
+        started = time.perf_counter()
         for scenario in scenario_defs:
             name = str(scenario.get("name", "scenario"))
             scenario_frame = make_weather_scenario_frame(weather_realism_future, scenario)
@@ -430,6 +559,15 @@ def _origin_raw_forecasts(
             )
             if not scenario_raw.empty:
                 weather_scenarios[name] = scenario_raw
+        _log_stage(
+            "previous-run weather scenarios",
+            started,
+            rows=sum(len(frame) for frame in weather_scenarios.values()),
+            scenario_count=len(weather_scenarios),
+        )
+    else:
+        started = time.perf_counter()
+        _log_stage("previous-run weather scenarios", started, status="skipped", scenario_count=0, detail="no previous-run weather frame")
     return realized, weather_realism, realized_scenarios, weather_scenarios
 
 
@@ -514,13 +652,18 @@ def run_rolling_origin_replay(train_df: pd.DataFrame, features: list[str], confi
     cfg = _replay_cfg(config)
     horizon_days = _as_int(cfg.get("horizon_days"), 16)
     calibration_days = _as_int(cfg.get("calibration_days"), 45)
+    log_timing = bool(cfg.get("log_timing", True))
+    skip_catboost = bool(cfg.get("skip_catboost", False))
+    skip_calibration_prophet = bool(cfg.get("skip_calibration_prophet", False))
     hedge_cfg = ((config.get("calibration", {}) or {}).get("weather_robustness_hedge", {}) or {})
     apply_primary_weather_hedge = bool(hedge_cfg.get("apply_to_realized_replay", True))
     work = train_df.copy().sort_values("DT").reset_index(drop=True)
     origins = _origin_candidates(work, config)
     frames: list[pd.DataFrame] = []
+    timing_rows: list[dict[str, Any]] = []
 
     for origin_number, origin_dt in enumerate(origins, start=1):
+        origin_started = time.perf_counter()
         print(
             "Rolling-origin replay origin "
             f"{origin_number}/{len(origins)}: {origin_dt} "
@@ -528,14 +671,61 @@ def run_rolling_origin_replay(train_df: pd.DataFrame, features: list[str], confi
             flush=True,
         )
         pre_origin = work[work["DT"] < origin_dt].copy()
+        stage_started = time.perf_counter()
         raw_calibration = run_rolling_backtest(
             train_df=pre_origin,
             features=features,
             ensemble_weights=_production_ensemble_weights(config),
             backtest_days=calibration_days,
             config=config,
+            skip_catboost=skip_catboost,
+            skip_prophet=skip_calibration_prophet,
+            collect_timing=True,
         )
+        calibration_detail = ";".join(
+            part for part in [
+                "skip_catboost=true" if skip_catboost else "",
+                "skip_prophet=true" if skip_calibration_prophet else "",
+            ]
+            if part
+        )
+        _log_and_record_timing(
+            timing_rows,
+            origin_number=origin_number,
+            origin_dt=origin_dt,
+            stage="calibration backtest",
+            started=stage_started,
+            log_timing=log_timing,
+            rows=len(raw_calibration),
+            detail=calibration_detail,
+        )
+        calibration_timing_rows = raw_calibration.attrs.get("rolling_backtest_timing", []) if hasattr(raw_calibration, "attrs") else []
+        for timing in calibration_timing_rows:
+            rows_value = timing.get("Rows")
+            rows = None if pd.isna(rows_value) else int(rows_value)
+            _append_timing_row(
+                timing_rows,
+                origin_number=origin_number,
+                origin_dt=origin_dt,
+                stage=f"calibration backtest: {timing.get('Stage', '')}",
+                elapsed_sec=float(timing.get("Elapsed_Sec", 0.0) or 0.0),
+                status=str(timing.get("Status", "completed")),
+                rows=rows,
+                detail=str(timing.get("Detail", "") or ""),
+            )
+        raw_calibration.attrs = {}
+        stage_started = time.perf_counter()
         artifacts = build_correction_artifacts(raw_calibration, config)
+        _log_and_record_timing(
+            timing_rows,
+            origin_number=origin_number,
+            origin_dt=origin_dt,
+            stage="correction artifacts",
+            started=stage_started,
+            log_timing=log_timing,
+            rows=len(raw_calibration),
+        )
+        stage_started = time.perf_counter()
         raw_origin, raw_weather_realism, raw_realized_scenarios, raw_weather_scenarios = _origin_raw_forecasts(
             work,
             features,
@@ -543,9 +733,20 @@ def run_rolling_origin_replay(train_df: pd.DataFrame, features: list[str], confi
             origin_dt,
             horizon_days,
             origin_number,
+            timing_rows=timing_rows,
+        )
+        _log_and_record_timing(
+            timing_rows,
+            origin_number=origin_number,
+            origin_dt=origin_dt,
+            stage="raw forecast bundle",
+            started=stage_started,
+            log_timing=log_timing,
+            rows=len(raw_origin),
         )
         if raw_origin.empty:
             continue
+        stage_started = time.perf_counter()
         corrected = apply_origin_available_correction_chain(raw_origin, config, artifacts)
         if apply_primary_weather_hedge and raw_realized_scenarios:
             corrected = _apply_weather_scenarios_and_hedge(
@@ -568,17 +769,40 @@ def run_rolling_origin_replay(train_df: pd.DataFrame, features: list[str], confi
                 also_update_stage=False,
             )
             corrected = _merge_weather_realism(corrected, corrected_weather_realism)
+        _log_and_record_timing(
+            timing_rows,
+            origin_number=origin_number,
+            origin_dt=origin_dt,
+            stage="correction/scenario merge",
+            started=stage_started,
+            log_timing=log_timing,
+            rows=len(corrected),
+            scenario_count=len(raw_realized_scenarios) + len(raw_weather_scenarios),
+        )
         corrected["Replay_Calibration_Days"] = calibration_days
         corrected["Replay_Calibration_Start_DT"] = raw_calibration["DT"].min() if not raw_calibration.empty else pd.NaT
         corrected["Replay_Calibration_End_DT"] = raw_calibration["DT"].max() if not raw_calibration.empty else pd.NaT
         frames.append(corrected)
+        elapsed = time.perf_counter() - origin_started
+        _append_timing_row(
+            timing_rows,
+            origin_number=origin_number,
+            origin_dt=origin_dt,
+            stage="origin total",
+            elapsed_sec=elapsed,
+            rows=len(corrected),
+        )
         print(
             "Rolling-origin replay completed origin "
-            f"{origin_number}/{len(origins)}: rows={len(corrected)}",
+            f"{origin_number}/{len(origins)}: rows={len(corrected)} "
+            f"elapsed={elapsed:.1f}s",
             flush=True,
         )
 
-    return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+    result = pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+    if timing_rows:
+        result.attrs["rolling_origin_replay_timing"] = list(timing_rows)
+    return result
 
 
 def _daily_peak_by_origin(df: pd.DataFrame) -> pd.DataFrame:
@@ -1119,7 +1343,11 @@ def build_rolling_origin_replay_bundle(replay_df: pd.DataFrame, config: dict) ->
             }
         }
 
-    bt = _add_weather_input_sensitivity_columns(_ensure_origin_context(prep_backtest(replay_df)))
+    timing_source = getattr(replay_df, "attrs", {}).get("rolling_origin_replay_timing")
+    timing_df = timing_source.copy() if isinstance(timing_source, pd.DataFrame) else pd.DataFrame(timing_source or [])
+    replay_work = replay_df.copy(deep=False)
+    replay_work.attrs = {}
+    bt = _add_weather_input_sensitivity_columns(_ensure_origin_context(prep_backtest(replay_work)))
     coverage = _origin_coverage(bt)
     event_slices = _event_slices(bt)
     peak_window = event_slices["PeakWindowHours14to18"]
@@ -1160,7 +1388,7 @@ def build_rolling_origin_replay_bundle(replay_df: pd.DataFrame, config: dict) ->
         "recent_residual_basis": "pre-origin correction window only",
     })
     summary.update(_scorecard_summary(bt, coverage, config))
-    return {
+    bundle = {
         "rolling_origin_replay_summary": summary,
         "rolling_origin_replay_results": bt,
         "rolling_origin_replay_origin_coverage": coverage,
@@ -1205,3 +1433,6 @@ def build_rolling_origin_replay_bundle(replay_df: pd.DataFrame, config: dict) ->
         ),
         "rolling_origin_replay_daily_peak_miss_by_stage": _daily_peak_by_origin(bt),
     }
+    if not timing_df.empty:
+        bundle["rolling_origin_replay_timing"] = timing_df
+    return bundle

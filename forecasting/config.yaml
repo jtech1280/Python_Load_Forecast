@@ -150,6 +150,17 @@ training:
     origins_per_season: 4
     scorecard_min_origins_per_season: 3
     min_train_days: 365
+    # Speed controls for rolling replay only. Origin Prophet remains enabled by default
+    # because the latest passing replay still uses prophet_peak_gap in the peak-risk guard;
+    # a conservative saved-replay removal check pushed hot MAE above the 6.0 gate. CatBoost
+    # is skipped by default in both replay calibration and replay origin forecasting because
+    # its replay signal was small and the saved-replay removal check still passed all gates.
+    # Calibration Prophet is skipped for the next A/B replay only; origin Prophet remains on.
+    skip_prophet: false
+    skip_calibration_prophet: true
+    skip_catboost: true
+    log_timing: true
+    allow_concurrent: false
     weather_realism:
       # Previous Runs fixed-lead weather covers operational weather error for Days 1-7.
       enabled: true
@@ -417,6 +428,11 @@ calibration:
       peak_hours: [14, 15, 16, 17, 18]
       hot_hours: [16, 17, 18, 19, 20]
       hot_min_maxtemp_f: 90.0
+      # The May hot-month downshift is calibrated for the 93F-plus long-horizon
+      # overforecast cluster. Do not apply it to 90-92F shoulder-heat peaks,
+      # where the weather-robustness hedge can otherwise fight a -12 MWh cap.
+      hot_min_maxtemp_f_by_month:
+        "5": 93.0
       peak_cap_mwh: 8.0
       hot_cap_mwh: 12.0
       peak_exclude_holidays: true

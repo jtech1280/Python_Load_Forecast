@@ -17,11 +17,18 @@ def _solar_season_factor(dt: pd.Series) -> pd.Series:
     return pd.Series(0.825 + 0.175 * np.cos(2.0 * np.pi * (doy - 172.0) / 365.25), index=dt.index).clip(0.60, 1.05)
 
 
+def _month_period_start(dt: pd.Series) -> pd.Series:
+    parsed = pd.to_datetime(dt, errors="coerce")
+    if getattr(parsed.dt, "tz", None) is not None:
+        parsed = parsed.dt.tz_localize(None)
+    return parsed.dt.to_period("M").dt.to_timestamp()
+
+
 def add_solar_features(df: pd.DataFrame, btm_monthly_df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     btm = btm_monthly_df.copy()
-    btm["PeriodStart"] = pd.to_datetime(btm["DT"]).dt.to_period("M").dt.to_timestamp()
-    out["PeriodStart"] = out["DT"].dt.tz_localize(None).dt.to_period("M").dt.to_timestamp()
+    btm["PeriodStart"] = _month_period_start(btm["DT"])
+    out["PeriodStart"] = _month_period_start(out["DT"])
     out = out.merge(
         btm[["PeriodStart", "Nameplate_MW", "Capacity_Ratio_To_Current", "Impact_Cap_MW"]],
         on="PeriodStart",

@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import Any
 
 import numpy as np
@@ -74,7 +75,14 @@ def _move_to_device(data: Any, target_device: str) -> Any:
     if target_device in {"cuda", "gpu_hist"}:
         # Try to move to GPU using CuPy
         try:
-            import cupy as cp
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="CUDA path could not be detected.*",
+                    category=UserWarning,
+                    module=r"cupy\._environment",
+                )
+                import cupy as cp
 
             # Convert pandas to numpy first if needed
             if isinstance(data, pd.DataFrame):

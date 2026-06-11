@@ -1,6 +1,10 @@
 import argparse
+import atexit
+import csv
 import json
+import os
 from pathlib import Path
+import subprocess
 import yaml
 
 
@@ -9,6 +13,93 @@ def load_config():
     cfg_path = here / "config.yaml"
     with open(cfg_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def _read_lock_pid(lock_path: Path) -> int | None:
+    try:
+        text = lock_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() == "pid":
+            try:
+                return int(value.strip())
+            except ValueError:
+                return None
+    return None
+
+
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except OSError:
+            return True
+        for row in csv.reader(result.stdout.splitlines()):
+            if len(row) > 1 and row[1].strip() == str(pid):
+                return True
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _acquire_replay_lock(output_dir: Path) -> tuple[int, Path] | None:
+    lock_path = output_dir / "rolling_origin_replay.lock"
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError as exc:
+            lock_pid = _read_lock_pid(lock_path)
+            if lock_pid is not None and not _pid_is_running(lock_pid):
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    continue
+                except OSError as unlink_exc:
+                    raise SystemExit(
+                        "Rolling-origin replay lock already exists and appears stale, "
+                        f"but could not remove it: {lock_path}. Details: {unlink_exc}"
+                    ) from unlink_exc
+                print(
+                    f"Removed stale rolling-origin replay lock for inactive pid={lock_pid}: {lock_path}",
+                    flush=True,
+                )
+                continue
+            raise SystemExit(
+                "Rolling-origin replay lock already exists: "
+                f"{lock_path}. Another replay is probably running. "
+                "If that process is gone, remove the stale lock file and retry."
+            ) from exc
+
+    payload = f"pid={os.getpid()}\n"
+    os.write(fd, payload.encode("utf-8"))
+
+    def _release() -> None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    atexit.register(_release)
+    return fd, lock_path
 
 
 def main():
@@ -122,6 +213,12 @@ def main():
 
     output_dir = Path(config["project"]["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
+    replay_cfg = ((config.get("training", {}) or {}).get("rolling_origin_replay", {}) or {})
+    if bool(replay_cfg.get("enabled", False)) and not bool(replay_cfg.get("allow_concurrent", False)):
+        lock = _acquire_replay_lock(output_dir)
+        if lock is not None:
+            _, lock_path = lock
+            print(f"Acquired rolling-origin replay lock: {lock_path}", flush=True)
 
     # Apply thread env before importing NumPy / XGBoost / LightGBM-heavy modules.
     from forecasting.utils.performance import apply_runtime_thread_settings, write_runtime_performance_info
