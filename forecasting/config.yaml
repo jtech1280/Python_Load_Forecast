@@ -127,7 +127,7 @@ training:
     calibration_days: 45
     origin_selection: "fixed" # Fixed set keeps tuning passes apples-to-apples; remove fixed_origins to rebalance.
     origin_step_days: 28
-    max_origins: 18
+    max_origins: 20
     fixed_origins:
       - "2024-10-13"
       - "2024-11-09 23:00:00-08:00"
@@ -147,18 +147,22 @@ training:
       - "2026-03-29"
       - "2026-04-26"
       - "2026-05-24"
+      # June 12-style hot-ramp validation: origins that score the 2026-06-12
+      # 99F load ramp inside the production horizon once recent actuals exist.
+      - "2026-05-28"
+      - "2026-05-29"
     origins_per_season: 4
     scorecard_min_origins_per_season: 3
     min_train_days: 365
     # Speed controls for rolling replay only. Origin Prophet remains enabled by default
     # because the latest passing replay still uses prophet_peak_gap in the peak-risk guard;
     # a conservative saved-replay removal check pushed hot MAE above the 6.0 gate. CatBoost
-    # is skipped by default in both replay calibration and replay origin forecasting because
-    # its replay signal was small and the saved-replay removal check still passed all gates.
+    # now participates in replay because the production raw blend uses a constrained
+    # XGB/LGB/CatBoost grid recommendation from the latest holdout diagnostics.
     # Calibration Prophet is skipped for the next A/B replay only; origin Prophet remains on.
     skip_prophet: false
     skip_calibration_prophet: true
-    skip_catboost: true
+    skip_catboost: false
     log_timing: true
     allow_concurrent: false
     weather_realism:
@@ -189,10 +193,12 @@ hardware:
 
 model:
   ensemble_weights:
-    xgb: 0.50
-    lgb: 0.30
+    # 2026-06-12 holdout grid, constrained to avoid worsening actual-peak
+    # underforecast versus the prior XGB/LGB blend.
+    xgb: 0.10
+    lgb: 0.55
     prophet: 0.00     # benchmark-only unless blend_into_production=true
-    catboost: 0.00    # benchmark-only unless blend_into_production=true
+    catboost: 0.35
 
   early_stopping:
     # Improves generalization by stopping when recent validation MAE stops improving.
@@ -252,10 +258,11 @@ model:
     n_jobs: -1
 
   catboost:
-    # V12.5: benchmark-only model diversity candidate. If catboost is not installed,
-    # the run continues and writes a warning instead of failing.
+    # V12.9: CatBoost is blended into production at a constrained weight after
+    # the latest holdout grid showed lower raw MAE without increasing the actual
+    # peak miss versus the prior XGB/LGB blend.
     enabled: true
-    blend_into_production: false
+    blend_into_production: true
     iterations: 1400
     depth: 8
     learning_rate: 0.025
@@ -465,6 +472,27 @@ calibration:
       enabled: true
       total_cap_mwh: 18.0
       rules:
+        - name: june_extreme_heat_morning_ramp_up
+          adjustment_mwh: 7.0
+          months: [6]
+          hours: [8, 9]
+          min_forecast_day: 1
+          max_forecast_day: 16
+          min_maxtemp_f: 105.0
+        - name: june_extreme_heat_midday_ramp_up
+          adjustment_mwh: 10.0
+          months: [6]
+          hours: [10, 11, 12, 13, 14, 15]
+          min_forecast_day: 1
+          max_forecast_day: 16
+          min_maxtemp_f: 105.0
+        - name: june_ultra_hot_peak_guard_up
+          adjustment_mwh: 5.0
+          months: [6]
+          hours: [16, 17, 18]
+          min_forecast_day: 1
+          max_forecast_day: 16
+          min_maxtemp_f: 110.0
         - name: may_long_hot_93_97_down
           adjustment_mwh: -9.5
           months: [5]

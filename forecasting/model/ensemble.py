@@ -10,6 +10,16 @@ def _as_array_or_none(values):
     return arr
 
 
+def _pad_to_length(arr: np.ndarray, length: int) -> np.ndarray:
+    if len(arr) == length:
+        return arr
+    out = np.full(length, np.nan, dtype=float)
+    keep = min(len(arr), length)
+    if keep:
+        out[:keep] = arr[:keep]
+    return out
+
+
 def blend_predictions(xgb_pred, lgb_pred, weights: dict[str, float], prophet_pred=None, catboost_pred=None) -> np.ndarray:
     """Blend available model predictions using normalized configured weights.
 
@@ -34,6 +44,7 @@ def blend_predictions(xgb_pred, lgb_pred, weights: dict[str, float], prophet_pre
     for name, arr in preds.items():
         if arr is None:
             continue
+        arr = _pad_to_length(arr, n)
         w = float((weights or {}).get(name, defaults.get(name, 0.0)))
         if w <= 0:
             continue

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 import numpy as np
-from typing import Optional
+from typing import Callable, Optional
 
 from forecasting.data.history_loader import load_hourly_system_mwh
 from forecasting.data.weather_loader import fetch_historical_weather, fetch_forecast_weather
@@ -62,6 +62,18 @@ from forecasting.forecast.weather_scenarios import (
 )
 from forecasting.backtest.rolling_backtest import run_rolling_backtest
 from forecasting.diagnostics import build_diagnostics_bundle
+
+ProgressCallback = Callable[[str, int, int | None], None]
+
+
+def _progress(
+    progress_callback: ProgressCallback | None,
+    label: str,
+    advance: int = 0,
+    total: int | None = None,
+) -> None:
+    if progress_callback is not None:
+        progress_callback(label, advance, total)
 
 
 def _trim_incomplete_future_weather(future_frame: pd.DataFrame, required_cols: list[str] | None = None) -> pd.DataFrame:
@@ -716,15 +728,32 @@ def _apply_future_correction_chain(
     return cal_future
 
 
-def run_pipeline(config: dict, override_horizon_days: Optional[int] = None):
+def run_pipeline(
+    config: dict,
+    override_horizon_days: Optional[int] = None,
+    progress_callback: ProgressCallback | None = None,
+):
     """
     Orchestrates data loading, leakage-safe backtest, model training, recursive forecast,
     learned residual calibration, warm-ramp calibration, recent residual level correction,
     and residual-based uncertainty bands.
     """
+    scenario_defs = list(scenario_definitions(config))
+    _progress(progress_callback, "Starting forecast pipeline", total=21 + len(scenario_defs))
+
+    _progress(progress_callback, "Loading hourly system history")
     load_df = load_hourly_system_mwh(config)
+    _progress(progress_callback, "Loaded hourly system history", advance=1)
+
+    _progress(progress_callback, "Fetching historical weather")
     hist_wx = fetch_historical_weather(config)
+    _progress(progress_callback, "Fetched historical weather", advance=1)
+
+    _progress(progress_callback, "Fetching forecast weather")
     fut_wx = fetch_forecast_weather(config)
+    _progress(progress_callback, "Fetched forecast weather", advance=1)
+
+    _progress(progress_callback, "Loading local weather")
     local_wx = load_local_station_weather(config)
     local_temp_lookup = pd.DataFrame()
     local_temp_matched = pd.DataFrame()
@@ -735,7 +764,10 @@ def run_pipeline(config: dict, override_horizon_days: Optional[int] = None):
         if bool(temp_cal_cfg.get("enabled", False)) and not local_temp_lookup.empty:
             hist_wx = apply_temperature_bias_calibration(hist_wx, local_temp_lookup, config)
             fut_wx = apply_temperature_bias_calibration(fut_wx, local_temp_lookup, config)
+    _progress(progress_callback, "Processed local weather", advance=1)
+
     official_hourly_latest_dt = load_df["DT"].max() if "DT" in load_df.columns and not load_df.empty else pd.NaT
+    _progress(progress_callback, "Loading five-minute load")
     five_min_load = load_five_min_system_load(config)
     five_min_cfg = config.get("five_min_load", {}) or {}
     five_min_hourly = build_hourly_load_from_five_min(
@@ -754,17 +786,26 @@ def run_pipeline(config: dict, override_horizon_days: Optional[int] = None):
             fut_wx,
             latest_load_dt=load_df["DT"].max() if "DT" in load_df.columns and not load_df.empty else None,
         )
+    _progress(progress_callback, "Processed five-minute load", advance=1)
 
+    _progress(progress_callback, "Loading BTM solar capacity")
     btm_monthly = load_btm_monthly_capacity(config)
-    intraday_features = build_intraday_load_feature_frame(five_min_load)
+    _progress(progress_callback, "Loaded BTM solar capacity", advance=1)
 
+    _progress(progress_callback, "Building intraday load features")
+    intraday_features = build_intraday_load_feature_frame(five_min_load)
+    _progress(progress_callback, "Built intraday load features", advance=1)
+
+    _progress(progress_callback, "Building training frame")
     train_df = build_training_frame(load_df, hist_wx, btm_monthly, intraday_load_features=intraday_features)
     train_df.attrs["config"] = config
+    _progress(progress_callback, "Built training frame", advance=1)
 
     features = [c for c in XGB_FEATURES if c in train_df.columns]
     ensemble_weights = _production_ensemble_weights(config)
 
     backtest_days = int(config["training"].get("backtest_days", 45))
+    _progress(progress_callback, "Running leakage-safe backtest")
     backtest_raw_df = run_rolling_backtest(
         train_df=train_df,
         features=features,
@@ -772,6 +813,7 @@ def run_pipeline(config: dict, override_horizon_days: Optional[int] = None):
         backtest_days=backtest_days,
         config=config,
     )
+    _progress(progress_callback, "Completed leakage-safe backtest", advance=1)
 
     # Build correction lookups from the leakage-safe raw holdout residuals. These lookups are then
     # applied to both the future forecast and the backtest frame so stage-aware diagnostics can judge
@@ -780,6 +822,7 @@ def run_pipeline(config: dict, override_horizon_days: Optional[int] = None):
     targeted_meta_cfg = cal_cfg.get("targeted_residual_meta", {}) or {}
     residual_band_lookup = None
 
+    _progress(progress_callback, "Building correction artifacts")
     correction_artifacts = build_correction_artifacts(backtest_raw_df, config)
     lookup_bundle = correction_artifacts["lookup_bundle"]
     targeted_meta_artifact = correction_artifacts["targeted_meta_artifact"]
@@ -787,7 +830,9 @@ def run_pipeline(config: dict, override_horizon_days: Optional[int] = None):
     warm_lookup = correction_artifacts["warm_lookup"]
     cloud_solar_lookup = correction_artifacts["cloud_solar_lookup"]
     recent_profile = correction_artifacts["recent_profile"]
+    _progress(progress_callback, "Built correction artifacts", advance=1)
 
+    _progress(progress_callback, "Applying backtest correction chain")
     backtest_df = _apply_v126_correction_chain_to_frame(
         raw_df=backtest_raw_df,
         config=config,
@@ -798,16 +843,23 @@ def run_pipeline(config: dict, override_horizon_days: Optional[int] = None):
         cloud_solar_lookup=cloud_solar_lookup,
         simulate_recent=True,
     )
+    _progress(progress_callback, "Applied backtest correction chain", advance=1)
 
     # Train final models on all available data after the leakage-safe backtest is complete.
+    _progress(progress_callback, "Training final tree models")
     xgb_model, lgb_model, xgb_feats = train_tree_models(train_df, features, config=config, stage_name="final full-history")
+    _progress(progress_callback, "Trained final tree models", advance=1)
+
+    _progress(progress_callback, "Training benchmark models")
     prophet_fit = train_prophet(train_df, DEFAULT_PROPHET_REGRESSORS, config=config) if prophet_enabled(config) else None
     prophet_model = prophet_fit.model if prophet_fit is not None else None
     prophet_features = prophet_fit.regressors if prophet_fit is not None else []
     catboost_model, catboost_features = train_catboost(train_df, xgb_feats, config=config) if catboost_enabled(config) else (None, xgb_feats)
     features = xgb_feats
+    _progress(progress_callback, "Trained benchmark models", advance=1)
 
     five_min_cfg = config.get("five_min_load", {}) or {}
+    _progress(progress_callback, "Building future feature frame")
     future_frame = build_forecast_frame(
         fut_wx,
         btm_monthly,
@@ -822,8 +874,10 @@ def run_pipeline(config: dict, override_horizon_days: Optional[int] = None):
         end_dt = latest_hist_dt + pd.Timedelta(days=int(override_horizon_days))
         future_frame = future_frame[future_frame["DT"] <= end_dt].copy()
     future_frame = _trim_incomplete_future_weather(future_frame)
+    _progress(progress_callback, "Built future feature frame", advance=1)
 
     historical_seed = train_df[["DT", "MWH"]].copy().sort_values("DT")
+    _progress(progress_callback, "Running recursive forecast")
     raw_future = recursive_forecast(
         future_frame=future_frame,
         historical_seed=historical_seed,
@@ -835,7 +889,9 @@ def run_pipeline(config: dict, override_horizon_days: Optional[int] = None):
         prophet_features=prophet_features,
         catboost_model=catboost_model,
     )
+    _progress(progress_callback, "Completed recursive forecast", advance=1)
 
+    _progress(progress_callback, "Applying future correction chain")
     if bool(targeted_meta_cfg.get("enabled", True)):
         cal_future = apply_targeted_residual_meta_correction(
             future_df=raw_future,
@@ -919,10 +975,12 @@ def run_pipeline(config: dict, override_horizon_days: Optional[int] = None):
         cal_future["Recent_Corrected_Forecast_MWH"] = cal_future["Calibrated_Forecast_MWH"]
         cal_future["Final_Forecast_MWH"] = cal_future["Calibrated_Forecast_MWH"]
     cal_future = apply_operational_stage_selector(cal_future, config=config, forecast_col="Final_Forecast_MWH")
+    _progress(progress_callback, "Applied future correction chain", advance=1)
 
     scenario_columns: list[str] = []
-    for scenario in scenario_definitions(config):
+    for scenario in scenario_defs:
         name = str(scenario.get("name", "scenario"))
+        _progress(progress_callback, f"Running weather scenario: {name}")
         scenario_frame = make_weather_scenario_frame(future_frame, scenario)
         scenario_raw = recursive_forecast(
             future_frame=scenario_frame,
@@ -948,13 +1006,18 @@ def run_pipeline(config: dict, override_horizon_days: Optional[int] = None):
         col = scenario_column_name(name)
         cal_future[col] = pd.to_numeric(scenario_cal["Final_Forecast_MWH"], errors="coerce").to_numpy()
         scenario_columns.append(col)
+        _progress(progress_callback, f"Completed weather scenario: {name}", advance=1)
+
+    _progress(progress_callback, "Summarizing weather scenarios")
     cal_future = apply_weather_scenario_delta_caps(cal_future, scenario_columns, config=config)
     cal_future = add_scenario_summary_columns(cal_future, scenario_columns)
+    _progress(progress_callback, "Summarized weather scenarios", advance=1)
 
     # V12.9: lead-aware weather-uncertainty peak hedge. Lifts the hot/peak point
     # forecast using the warmer/cooler scenario re-predictions, scaled by the
     # daily-max temperature forecast error at each lead. Applied after stage
     # selection and before band construction so bands build on the hedged point.
+    _progress(progress_callback, "Applying production forecast guards")
     cal_future = apply_weather_robustness_hedge(
         cal_future,
         config=config,
@@ -967,7 +1030,9 @@ def run_pipeline(config: dict, override_horizon_days: Optional[int] = None):
         forecast_col="Final_Forecast_MWH",
         also_update_cols=("Stage_Selected_Forecast_MWH",),
     )
+    _progress(progress_callback, "Applied production forecast guards", advance=1)
 
+    _progress(progress_callback, "Building forecast bands")
     bands_cfg = config.get("bands", {})
     band_basis_df = backtest_df.copy()
     if "Final_Residual_MWH" in band_basis_df.columns:
@@ -990,9 +1055,13 @@ def run_pipeline(config: dict, override_horizon_days: Optional[int] = None):
         config=config,
         output_dir=config.get("project", {}).get("output_dir", "forecast_outputs"),
     )
+    _progress(progress_callback, "Built forecast bands", advance=1)
 
+    _progress(progress_callback, "Building dashboard display frame")
     display_df = build_display_df(train_df, final_future)
+    _progress(progress_callback, "Built dashboard display frame", advance=1)
 
+    _progress(progress_callback, "Building diagnostics")
     diagnostics = build_diagnostics_bundle(
         backtest_df=backtest_df,
         forecast_display_df=display_df,
@@ -1033,6 +1102,7 @@ def run_pipeline(config: dict, override_horizon_days: Optional[int] = None):
             "appended_recent_hourly_rows": int(len(added)),
             "appended_latest_dt": str(added["DT"].max()) if not added.empty else None,
         }
+    _progress(progress_callback, "Built diagnostics", advance=1)
 
     return {
         "historical_fit_df": train_df,

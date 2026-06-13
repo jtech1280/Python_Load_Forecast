@@ -65,8 +65,109 @@ def _tab_button(text: str, btn_id: str):
     )
 
 
-def make_layout(min_date=None, max_date=None, default_start_date=None, available_days=None):
+def _series_group_controls(series_options=None, series_default=None):
+    options = list(series_options or [])
+    if not options:
+        return html.Div(
+            "No forecast series available.",
+            style={"fontSize": "12px", "color": "#555", "marginBottom": "6px"},
+        )
+
+    default_values = set(series_default or [])
+    groups = []
+    for option in options:
+        group = option.get("group") or "Other"
+        if group not in groups:
+            groups.append(group)
+
+    children = []
+    for group in groups:
+        group_options = [
+            {"label": option["label"], "value": option["value"]}
+            for option in options
+            if (option.get("group") or "Other") == group
+        ]
+        group_values = [option["value"] for option in group_options if option["value"] in default_values]
+        children.append(
+            html.Div(
+                style={"marginBottom": "8px"},
+                children=[
+                    html.Div(group, style={"fontSize": "11px", "fontWeight": "700", "color": "#333", "margin": "6px 0 3px 0"}),
+                    dcc.Checklist(
+                        id={"type": "series-group", "group": group},
+                        options=group_options,
+                        value=group_values,
+                        labelStyle={"display": "block", "fontSize": "12px", "margin": "2px 0"},
+                        inputStyle={"marginRight": "5px"},
+                    ),
+                ],
+            )
+        )
+    return html.Div(children=children)
+
+
+def make_layout(
+    min_date=None,
+    max_date=None,
+    default_start_date=None,
+    available_days=None,
+    series_options=None,
+    series_default=None,
+):
     # Use dcc.Store for the right-side view mode (mirrors v11.6 tab experience).
+    series_controls = _series_group_controls(series_options, series_default) if series_options is not None else None
+    graph_option_children = []
+    if series_controls is not None:
+        graph_option_children.extend([_sidebar_label("Forecast Series"), series_controls])
+    graph_option_children.extend(
+        [
+            dcc.Checklist(
+                id="graph-options",
+                options=[
+                    {"label": "Highlight Max Values", "value": "highlight_max"},
+                    {"label": "Show Weather", "value": "show_weather"},
+                ],
+                value=["highlight_max", "show_weather"],
+                labelStyle={"display": "block", "fontSize": "12px", "margin": "4px 0"},
+                inputStyle={"marginRight": "5px"},
+            ),
+            _sidebar_label("Weather Variable to Plot"),
+            dcc.Dropdown(
+                id="weather-variable",
+                options=[
+                    {"label": "tempf", "value": "Temperature"},
+                    {"label": "daily max", "value": "Temperature_DailyMax"},
+                    {"label": "humid", "value": "Humidity_Norm"},
+                    {"label": "cloud", "value": "CloudCover_Norm"},
+                    {"label": "wind", "value": "WindSpeed_Mph"},
+                    {"label": "rain", "value": "PrecipIn"},
+                    {"label": "solar", "value": "Solar_Irradiance"},
+                    {"label": "btm solar", "value": "BTM_Solar_Proxy_MW"},
+                ],
+                value="Temperature",
+                clearable=False,
+                style={"fontSize": "12px"},
+            ),
+            _sidebar_label("Temperature Steps"),
+            dcc.Checklist(
+                id="temperature-steps",
+                options=[
+                    {"label": f"Plus {v}", "value": f"plus_{v}"}
+                    for v in range(7, 0, -1)
+                ]
+                + [{"label": "Baseline", "value": "baseline"}]
+                + [
+                    {"label": f"Minus {v}", "value": f"minus_{v}"}
+                    for v in range(1, 8)
+                ],
+                value=[f"plus_{v}" for v in range(7, 0, -1)]
+                + ["baseline"]
+                + [f"minus_{v}" for v in range(1, 8)],
+                labelStyle={"display": "block", "fontSize": "12px", "margin": "3px 0"},
+                inputStyle={"marginRight": "5px"},
+            ),
+        ]
+    )
     return html.Div(
         style={
             "fontFamily": FONT_FAMILY,
@@ -236,53 +337,7 @@ def make_layout(min_date=None, max_date=None, default_start_date=None, available
                     _section_header("Graph Options"),
                     html.Div(
                         style={"padding": "7px 6px"},
-                        children=[
-                            dcc.Checklist(
-                                id="graph-options",
-                                options=[
-                                    {"label": "Highlight Max Values", "value": "highlight_max"},
-                                    {"label": "Show Weather", "value": "show_weather"},
-                                ],
-                                value=["highlight_max", "show_weather"],
-                                labelStyle={"display": "block", "fontSize": "12px", "margin": "4px 0"},
-                                inputStyle={"marginRight": "5px"},
-                            ),
-                            _sidebar_label("Weather Variable to Plot"),
-                            dcc.Dropdown(
-                                id="weather-variable",
-                                options=[
-                                    {"label": "tempf", "value": "Temperature"},
-                                    {"label": "daily max", "value": "Temperature_DailyMax"},
-                                    {"label": "humid", "value": "Humidity_Norm"},
-                                    {"label": "cloud", "value": "CloudCover_Norm"},
-                                    {"label": "wind", "value": "WindSpeed_Mph"},
-                                    {"label": "rain", "value": "PrecipIn"},
-                                    {"label": "solar", "value": "Solar_Irradiance"},
-                                    {"label": "btm solar", "value": "BTM_Solar_Proxy_MW"},
-                                ],
-                                value="Temperature",
-                                clearable=False,
-                                style={"fontSize": "12px"},
-                            ),
-                            _sidebar_label("Temperature Steps"),
-                            dcc.Checklist(
-                                id="temperature-steps",
-                                options=[
-                                    {"label": f"Plus {v}", "value": f"plus_{v}"}
-                                    for v in range(7, 0, -1)
-                                ]
-                                + [{"label": "Baseline", "value": "baseline"}]
-                                + [
-                                    {"label": f"Minus {v}", "value": f"minus_{v}"}
-                                    for v in range(1, 8)
-                                ],
-                                value=[f"plus_{v}" for v in range(7, 0, -1)]
-                                + ["baseline"]
-                                + [f"minus_{v}" for v in range(1, 8)],
-                                labelStyle={"display": "block", "fontSize": "12px", "margin": "3px 0"},
-                                inputStyle={"marginRight": "5px"},
-                            ),
-                        ],
+                        children=graph_option_children,
                     ),
                     _section_header("Historical Data"),
                     html.Div(

@@ -77,6 +77,31 @@ def _as_num(x) -> pd.Series:
     return pd.to_numeric(x, errors="coerce")
 
 
+def _local_datetime_series(values, index: pd.Index | None = None) -> pd.Series:
+    raw = values if isinstance(values, pd.Series) else pd.Series(values, index=index)
+    try:
+        return pd.to_datetime(raw, errors="coerce")
+    except ValueError:
+        # Exported forecast CSVs can contain both -08:00 and -07:00 offsets.
+        # The gate is keyed to local operating hour/day, so preserve the local
+        # clock instead of converting these rows to UTC.
+        cleaned = raw.astype(str).str.strip().str.replace(r"(?:[+-]\d{2}:?\d{2}|Z)$", "", regex=True)
+        return pd.to_datetime(cleaned, errors="coerce")
+
+
+def _forecast_anchor_mask(df: pd.DataFrame, preferred_col: str | None = None) -> pd.Series:
+    candidates = [preferred_col, "Final_Forecast_MWH", "Forecast", "Raw_Forecast_MWH", "Stage_Selected_Forecast_MWH"]
+    seen: set[str] = set()
+    for col in candidates:
+        if not col or col in seen or col not in df.columns:
+            continue
+        seen.add(col)
+        values = _as_num(df[col])
+        if values.notna().any():
+            return values.notna()
+    return pd.Series(True, index=df.index, dtype=bool)
+
+
 def _cfg(config: dict | None) -> dict:
     raw = config or {}
     if "calibration" in raw:
@@ -107,7 +132,7 @@ def _bias_by_lead_lookup(cfg: dict) -> dict[int, float]:
     return {int(k): float(v) for k, v in raw.items()}
 
 
-def _lead_series(df: pd.DataFrame, lead_col: str | None) -> pd.Series:
+def _lead_series(df: pd.DataFrame, lead_col: str | None, anchor_col: str | None = None) -> pd.Series:
     """Resolve a lead-days series. Prefer an explicit realism lead column, then
     Forecast_Weather_Lead_Days, then Forecast_Day."""
     candidates = []
@@ -119,6 +144,12 @@ def _lead_series(df: pd.DataFrame, lead_col: str | None) -> pd.Series:
             s = _as_num(df[col])
             if s.notna().any():
                 return s
+    if "DT" in df.columns:
+        dt = _local_datetime_series(df["DT"])
+        if dt.notna().any():
+            anchor = _forecast_anchor_mask(df, anchor_col) & dt.notna()
+            first_day = (dt[anchor].min() if anchor.any() else dt.min()).normalize()
+            return ((dt.dt.normalize() - first_day).dt.days + 1).astype(float)
     return pd.Series(np.nan, index=df.index, dtype=float)
 
 
@@ -194,10 +225,11 @@ def apply_weather_robustness_hedge(
     if "Hour" in out.columns:
         hour = _as_num(out["Hour"]).fillna(-1).astype(int)
     else:
-        hour = pd.to_datetime(out.get("DT"), errors="coerce").dt.hour.fillna(-1).astype(int)
+        dt = _local_datetime_series(out.get("DT", pd.Series(index=out.index, dtype=object)), out.index)
+        hour = dt.dt.hour.fillna(-1).astype(int)
     fmax = _as_num(out[maxtemp_col]) if maxtemp_col in out.columns else pd.Series(np.nan, index=out.index)
 
-    lead = _lead_series(out, lead_col)
+    lead = _lead_series(out, lead_col, anchor_col=base_col)
     forecast_day = _as_num(out["Forecast_Day"]) if "Forecast_Day" in out.columns else lead
 
     sigma = lead.map(_sigma)

@@ -1445,3 +1445,6 @@ def create_dashboard_app(historical_fit_df: pd.DataFrame, future_results: dict, 
         return "__ALL_DIAGNOSTICS__"
 
     return app
+
+
+from forecasting.dashboard.dashboard_app import create_dashboard_app as create_dashboard_app

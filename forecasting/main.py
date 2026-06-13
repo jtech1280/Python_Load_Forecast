@@ -102,7 +102,51 @@ def _acquire_replay_lock(output_dir: Path) -> tuple[int, Path] | None:
     return fd, lock_path
 
 
-def main():
+class _ForecastProgressBar:
+    def __init__(self) -> None:
+        self._bar = None
+        self._disabled = str(os.environ.get("FORECAST_PROGRESS", "1")).strip().lower() in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+
+    def __call__(self, label: str, advance: int = 0, total: int | None = None) -> None:
+        if self._disabled:
+            return
+
+        if self._bar is None:
+            try:
+                from tqdm.auto import tqdm
+            except ImportError:
+                self._disabled = True
+                return
+            self._bar = tqdm(
+                total=total,
+                desc=label,
+                unit="step",
+                dynamic_ncols=True,
+                ascii=True,
+                leave=True,
+            )
+        else:
+            if total is not None and total != self._bar.total:
+                self._bar.total = total
+                self._bar.refresh()
+            if label:
+                self._bar.set_description_str(label)
+
+        if advance:
+            self._bar.update(advance)
+
+    def close(self) -> None:
+        if self._bar is not None:
+            self._bar.close()
+            self._bar = None
+
+
+def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Roseville System Load Forecast V12.8 (targeted solar-loss refinement + risk bands + max CPU/GPU)")
     parser.add_argument("--run-dashboard", action="store_true", help="Launch Dash dashboard after forecast")
     parser.add_argument("--horizon-days", type=int, default=None, help="Override forecast horizon days (default from config)")
@@ -128,7 +172,7 @@ def main():
     parser.add_argument("--replay-fixed-origins", type=str, default=None, help="Comma-separated fixed rolling replay origin dates")
     parser.add_argument("--replay-fixed-origins-file", type=str, default=None, help="Text file containing one fixed rolling replay origin date per line")
     parser.add_argument("--train-start-date", type=str, default=None, help="Override training and historical weather start date, e.g. 2018-01-01")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     config = load_config()
 
@@ -242,7 +286,15 @@ def main():
     from forecasting.model.catboost_model import write_catboost_training_info, get_last_catboost_training_info
     from forecasting.utils.output_archive import save_distinct_snapshot
 
-    results = run_pipeline(config, override_horizon_days=args.horizon_days)
+    progress = _ForecastProgressBar()
+    try:
+        results = run_pipeline(
+            config,
+            override_horizon_days=args.horizon_days,
+            progress_callback=progress,
+        )
+    finally:
+        progress.close()
 
     replay_cfg = ((config.get("training", {}) or {}).get("rolling_origin_replay", {}) or {})
     if results is not None and bool(replay_cfg.get("enabled", False)):
@@ -336,7 +388,7 @@ def main():
             print(f"Saved diagnostics manifest to: {written.get('diagnostics_manifest')}")
 
     if args.run_dashboard and results is not None:
-        from forecasting.dashboard.app import create_dashboard_app
+        from forecasting.dashboard.dashboard_app import create_dashboard_app
         app = create_dashboard_app(
             historical_fit_df=results["historical_fit_df"],
             future_results=results["future"],

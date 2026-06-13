@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import math
+import os
+import sys
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
 import plotly.graph_objs as go
@@ -9,7 +13,15 @@ from datetime import date as date_type
 
 from dash import Dash, Input, Output, State, html, dcc, ALL
 from dash import callback_context
-from .layout import make_layout
+
+if __package__ in {None, ""}:
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    from forecasting.dashboard.layout import make_layout
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    from .layout import make_layout
 
 BRAND_BLUE = "#0057B8"
 BRAND_RED = "#D62728"
@@ -35,6 +47,47 @@ TEMP_SENSITIVITY_STEPS = [
     ("minus_6", "Minus 6", -6, "#b0bafb"),
     ("minus_7", "Minus 7", -7, "#c9cffc"),
 ]
+
+def _hour_ending_dt(values):
+    return pd.to_datetime(values, errors="coerce") + pd.Timedelta(hours=1)
+
+
+def _format_hour_ending(value, include_year: bool = True) -> str:
+    ts = pd.to_datetime(value, errors="coerce")
+    if pd.isna(ts):
+        return ""
+    date_fmt = "%m/%d/%Y" if include_year else "%m/%d"
+    return f"{ts.strftime(date_fmt)} HE{int(ts.hour) + 1:02d}"
+
+
+def _has_explicit_timezone(values: pd.Series) -> bool:
+    non_null = values.dropna()
+    if non_null.empty:
+        return False
+    if non_null.map(lambda v: getattr(v, "tzinfo", None) is not None).any():
+        return True
+    return non_null.astype(str).str.strip().str.contains(r"(?:[zZ]|[+-]\d{2}:?\d{2})$", regex=True, na=False).any()
+
+
+def _coerce_dashboard_dt(values: pd.Series, project_tz: str | None) -> pd.Series:
+    series = values if isinstance(values, pd.Series) else pd.Series(values)
+    if _has_explicit_timezone(series):
+        out = pd.to_datetime(series, errors="coerce", utc=True)
+        if project_tz:
+            try:
+                out = out.dt.tz_convert(project_tz)
+            except Exception:
+                pass
+        return out
+
+    out = pd.to_datetime(series, errors="coerce")
+    if project_tz:
+        try:
+            out = out.dt.tz_localize(project_tz, ambiguous="NaT", nonexistent="NaT")
+        except Exception:
+            pass
+    return out
+
 
 OPERATOR_TABLE_COLUMNS = [
     "DT", "Forecast", "Low", "Expected", "High", "Actual",
@@ -133,6 +186,7 @@ def _display_confidence_band(df: pd.DataFrame) -> tuple[pd.Series, pd.Series, pd
 # (e.g. the new Weather_Robustness_Hedge stage).
 FORECAST_SERIES_REGISTRY = [
     {"value": "Forecast",        "label": "Published Forecast", "col": "Forecast",                            "line": dict(color=BRAND_BLUE,   width=2.8),               "group": "Published"},
+    {"value": "Calibrated",      "label": "Calibrated Forecast","col": "Calibrated_Forecast_MWH",             "line": dict(color="#0057B8",    width=2.0, dash="dash"),   "group": "Published"},
     {"value": "Stage_Selected",  "label": "Stage-Selected",     "col": "Stage_Selected_Forecast_MWH",         "line": dict(color="#0091D5",    width=1.8, dash="dash"),   "group": "Published"},
     {"value": "Actual",          "label": "Actual",             "col": "Actual",                              "line": dict(color=BRAND_RED,    width=2.1),               "group": "Reference"},
     {"value": "Raw",             "label": "Raw XGB+LGB",        "col": "Raw_Forecast_MWH",                    "line": dict(color=BRAND_PURPLE, width=1.5, dash="dot"),    "group": "Component models"},
@@ -149,7 +203,7 @@ FORECAST_SERIES_REGISTRY = [
     {"value": "ScenWarmer",      "label": "Scenario +3F",       "col": "WeatherScenario_warmer_P50_MWH",      "line": dict(color="#e85151",    width=1.2, dash="dashdot"),"group": "Weather scenarios"},
     {"value": "ScenHot5",        "label": "Scenario +5F",       "col": "WeatherScenario_hot_stress_5f_P50_MWH","line": dict(color="#c91f1f",   width=1.2, dash="dashdot"),"group": "Weather scenarios"},
     {"value": "ScenCooler",      "label": "Scenario -3F",       "col": "WeatherScenario_cooler_P50_MWH",      "line": dict(color="#6074f3",    width=1.2, dash="dashdot"),"group": "Weather scenarios"},
-    {"value": "Previous",        "label": "Previous Forecast",  "col": "Previous_Forecast_MWH",               "line": dict(color="#4D4D4D",    width=2.0, dash="dash"),   "group": "Prior runs"},
+    {"value": "Previous",        "label": "Historical Forecast","col": "Previous_Forecast_MWH",               "line": dict(color="#4D4D4D",    width=2.0, dash="dash"),   "group": "Reference"},
     {"value": "PriorRun",        "label": "Prior Run Forecast", "col": "Prior_Run_Forecast_MWH",              "line": dict(color="#5A5A5A",    width=2.0, dash="dashdot"),"group": "Prior runs"},
 ]
 
@@ -160,7 +214,166 @@ FORECAST_TOGGLE_SERIES = [
     {"value": "PreviousMiss",   "label": "Previous Miss (bars)",   "col": "Previous_Forecast_Miss_MWH",          "group": "Prior runs"},
 ]
 
-DEFAULT_FORECAST_SERIES = ["Forecast", "Actual", "band"]
+DEFAULT_FORECAST_SERIES = ["Forecast", "Actual", "Previous", "XGB", "LGB", "Prophet", "Calibrated", "band"]
+
+FORECAST_WEATHER_SERIES = {
+    "Temperature": {
+        "forecast_col": "Forecast_Run_Temperature_F",
+        "label": "Forecast Temperature",
+        "actual_label": "Actual Temperature",
+        "source_cols": ["TempF", "Temperature"],
+    },
+    "Temperature_DailyMax": {
+        "forecast_col": "Forecast_Run_Temperature_DailyMax_F",
+        "label": "Forecast Daily Max",
+        "actual_label": "Actual Daily Max",
+        "source_cols": ["Temperature_DailyMax"],
+    },
+    "Humidity_Norm": {
+        "forecast_col": "Forecast_Run_Humidity_Norm",
+        "label": "Forecast Humidity",
+        "actual_label": "Actual Humidity",
+        "source_cols": ["HumidityPct", "Humidity_Norm"],
+    },
+    "CloudCover_Norm": {
+        "forecast_col": "Forecast_Run_CloudCover_Norm",
+        "label": "Forecast Cloud",
+        "actual_label": "Actual Cloud",
+        "source_cols": ["CloudCoverPct", "CloudCover_Norm"],
+    },
+    "WindSpeed_Mph": {
+        "forecast_col": "Forecast_Run_WindSpeed_Mph",
+        "label": "Forecast Wind",
+        "actual_label": "Actual Wind",
+        "source_cols": ["WindSpeedMph", "WindSpeed_Mph"],
+    },
+    "PrecipIn": {
+        "forecast_col": "Forecast_Run_PrecipIn",
+        "label": "Forecast Rain",
+        "actual_label": "Actual Rain",
+        "source_cols": ["PrecipIn"],
+    },
+    "Solar_Irradiance": {
+        "forecast_col": "Forecast_Run_Solar_Irradiance",
+        "label": "Forecast Solar",
+        "actual_label": "Actual Solar",
+        "source_cols": ["GHI_Wm2", "Solar_Irradiance"],
+    },
+}
+
+PRIOR_WEATHER_SERIES = {
+    "Temperature": {
+        "prior_col": "Prior_Run_Temperature_F",
+        "label": "Prior Run Temperature",
+        "source_cols": ["Temperature", "TempF"],
+    },
+    "Temperature_DailyMax": {
+        "prior_col": "Prior_Run_Temperature_DailyMax_F",
+        "label": "Prior Run Daily Max",
+        "source_cols": ["Temperature_DailyMax"],
+    },
+    "Humidity_Norm": {
+        "prior_col": "Prior_Run_Humidity_Norm",
+        "label": "Prior Run Humidity",
+        "source_cols": ["Humidity_Norm", "HumidityPct"],
+    },
+    "CloudCover_Norm": {
+        "prior_col": "Prior_Run_CloudCover_Norm",
+        "label": "Prior Run Cloud",
+        "source_cols": ["CloudCover_Norm", "CloudCoverPct"],
+    },
+    "WindSpeed_Mph": {
+        "prior_col": "Prior_Run_WindSpeed_Mph",
+        "label": "Prior Run Wind",
+        "source_cols": ["WindSpeed_Mph", "WindSpeedMph"],
+    },
+    "PrecipIn": {
+        "prior_col": "Prior_Run_PrecipIn",
+        "label": "Prior Run Rain",
+        "source_cols": ["PrecipIn"],
+    },
+    "Solar_Irradiance": {
+        "prior_col": "Prior_Run_Solar_Irradiance",
+        "label": "Prior Run Solar",
+        "source_cols": ["Solar_Irradiance", "GHI_Wm2"],
+    },
+    "BTM_Solar_Proxy_MW": {
+        "prior_col": "Prior_Run_BTM_Solar_Proxy_MW",
+        "label": "Prior Run BTM Solar",
+        "source_cols": ["BTM_Solar_Proxy_MW"],
+    },
+}
+
+
+def _normalize_weather_values(source_col: str, values: pd.Series) -> pd.Series:
+    out = pd.to_numeric(values, errors="coerce")
+    if source_col in {"HumidityPct", "CloudCoverPct"} and out.dropna().max() > 1.5:
+        out = out / 100.0
+    return out
+
+
+def _merge_weather_source(
+    out: pd.DataFrame,
+    source_df: pd.DataFrame | None,
+    specs: dict[str, dict],
+    target_col_key: str,
+) -> pd.DataFrame:
+    if source_df is None or source_df.empty or "DT" not in source_df.columns:
+        return out
+
+    source_cols = []
+    for spec in specs.values():
+        for col in spec["source_cols"]:
+            if col in source_df.columns and col not in source_cols:
+                source_cols.append(col)
+    if not source_cols:
+        return out
+
+    prior = source_df[["DT"] + source_cols].copy()
+    prior["__DT_KEY"] = pd.to_datetime(prior["DT"], errors="coerce", utc=True)
+
+    merge_cols = []
+    for spec in specs.values():
+        values = None
+        for source_col in spec["source_cols"]:
+            if source_col not in prior.columns:
+                continue
+            source_values = _normalize_weather_values(source_col, prior[source_col])
+            values = source_values if values is None else values.combine_first(source_values)
+        if values is None:
+            continue
+        merge_col = f"__weather_{spec[target_col_key]}"
+        prior[merge_col] = values
+        merge_cols.append((merge_col, spec[target_col_key]))
+
+    if not merge_cols:
+        return out
+
+    keep = ["__DT_KEY"] + [merge_col for merge_col, _target_col in merge_cols]
+    prior = prior.dropna(subset=["__DT_KEY"]).drop_duplicates(subset=["__DT_KEY"], keep="last")
+    out = out.merge(prior[keep], on="__DT_KEY", how="left")
+    for merge_col, target_col in merge_cols:
+        values = pd.to_numeric(out[merge_col], errors="coerce")
+        if target_col in out.columns:
+            out[target_col] = pd.to_numeric(out[target_col], errors="coerce").combine_first(values)
+        else:
+            out[target_col] = values
+        out.drop(columns=[merge_col], inplace=True, errors="ignore")
+    return out
+
+
+def _merge_prior_weather_source(out: pd.DataFrame, source_df: pd.DataFrame | None) -> pd.DataFrame:
+    return _merge_weather_source(out, source_df, PRIOR_WEATHER_SERIES, "prior_col")
+
+
+def _attach_forecast_run_weather(display_df: pd.DataFrame, forecast_weather_df: pd.DataFrame | None) -> pd.DataFrame:
+    if display_df is None or display_df.empty or "DT" not in display_df.columns:
+        return display_df
+    out = display_df.copy()
+    out["__DT_KEY"] = pd.to_datetime(out["DT"], errors="coerce", utc=True)
+    out = _merge_weather_source(out, forecast_weather_df, FORECAST_WEATHER_SERIES, "forecast_col")
+    out.drop(columns=["__DT_KEY"], inplace=True, errors="ignore")
+    return out
 
 
 def forecast_series_controls(df: pd.DataFrame):
@@ -181,6 +394,7 @@ def forecast_series_controls(df: pd.DataFrame):
 
 def _make_forecast_graph(df: pd.DataFrame, weather_variable: str | None, selected_series: list[str] | None = None):
     fig = go.Figure()
+    x_hour_ending = _hour_ending_dt(df["DT"])
     # When no explicit selection is provided (safety / legacy), fall back to a
     # sensible default that resembles the previous always-on chart.
     if selected_series is None:
@@ -195,7 +409,12 @@ def _make_forecast_graph(df: pd.DataFrame, weather_variable: str | None, selecte
         return col in df.columns and pd.to_numeric(df[col], errors="coerce").notna().any()
 
     has_weather = bool(weather_variable and weather_variable != "none" and weather_variable in df.columns)
-    has_prior_temp = _has("Prior_Run_Temperature_F")
+    forecast_weather_spec = FORECAST_WEATHER_SERIES.get(weather_variable or "") if has_weather else None
+    forecast_weather_col = forecast_weather_spec.get("forecast_col") if forecast_weather_spec else None
+    has_forecast_weather = bool(forecast_weather_col and _has(forecast_weather_col))
+    prior_weather_spec = PRIOR_WEATHER_SERIES.get(weather_variable or "") if has_weather else None
+    prior_weather_col = prior_weather_spec.get("prior_col") if prior_weather_spec else None
+    has_prior_weather = bool(prior_weather_col and _has(prior_weather_col))
     show_change = _want("ForecastChange") and _has("Forecast_Change_From_Prior_Run_MWH")
     show_miss = _want("PreviousMiss") and _has("Previous_Forecast_Miss_MWH")
     has_delta_axis = show_change or show_miss
@@ -204,12 +423,12 @@ def _make_forecast_graph(df: pd.DataFrame, weather_variable: str | None, selecte
     if _want("band") and {"Upper_Band", "Lower_Band"}.issubset(df.columns):
         display_upper, display_lower, display_band = _display_confidence_band(df)
         fig.add_trace(go.Scatter(
-            x=df["DT"], y=display_upper, mode="lines", name="Display Upper Band",
+            x=x_hour_ending, y=display_upper, mode="lines", name="Display Upper Band",
             line=dict(color=BAND_EDGE, width=0.7), showlegend=False,
             hovertemplate="Display Band<br>%{x|%Y-%m-%d %H:%M}<br>Upper: %{y:,.1f} MWh<extra></extra>",
         ))
         fig.add_trace(go.Scatter(
-            x=df["DT"], y=display_lower, mode="lines", name="Smoothed Forecast Band",
+            x=x_hour_ending, y=display_lower, mode="lines", name="Smoothed Forecast Band",
             fill="tonexty", fillcolor=BAND_FILL, line=dict(color=BAND_EDGE, width=0.7),
             customdata=np.column_stack([
                 pd.to_numeric(df.get("Band", pd.Series(np.nan, index=df.index)), errors="coerce"),
@@ -228,7 +447,7 @@ def _make_forecast_graph(df: pd.DataFrame, weather_variable: str | None, selecte
         delta = pd.to_numeric(df["Forecast_Change_From_Prior_Run_MWH"], errors="coerce")
         delta_axis = "y3" if has_weather else "y2"
         fig.add_trace(go.Bar(
-            x=df["DT"], y=delta, name="Forecast Change",
+            x=x_hour_ending, y=delta, name="Forecast Change",
             marker_color=np.where(delta.fillna(0.0) >= 0.0, BRAND_BLUE, BRAND_PURPLE),
             opacity=0.24, yaxis=delta_axis,
             hovertemplate="Forecast Change<br>%{x|%Y-%m-%d %H:%M}<br>Current - Prior: %{y:+,.1f} MWh<extra></extra>",
@@ -237,7 +456,7 @@ def _make_forecast_graph(df: pd.DataFrame, weather_variable: str | None, selecte
         miss = pd.to_numeric(df["Previous_Forecast_Miss_MWH"], errors="coerce")
         miss_axis = "y3" if has_weather else "y2"
         fig.add_trace(go.Bar(
-            x=df["DT"], y=miss, name="Previous Miss",
+            x=x_hour_ending, y=miss, name="Previous Miss",
             marker_color=np.where(miss.fillna(0.0) >= 0.0, BRAND_GOLD, BRAND_PURPLE),
             opacity=0.32, yaxis=miss_axis,
             hovertemplate="Previous Miss<br>%{x|%Y-%m-%d %H:%M}<br>Actual - Forecast: %{y:+,.1f} MWh<extra></extra>",
@@ -253,7 +472,7 @@ def _make_forecast_graph(df: pd.DataFrame, weather_variable: str | None, selecte
     for s in line_order:
         if _want(s["value"]) and _has(s["col"]):
             fig.add_trace(go.Scatter(
-                x=df["DT"], y=pd.to_numeric(df[s["col"]], errors="coerce"),
+                x=x_hour_ending, y=pd.to_numeric(df[s["col"]], errors="coerce"),
                 mode="lines", name=s["label"], line=dict(**s["line"]),
                 hovertemplate=f"{s['label']}<br>%{{x|%Y-%m-%d %H:%M}}<br>%{{y:,.1f}} MWh<extra></extra>",
             ))
@@ -267,7 +486,7 @@ def _make_forecast_graph(df: pd.DataFrame, weather_variable: str | None, selecte
             first_forecast = forecast_rows.sort_values("DT").iloc[0]
             if pd.to_datetime(first_forecast["DT"], errors="coerce") > pd.to_datetime(latest_actual["DT"], errors="coerce"):
                 fig.add_trace(go.Scatter(
-                    x=[latest_actual["DT"], first_forecast["DT"]],
+                    x=[_hour_ending_dt(latest_actual["DT"]), _hour_ending_dt(first_forecast["DT"])],
                     y=[latest_actual["Actual"], first_forecast["Forecast"]],
                     mode="lines+markers", name="Actual-Forecast Handoff",
                     line=dict(color="#222222", width=1.8, dash="dot"),
@@ -276,16 +495,33 @@ def _make_forecast_graph(df: pd.DataFrame, weather_variable: str | None, selecte
                 ))
 
     if has_weather:
+        weather_y = pd.to_numeric(df[weather_variable], errors="coerce")
+        weather_name = weather_variable
+        weather_line = dict(color=BRAND_GOLD, width=1.9, dash="dash")
+        if has_forecast_weather:
+            actual_mask = pd.to_numeric(df.get("Actual", pd.Series(np.nan, index=df.index)), errors="coerce").notna()
+            if actual_mask.any():
+                weather_y = weather_y.where(actual_mask)
+            weather_name = forecast_weather_spec.get("actual_label", weather_variable)
+            weather_line = dict(color=BRAND_GOLD, width=2.0)
         fig.add_trace(go.Scatter(
-            x=df["DT"], y=df[weather_variable], mode="lines", name=weather_variable,
-            yaxis="y2", line=dict(color=BRAND_GOLD, width=1.8, dash="dash")
+            x=x_hour_ending, y=weather_y, mode="lines", name=weather_name,
+            yaxis="y2", line=weather_line,
+            hovertemplate=f"{weather_name}<br>%{{x|%Y-%m-%d %H:%M}}<br>%{{y:,.1f}}<extra></extra>",
         ))
-        if weather_variable == "Temperature" and has_prior_temp:
+        if has_forecast_weather:
             fig.add_trace(go.Scatter(
-                x=df["DT"], y=pd.to_numeric(df["Prior_Run_Temperature_F"], errors="coerce"),
-                mode="lines", name="Prior Run Temperature", yaxis="y2",
+                x=x_hour_ending, y=pd.to_numeric(df[forecast_weather_col], errors="coerce"),
+                mode="lines", name=forecast_weather_spec["label"], yaxis="y2",
+                line=dict(color="#D97706", width=1.8, dash="dash"),
+                hovertemplate=f"{forecast_weather_spec['label']}<br>%{{x|%Y-%m-%d %H:%M}}<br>%{{y:,.1f}}<extra></extra>",
+            ))
+        if has_prior_weather:
+            fig.add_trace(go.Scatter(
+                x=x_hour_ending, y=pd.to_numeric(df[prior_weather_col], errors="coerce"),
+                mode="lines", name=prior_weather_spec["label"], yaxis="y2",
                 line=dict(color="#8A6D1D", width=1.5, dash="dot"),
-                hovertemplate="Prior Run Temperature<br>%{x|%Y-%m-%d %H:%M}<br>%{y:,.1f} F<extra></extra>",
+                hovertemplate=f"{prior_weather_spec['label']}<br>%{{x|%Y-%m-%d %H:%M}}<br>%{{y:,.1f}}<extra></extra>",
             ))
 
     yaxis2_title = weather_variable if has_weather else ("Delta MWh" if has_delta_axis else "")
@@ -294,7 +530,7 @@ def _make_forecast_graph(df: pd.DataFrame, weather_variable: str | None, selecte
         yaxis3 = {"title": "Delta MWh", "overlaying": "y", "side": "right", "anchor": "free", "position": 0.98, "showgrid": False}
     fig.update_layout(
         title="Forecast vs Actual - select component models / stages / output in the Series panel",
-        xaxis={"title": "Date / Hour", "showgrid": True, "gridcolor": "rgba(0,87,184,0.10)"},
+        xaxis={"title": "Date / Hour Ending", "showgrid": True, "gridcolor": "rgba(0,87,184,0.10)"},
         yaxis={"title": "MWh", "showgrid": True, "gridcolor": "rgba(0,87,184,0.10)"},
         yaxis2={"title": yaxis2_title, "overlaying": "y", "side": "right", "showgrid": False},
         yaxis3=yaxis3,
@@ -323,6 +559,22 @@ def _attach_previous_forecast_history(display_df: pd.DataFrame, backtest_df: pd.
     if forecast_col is None:
         return display_df
 
+    backtest_forecast_cols = [
+        "Raw_Forecast_MWH",
+        "XGB_Pred_MWH",
+        "LGB_Pred_MWH",
+        "CatBoost_Pred_MWH",
+        "Prophet_Pred_MWH",
+        "Calibrated_Forecast_MWH",
+        "Targeted_Meta_Adjusted_Forecast_MWH",
+        "Residual_Calibrated_Forecast_MWH",
+        "Warm_Ramp_Adjusted_Forecast_MWH",
+        "Cloud_Solar_Adjusted_Forecast_MWH",
+        "Peak_Risk_Adjusted_Forecast_MWH",
+        "Recent_Corrected_Forecast_MWH",
+        "Stage_Selected_Forecast_MWH",
+    ]
+
     keep = ["DT", forecast_col]
     for col in ["Final_Residual_MWH", "Final_AbsError_MWH", "Actual_MWH"]:
         if col in backtest_df.columns:
@@ -342,9 +594,25 @@ def _attach_previous_forecast_history(display_df: pd.DataFrame, backtest_df: pd.
     else:
         prev["Previous_Forecast_AbsMiss_MWH"] = prev["Previous_Forecast_Miss_MWH"].abs()
 
-    prev = prev[["DT", "Previous_Forecast_MWH", "Previous_Forecast_Miss_MWH", "Previous_Forecast_AbsMiss_MWH"]]
+    component_cols = [c for c in backtest_forecast_cols if c in backtest_df.columns]
+    if component_cols:
+        component = backtest_df[["DT"] + component_cols].copy()
+        component.rename(columns={c: f"__hist_{c}" for c in component_cols}, inplace=True)
+        prev = prev.merge(component, on="DT", how="left")
+
+    prev_keep = ["DT", "Previous_Forecast_MWH", "Previous_Forecast_Miss_MWH", "Previous_Forecast_AbsMiss_MWH"]
+    prev_keep.extend([f"__hist_{c}" for c in component_cols])
+    prev = prev[prev_keep]
     prev = prev.dropna(subset=["DT"]).drop_duplicates(subset=["DT"], keep="last")
     out = display_df.merge(prev, on="DT", how="left")
+    for col in component_cols:
+        hist_col = f"__hist_{col}"
+        hist_values = pd.to_numeric(out[hist_col], errors="coerce")
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").combine_first(hist_values)
+        else:
+            out[col] = hist_values
+        out.drop(columns=[hist_col], inplace=True, errors="ignore")
     return out
 
 
@@ -374,21 +642,13 @@ def _attach_prior_run_comparison(
                 - pd.to_numeric(out.get("Prior_Run_Forecast_MWH"), errors="coerce")
             )
 
-    if previous_weather_df is not None and not previous_weather_df.empty and "DT" in previous_weather_df.columns:
-        temp_col = "TempF" if "TempF" in previous_weather_df.columns else None
-        if temp_col is None and "Temperature" in previous_weather_df.columns:
-            temp_col = "Temperature"
-        if temp_col is not None:
-            prev_wx = previous_weather_df[["DT", temp_col]].copy()
-            prev_wx["__DT_KEY"] = pd.to_datetime(prev_wx["DT"], errors="coerce", utc=True)
-            prev_wx.rename(columns={temp_col: "Prior_Run_Temperature_F"}, inplace=True)
-            prev_wx["Prior_Run_Temperature_F"] = pd.to_numeric(prev_wx["Prior_Run_Temperature_F"], errors="coerce")
-            prev_wx = prev_wx.dropna(subset=["__DT_KEY"]).drop_duplicates(subset=["__DT_KEY"], keep="last")
-            out = out.merge(prev_wx[["__DT_KEY", "Prior_Run_Temperature_F"]], on="__DT_KEY", how="left")
-            out["Temperature_Change_From_Prior_Run_F"] = (
-                pd.to_numeric(out.get("Temperature"), errors="coerce")
-                - pd.to_numeric(out.get("Prior_Run_Temperature_F"), errors="coerce")
-            )
+    out = _merge_prior_weather_source(out, previous_forecast_df)
+    out = _merge_prior_weather_source(out, previous_weather_df)
+    if "Temperature" in out.columns and "Prior_Run_Temperature_F" in out.columns:
+        out["Temperature_Change_From_Prior_Run_F"] = (
+            pd.to_numeric(out.get("Temperature"), errors="coerce")
+            - pd.to_numeric(out.get("Prior_Run_Temperature_F"), errors="coerce")
+        )
 
     out.drop(columns=["__DT_KEY"], inplace=True, errors="ignore")
     return out
@@ -399,16 +659,17 @@ def _make_backtest_graph(backtest_df: pd.DataFrame):
     if backtest_df is None or backtest_df.empty:
         fig.update_layout(title="Backtest unavailable")
         return fig
-    fig.add_trace(go.Scatter(x=backtest_df["DT"], y=backtest_df["Actual_MWH"], mode="lines", name="Actual", line=dict(color=BRAND_RED, width=2.0)))
-    fig.add_trace(go.Scatter(x=backtest_df["DT"], y=backtest_df["Raw_Forecast_MWH"], mode="lines", name="Holdout Raw XGB+LGB", line=dict(color=BRAND_PURPLE, width=1.5, dash="dot")))
+    x_hour_ending = _hour_ending_dt(backtest_df["DT"])
+    fig.add_trace(go.Scatter(x=x_hour_ending, y=backtest_df["Actual_MWH"], mode="lines", name="Actual", line=dict(color=BRAND_RED, width=2.0)))
+    fig.add_trace(go.Scatter(x=x_hour_ending, y=backtest_df["Raw_Forecast_MWH"], mode="lines", name="Holdout Raw XGB+LGB", line=dict(color=BRAND_PURPLE, width=1.5, dash="dot")))
     if "Recent_Corrected_Forecast_MWH" in backtest_df.columns:
-        fig.add_trace(go.Scatter(x=backtest_df["DT"], y=backtest_df["Recent_Corrected_Forecast_MWH"], mode="lines", name="Recent Corrected", line=dict(color=BRAND_BLUE, width=2.2)))
+        fig.add_trace(go.Scatter(x=x_hour_ending, y=backtest_df["Recent_Corrected_Forecast_MWH"], mode="lines", name="Recent Corrected", line=dict(color=BRAND_BLUE, width=2.2)))
     if "Prophet_Pred_MWH" in backtest_df.columns:
-        fig.add_trace(go.Scatter(x=backtest_df["DT"], y=backtest_df["Prophet_Pred_MWH"], mode="lines", name="Prophet", line=dict(color=BRAND_GREEN, width=1.2, dash="dash")))
-    fig.add_trace(go.Bar(x=backtest_df["DT"], y=backtest_df["Residual_MWH"], name="Residual", marker_color=BRAND_PURPLE, yaxis="y2", opacity=0.35))
+        fig.add_trace(go.Scatter(x=x_hour_ending, y=backtest_df["Prophet_Pred_MWH"], mode="lines", name="Prophet", line=dict(color=BRAND_GREEN, width=1.2, dash="dash")))
+    fig.add_trace(go.Bar(x=x_hour_ending, y=backtest_df["Residual_MWH"], name="Residual", marker_color=BRAND_PURPLE, yaxis="y2", opacity=0.35))
     fig.update_layout(
         title="Leakage-Safe Recent Backtest",
-        xaxis={"title": "Date / Hour"},
+        xaxis={"title": "Date / Hour Ending"},
         yaxis={"title": "MWh"},
         yaxis2={"title": "Residual MWh", "overlaying": "y", "side": "right", "showgrid": False},
         hovermode="x unified",
@@ -422,6 +683,7 @@ def _make_backtest_graph(backtest_df: pd.DataFrame):
 
 def _make_weather_graph(df: pd.DataFrame):
     fig = go.Figure()
+    x_hour_ending = _hour_ending_dt(df["DT"]) if "DT" in df.columns else None
     for col, name, color in [
         ("Temperature", "Temp", BRAND_RED),
         ("Temperature_DailyMax", "Daily Max Temp", BRAND_PURPLE),
@@ -429,10 +691,10 @@ def _make_weather_graph(df: pd.DataFrame):
         ("Solar_Irradiance", "Solar Irradiance", BRAND_GREEN),
     ]:
         if col in df.columns:
-            fig.add_trace(go.Scatter(x=df["DT"], y=df[col], mode="lines", name=name, line=dict(color=color, width=1.8)))
+            fig.add_trace(go.Scatter(x=x_hour_ending, y=df[col], mode="lines", name=name, line=dict(color=color, width=1.8)))
     fig.update_layout(
         title="Weather and BTM Solar Drivers",
-        xaxis={"title": "Date / Hour"},
+        xaxis={"title": "Date / Hour Ending"},
         yaxis={"title": "Driver Value"},
         hovermode="x unified",
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
@@ -635,7 +897,7 @@ def _table_data(df: pd.DataFrame):
     ]
     keep = [c for c in keep if c in fut.columns]
     t = fut[keep].copy()
-    t["DT"] = pd.to_datetime(t["DT"]).dt.strftime("%m/%d/%Y %H:%M")
+    t["DT"] = t["DT"].map(lambda x: _format_hour_ending(x, include_year=True))
     rename = {
         "Raw_Forecast_MWH": "Raw XGB+LGB",
         "XGB_Pred_MWH": "XGB",
@@ -701,7 +963,7 @@ def _table_data(df: pd.DataFrame):
     for c in t.columns:
         if c not in text_cols:
             t[c] = t[c].map(lambda x: _fmt_num(x, 1))
-    columns = [{"name": c, "id": c} for c in t.columns]
+    columns = [{"name": "Hour Ending" if c == "DT" else c, "id": c} for c in t.columns]
     return t.to_dict("records"), columns
 
 
@@ -750,7 +1012,7 @@ def _cards(display_df: pd.DataFrame, backtest_df: pd.DataFrame, horizon_days: in
 
     cards = [
         _metric_card("Forecast Energy", f"{forecast.sum():,.0f} MWh" if forecast.notna().any() else "N/A", f"Next {horizon_days or 16} days"),
-        _metric_card("Forecast Peak", f"{forecast.max():,.1f} MW" if forecast.notna().any() else "N/A", pd.to_datetime(peak_dt).strftime("%m/%d %H:%M") if peak_dt is not None else ""),
+        _metric_card("Forecast Peak", f"{forecast.max():,.1f} MW" if forecast.notna().any() else "N/A", _format_hour_ending(peak_dt, include_year=False) if peak_dt is not None else ""),
         _metric_card("Calibration Impact", f"{peak_delta:+,.1f} MW" if not pd.isna(peak_delta) else "N/A", "Peak vs raw model"),
     ]
     if display_df is not None and not display_df.empty and "Actual" in display_df.columns:
@@ -761,7 +1023,7 @@ def _cards(display_df: pd.DataFrame, backtest_df: pd.DataFrame, horizon_days: in
             latest_source = str(actual_rows.loc[latest_idx, "Load_Source"]) if "Load_Source" in actual_rows.columns else "history"
             cards.append(_metric_card(
                 "Latest Actual",
-                pd.to_datetime(latest_actual_dt).strftime("%m/%d %H:%M"),
+                _format_hour_ending(latest_actual_dt, include_year=False),
                 latest_source,
             ))
             if "Load_Source" in actual_rows.columns:
@@ -769,7 +1031,7 @@ def _cards(display_df: pd.DataFrame, backtest_df: pd.DataFrame, horizon_days: in
                 cards.append(_metric_card("5-Min Anchored Hours", f"{five_min_hours}", "Completed hours appended to load history"))
     if not fut.empty and "DT" in fut.columns:
         first_forecast_dt = fut["DT"].min()
-        cards.append(_metric_card("First Forecast Hour", pd.to_datetime(first_forecast_dt).strftime("%m/%d %H:%M"), "Starts after latest actual"))
+        cards.append(_metric_card("First Forecast Hour", _format_hour_ending(first_forecast_dt, include_year=False), "Starts after latest actual"))
     if "Forecast_Change_From_Prior_Run_MWH" in fut.columns:
         delta = pd.to_numeric(fut["Forecast_Change_From_Prior_Run_MWH"], errors="coerce")
         if delta.notna().any():
@@ -935,11 +1197,11 @@ def _diagnostics_table_data(diagnostics_results: dict):
     t = top[keep].head(100).copy()
     for c in ["DT", "Actual_Peak_DT"]:
         if c in t.columns:
-            t[c] = pd.to_datetime(t[c], errors="coerce").dt.strftime("%m/%d/%Y %H:%M")
+            t[c] = t[c].map(lambda x: _format_hour_ending(x, include_year=True))
     for c in t.columns:
         if c not in {"DT", "Actual_Peak_DT", "Date", "Season", "HourGroup", "DailyMaxTempBucket", "CloudCoverBucket", "BTMSolarBucket"}:
             t[c] = t[c].map(lambda x: _fmt_num(x, 2))
-    columns = [{"name": c, "id": c} for c in t.columns]
+    columns = [{"name": "Hour Ending" if c == "DT" else ("Actual Peak HE" if c == "Actual_Peak_DT" else c), "id": c} for c in t.columns]
     return t.to_dict("records"), columns
 
 def create_dashboard_app(historical_fit_df: pd.DataFrame, future_results: dict, backtest_results: pd.DataFrame, config: dict, diagnostics_results: dict | None = None):
@@ -949,20 +1211,16 @@ def create_dashboard_app(historical_fit_df: pd.DataFrame, future_results: dict, 
     project_tz = str((config or {}).get("project", {}).get("timezone") or "")
 
     def _coerce_dt(s: pd.Series) -> pd.Series:
-        # Handles DST offset changes by normalizing to UTC first, then converting back.
-        out = pd.to_datetime(s, errors="coerce", utc=True)
-        if project_tz:
-            try:
-                out = out.dt.tz_convert(project_tz)
-            except Exception:
-                pass
-        return out
+        return _coerce_dashboard_dt(s, project_tz)
 
     display_df = future_results["display"].copy()
     if "DT" in display_df.columns:
         display_df["DT"] = _coerce_dt(display_df["DT"])
     previous_forecast_snapshot = (future_results or {}).get("previous_forecast_snapshot", pd.DataFrame())
     previous_weather_snapshot = (future_results or {}).get("previous_weather_snapshot", pd.DataFrame())
+    forecast_weather_snapshot = (future_results or {}).get("current_weather_snapshot", pd.DataFrame())
+    if (not isinstance(forecast_weather_snapshot, pd.DataFrame) or forecast_weather_snapshot.empty) and isinstance(diagnostics_results, dict):
+        forecast_weather_snapshot = diagnostics_results.get("forecast_weather_used", pd.DataFrame())
     hist_df = historical_fit_df.copy() if historical_fit_df is not None else pd.DataFrame()
     if not hist_df.empty and "DT" in hist_df.columns:
         hist_df["DT"] = _coerce_dt(hist_df["DT"])
@@ -971,6 +1229,7 @@ def create_dashboard_app(historical_fit_df: pd.DataFrame, future_results: dict, 
         if "DT" in backtest_df.columns:
             backtest_df["DT"] = _coerce_dt(backtest_df["DT"])
     display_df = _attach_previous_forecast_history(display_df, backtest_df)
+    display_df = _attach_forecast_run_weather(display_df, forecast_weather_snapshot)
     display_df = _attach_prior_run_comparison(display_df, previous_forecast_snapshot, previous_weather_snapshot)
 
     # Dates for the v11.6-style date picker.
@@ -1145,13 +1404,14 @@ def create_dashboard_app(historical_fit_df: pd.DataFrame, future_results: dict, 
         if not ordered:
             ordered = [step for step in TEMP_SENSITIVITY_STEPS if step[0] == "baseline"]
 
+        x_hour_ending = _hour_ending_dt(frame["DT"])
         for key, label, _delta, color in ordered:
             values = pd.to_numeric(frame.get(key), errors="coerce")
             if values.notna().sum() == 0:
                 continue
             max_value = values.max()
             fig.add_trace(go.Scatter(
-                x=frame["DT"],
+                x=x_hour_ending,
                 y=values,
                 mode="lines",
                 name=f"{label} (Max: {max_value:,.1f})",
@@ -1160,7 +1420,7 @@ def create_dashboard_app(historical_fit_df: pd.DataFrame, future_results: dict, 
             if highlight_max and values.notna().any():
                 max_idx = values.idxmax()
                 fig.add_trace(go.Scatter(
-                    x=[frame.loc[max_idx, "DT"]],
+                    x=[_hour_ending_dt(frame.loc[max_idx, "DT"])],
                     y=[values.loc[max_idx]],
                     mode="markers",
                     marker=dict(color=color, size=10 if key == "baseline" else 8),
@@ -1172,7 +1432,7 @@ def create_dashboard_app(historical_fit_df: pd.DataFrame, future_results: dict, 
             temperature = pd.to_numeric(frame["Temperature"], errors="coerce")
             if temperature.notna().any():
                 fig.add_trace(go.Scatter(
-                    x=frame["DT"],
+                    x=x_hour_ending,
                     y=temperature,
                     mode="lines",
                     name="Temperature",
@@ -1181,7 +1441,7 @@ def create_dashboard_app(historical_fit_df: pd.DataFrame, future_results: dict, 
                 ))
         fig.update_layout(
             title="Temperature Sensitivity",
-            xaxis={"title": "Date / Hour", "showgrid": True, "gridcolor": "rgba(0,87,184,0.10)"},
+            xaxis={"title": "Date / Hour Ending", "showgrid": True, "gridcolor": "rgba(0,87,184,0.10)"},
             yaxis={"title": "MWh", "showgrid": True, "gridcolor": "rgba(0,87,184,0.10)"},
             yaxis2={"title": "Temperature (F)", "overlaying": "y", "side": "right", "showgrid": False},
             hovermode="x unified",
@@ -1230,9 +1490,9 @@ def create_dashboard_app(historical_fit_df: pd.DataFrame, future_results: dict, 
 
         # Plot target forecast day (forecast + weather if present)
         if "Forecast" in fut_day:
-            fig.add_trace(go.Scatter(x=fut_day["DT"], y=fut_day["Forecast"], mode="lines", name="Forecast", line=dict(color=BRAND_BLUE, width=2.8)))
+            fig.add_trace(go.Scatter(x=_hour_ending_dt(fut_day["DT"]), y=fut_day["Forecast"], mode="lines", name="Forecast", line=dict(color=BRAND_BLUE, width=2.8)))
         if "Actual" in fut_day:
-            fig.add_trace(go.Scatter(x=fut_day["DT"], y=fut_day["Actual"], mode="lines", name="Actual", line=dict(color=BRAND_RED, width=2.1)))
+            fig.add_trace(go.Scatter(x=_hour_ending_dt(fut_day["DT"]), y=fut_day["Actual"], mode="lines", name="Actual", line=dict(color=BRAND_RED, width=2.1)))
 
         for d0 in candidates:
             d1 = pd.Timestamp(d0)
@@ -1240,11 +1500,11 @@ def create_dashboard_app(historical_fit_df: pd.DataFrame, future_results: dict, 
             day = hist_work[(hist_work["DT"] >= d1) & (hist_work["DT"] < d2)].copy()
             if day.empty:
                 continue
-            fig.add_trace(go.Scatter(x=day["DT"], y=day["MWH"], mode="lines", name=str(d0), line=dict(width=1.5, dash="dot")))
+            fig.add_trace(go.Scatter(x=_hour_ending_dt(day["DT"]), y=day["MWH"], mode="lines", name=str(d0), line=dict(width=1.5, dash="dot")))
 
         fig.update_layout(
             title=f"Comparable Days (MaxTemp ~ {target_max:.1f}F, DOW={target_dow})",
-            xaxis={"title": "Date / Hour", "showgrid": True, "gridcolor": "rgba(0,87,184,0.10)"},
+            xaxis={"title": "Date / Hour Ending", "showgrid": True, "gridcolor": "rgba(0,87,184,0.10)"},
             yaxis={"title": "MWh", "showgrid": True, "gridcolor": "rgba(0,87,184,0.10)"},
             hovermode="x unified",
             legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "right", "x": 1},
@@ -1487,3 +1747,21 @@ def create_dashboard_app(historical_fit_df: pd.DataFrame, future_results: dict, 
         return "__ALL_DIAGNOSTICS__"
 
     return app
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Run a fresh forecast and launch the dashboard when this file is executed."""
+    from forecasting.main import main as run_forecast
+
+    os.chdir(PROJECT_ROOT)
+    args = list(sys.argv[1:] if argv is None else argv)
+    if not any(arg in {"-h", "--help"} for arg in args):
+        if "--run-dashboard" not in args:
+            args.insert(0, "--run-dashboard")
+        if "--save-csv" not in args:
+            args.insert(0, "--save-csv")
+    run_forecast(args)
+
+
+if __name__ == "__main__":
+    main()

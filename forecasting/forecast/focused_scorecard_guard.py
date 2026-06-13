@@ -10,6 +10,31 @@ def _as_num(values) -> pd.Series:
     return pd.to_numeric(values, errors="coerce")
 
 
+def _local_datetime_series(values, index: pd.Index | None = None) -> pd.Series:
+    raw = values if isinstance(values, pd.Series) else pd.Series(values, index=index)
+    try:
+        return pd.to_datetime(raw, errors="coerce")
+    except ValueError:
+        # Exported forecast CSVs can contain both -08:00 and -07:00 offsets.
+        # Guard rules are local-hour rules, so preserve the local clock for
+        # fallback month/hour/day extraction.
+        cleaned = raw.astype(str).str.strip().str.replace(r"(?:[+-]\d{2}:?\d{2}|Z)$", "", regex=True)
+        return pd.to_datetime(cleaned, errors="coerce")
+
+
+def _forecast_anchor_mask(df: pd.DataFrame, preferred_col: str | None = None) -> pd.Series:
+    candidates = [preferred_col, "Final_Forecast_MWH", "Forecast", "Raw_Forecast_MWH", "Stage_Selected_Forecast_MWH"]
+    seen: set[str] = set()
+    for col in candidates:
+        if not col or col in seen or col not in df.columns:
+            continue
+        seen.add(col)
+        values = _as_num(df[col])
+        if values.notna().any():
+            return values.notna()
+    return pd.Series(True, index=df.index, dtype=bool)
+
+
 def _guard_cfg(config: dict | None) -> dict:
     raw = config or {}
     calibration = raw.get("calibration", {}) or {}
@@ -23,15 +48,31 @@ def _month_series(df: pd.DataFrame) -> pd.Series:
         if month.notna().any():
             return month
     if "DT" in df.columns:
-        return pd.to_datetime(df["DT"], errors="coerce", utc=True).dt.month.astype(float)
+        return _local_datetime_series(df["DT"]).dt.month.astype(float)
     return pd.Series(np.nan, index=df.index, dtype=float)
 
 
-def _forecast_day_series(df: pd.DataFrame) -> pd.Series:
+def _forecast_day_series(df: pd.DataFrame, anchor_col: str | None = None) -> pd.Series:
     if "Forecast_Day" in df.columns:
         day = _as_num(df["Forecast_Day"])
         if day.notna().any():
             return day
+    if "DT" in df.columns:
+        dt = _local_datetime_series(df["DT"])
+        if dt.notna().any():
+            anchor = _forecast_anchor_mask(df, anchor_col) & dt.notna()
+            first_day = (dt[anchor].min() if anchor.any() else dt.min()).normalize()
+            return ((dt.dt.normalize() - first_day).dt.days + 1).astype(float)
+    return pd.Series(np.nan, index=df.index, dtype=float)
+
+
+def _hour_series(df: pd.DataFrame) -> pd.Series:
+    if "Hour" in df.columns:
+        hour = _as_num(df["Hour"])
+        if hour.notna().any():
+            return hour
+    if "DT" in df.columns:
+        return _local_datetime_series(df["DT"]).dt.hour.astype(float)
     return pd.Series(np.nan, index=df.index, dtype=float)
 
 
@@ -113,8 +154,8 @@ def apply_focused_scorecard_guard(
 
     forecast = _as_num(out[forecast_col])
     month = _month_series(out)
-    hour = _as_num(out.get("Hour", pd.Series(np.nan, index=out.index)))
-    forecast_day = _forecast_day_series(out)
+    hour = _hour_series(out)
+    forecast_day = _forecast_day_series(out, anchor_col=forecast_col)
     daily_max = _as_num(out.get("Temperature_DailyMax", pd.Series(np.nan, index=out.index)))
     is_holiday = _bool_series(out, "IsHoliday")
 

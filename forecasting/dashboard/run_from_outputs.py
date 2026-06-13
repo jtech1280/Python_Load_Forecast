@@ -6,7 +6,7 @@ import os
 import pandas as pd
 import yaml
 
-from forecasting.dashboard.app import create_dashboard_app
+from forecasting.dashboard.dashboard_app import create_dashboard_app
 from forecasting.utils.output_archive import load_latest_distinct_snapshot
 
 
@@ -82,6 +82,7 @@ def main():
     current_mtime = max(forecast_csv.stat().st_mtime, backtest_csv.stat().st_mtime)
     stale_scorecards = {}
     for name in [
+        "forecast_weather_used",
         "production_readiness_scorecard",
         "band_coverage_summary",
         "daily_peak_miss_by_stage",
@@ -99,6 +100,7 @@ def main():
         historical_fit_df=pd.DataFrame(),  # optional for baseline UI; comparable/sensitivity need full history
         future_results={
             "display": fut,
+            "current_weather_snapshot": diagnostics.get("forecast_weather_used", pd.DataFrame()),
             "previous_forecast_snapshot": previous_forecast,
             "previous_weather_snapshot": previous_weather,
         },

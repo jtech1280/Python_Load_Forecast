@@ -4,6 +4,14 @@ import numpy as np
 import pandas as pd
 
 
+def _local_datetime_series(values) -> pd.Series:
+    try:
+        return pd.to_datetime(values, errors="coerce")
+    except ValueError:
+        cleaned = pd.Series(values).astype(str).str.strip().str.replace(r"(?:[+-]\d{2}:?\d{2}|Z)$", "", regex=True)
+        return pd.to_datetime(cleaned, errors="coerce")
+
+
 def _hour_group(hour: int) -> str:
     if 0 <= int(hour) <= 5:
         return "Overnight"
@@ -46,13 +54,24 @@ def _bucket_loss(values: pd.Series) -> pd.Series:
 
 def _prep(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    out["DT"] = pd.to_datetime(out["DT"])
+    out["DT"] = _local_datetime_series(out["DT"])
     if "Hour" not in out.columns:
         out["Hour"] = out["DT"].dt.hour
     if "HourGroup" not in out.columns:
         out["HourGroup"] = out["Hour"].map(_hour_group)
     if "DailyMaxTempBin" not in out.columns:
-        out["DailyMaxTempBin"] = np.nan
+        if "DailyMaxTempBucket" in out.columns:
+            out["DailyMaxTempBin"] = out["DailyMaxTempBucket"]
+        elif "Temperature_DailyMax" in out.columns:
+            temp_max = pd.to_numeric(out["Temperature_DailyMax"], errors="coerce")
+            out["DailyMaxTempBin"] = pd.cut(
+                temp_max,
+                bins=[-np.inf, 70.0, 80.0, 88.0, 94.0, 98.0, np.inf],
+                labels=[0, 1, 2, 3, 4, 5],
+                include_lowest=True,
+            ).astype("float")
+        else:
+            out["DailyMaxTempBin"] = np.nan
     if "CloudCoverBucket" not in out.columns and "CloudCover_Norm" in out.columns:
         out["CloudCoverBucket"] = _bucket_cloud(out["CloudCover_Norm"])
     if "SolarLossBucket" not in out.columns:
@@ -108,6 +127,7 @@ def build_residual_band_lookup(backtest_df: pd.DataFrame, shrink_floor_mwh: floa
 def _band_risk_multiplier(out: pd.DataFrame) -> pd.Series:
     hour = pd.to_numeric(out.get("Hour", pd.Series(np.nan, index=out.index)), errors="coerce").fillna(-1).astype(int)
     hg = out.get("HourGroup", pd.Series("", index=out.index)).astype(str)
+    temp_max = pd.to_numeric(out.get("Temperature_DailyMax", pd.Series(np.nan, index=out.index)), errors="coerce")
     cloud = out.get("CloudCoverBucket", pd.Series("", index=out.index)).astype(str)
     loss = out.get("SolarLossBucket", pd.Series("", index=out.index)).astype(str)
     event_cls = out.get("CloudSolarEventClass", pd.Series("", index=out.index)).astype(str)
@@ -127,7 +147,21 @@ def _band_risk_multiplier(out: pd.DataFrame) -> pd.Series:
     mult.loc[cloud.isin(["Mostly Cloudy", "Overcast"]) & loss.isin(["High", "Extreme"])] *= 1.35
     mult.loc[event_cls.isin(["weekday_core_highimpact_solar_loss", "weekday_core_solar_loss", "weekday_core_hour14_solar_loss"])] *= 1.20
     mult.loc[hour.between(16, 18) & cloud.isin(["Mostly Cloudy", "Overcast"])] *= 1.15
-    return mult.clip(0.65, 2.25)
+
+    # The 2026-06-12 diagnostic run exposed severe undercoverage in the hottest
+    # morning/midday bucket. Do not let the normal morning dampener suppress bands
+    # when the forecasted daily max is already in the extreme heat regime.
+    hot = temp_max.ge(95.0)
+    extreme = temp_max.ge(105.0)
+    ultra = temp_max.ge(112.0)
+    mult.loc[hot & hg.eq("Overnight")] *= 1.55
+    mult.loc[hot & hg.eq("Morning")] *= 3.25
+    mult.loc[hot & hg.eq("Midday")] *= 2.05
+    mult.loc[hot & hg.eq("Peak")] *= 1.25
+    mult.loc[extreme & hg.eq("Morning")] *= 1.25
+    mult.loc[extreme & hg.eq("Midday")] *= 1.20
+    mult.loc[ultra & hg.isin(["Morning", "Midday", "Peak"])] *= 1.10
+    return mult.clip(0.65, 5.00)
 
 
 def _forecast_day_index(out: pd.DataFrame) -> pd.Series:
