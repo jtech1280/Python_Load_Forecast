@@ -5,7 +5,13 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import yaml
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if __package__ in {None, ""} and str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def load_config():
@@ -146,6 +152,33 @@ class _ForecastProgressBar:
             self._bar = None
 
 
+def _resolve_default_argv(argv: list[str] | None) -> list[str] | None:
+    if argv is not None:
+        return argv
+
+    cli_args = sys.argv[1:]
+    if cli_args:
+        return cli_args
+
+    enabled = str(os.environ.get("FORECAST_DEFAULT_RUN_ARGS", "1")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    if not enabled:
+        return []
+
+    defaults = ["--save-csv", "--run-dashboard"]
+    print(
+        "No CLI args supplied; defaulting to: "
+        f"{' '.join(defaults)}. "
+        "Set FORECAST_DEFAULT_RUN_ARGS=0 to require explicit flags.",
+        flush=True,
+    )
+    return defaults
+
+
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Roseville System Load Forecast V12.8 (targeted solar-loss refinement + risk bands + max CPU/GPU)")
     parser.add_argument("--run-dashboard", action="store_true", help="Launch Dash dashboard after forecast")
@@ -172,7 +205,7 @@ def main(argv: list[str] | None = None):
     parser.add_argument("--replay-fixed-origins", type=str, default=None, help="Comma-separated fixed rolling replay origin dates")
     parser.add_argument("--replay-fixed-origins-file", type=str, default=None, help="Text file containing one fixed rolling replay origin date per line")
     parser.add_argument("--train-start-date", type=str, default=None, help="Override training and historical weather start date, e.g. 2018-01-01")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(_resolve_default_argv(argv))
 
     config = load_config()
 

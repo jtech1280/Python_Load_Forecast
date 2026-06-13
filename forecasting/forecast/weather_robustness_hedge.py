@@ -191,11 +191,17 @@ def apply_weather_robustness_hedge(
     min_maxtemp = float(cfg.get("min_maxtemp_f", 88.0))
     min_day = int(cfg.get("min_forecast_day", 1))
     max_day = int(cfg.get("max_forecast_day", 16))
+    ramp_hours = {int(h) for h in (cfg.get("ramp_hours", []) or [])}
+    ramp_min_maxtemp = float(cfg.get("ramp_min_maxtemp_f", min_maxtemp))
+    ramp_min_day = int(cfg.get("ramp_min_forecast_day", min_day))
+    ramp_max_day = int(cfg.get("ramp_max_forecast_day", max_day))
     scenario_delta = float(cfg.get("scenario_delta_f", 3.0))
     jensen_scale = float(cfg.get("jensen_scale", 2.0))
     upper_blend = float(cfg.get("upper_scenario_blend", 0.30))
     cap = float(cfg.get("cap_mwh", 16.0))
+    ramp_cap = float(cfg.get("ramp_cap_mwh", min(cap, 2.5)))
     warmer_bound_mult = float(cfg.get("max_fraction_of_warmer_delta", 1.25))
+    ramp_warmer_bound_mult = float(cfg.get("ramp_max_fraction_of_warmer_delta", min(warmer_bound_mult, 0.25)))
     min_bias_damping = float(cfg.get("min_signed_bias_damping", 0.35))
     exclude_holidays = bool(cfg.get("exclude_holidays", False))
 
@@ -252,29 +258,47 @@ def apply_weather_robustness_hedge(
     jensen = 0.5 * sigma2 * fpp * jensen_scale * bias_damping
     upper = upper_blend * sigma_norm * warmer_delta.clip(lower=0.0) * bias_damping
 
-    hedge = (jensen + upper).clip(lower=0.0, upper=cap)
-    # Never exceed a small multiple of the warmer-scenario uplift itself.
-    hedge = np.minimum(hedge, warmer_delta.clip(lower=0.0) * warmer_bound_mult)
-
-    gate = (
+    peak_gate = (
         hour.isin(hours)
         & fmax.ge(min_maxtemp)
         & forecast_day.between(min_day, max_day)
     )
+    ramp_gate = (
+        hour.isin(ramp_hours)
+        & fmax.ge(ramp_min_maxtemp)
+        & forecast_day.between(ramp_min_day, ramp_max_day)
+    )
     if exclude_holidays and "IsHoliday" in out.columns:
         is_holiday = pd.to_numeric(out["IsHoliday"], errors="coerce").fillna(0).ne(0)
-        gate = gate & ~is_holiday
+        peak_gate = peak_gate & ~is_holiday
+        ramp_gate = ramp_gate & ~is_holiday
+
+    gate = peak_gate | ramp_gate
+    cap_by_row = pd.Series(cap, index=out.index, dtype=float)
+    cap_by_row.loc[ramp_gate & ~peak_gate] = ramp_cap
+    warmer_bound_by_row = pd.Series(warmer_bound_mult, index=out.index, dtype=float)
+    warmer_bound_by_row.loc[ramp_gate & ~peak_gate] = ramp_warmer_bound_mult
+
+    hedge = (jensen + upper).clip(lower=0.0)
+    hedge = np.minimum(hedge, cap_by_row)
+    # Never exceed a small multiple of the warmer-scenario uplift itself.
+    hedge = np.minimum(hedge, warmer_delta.clip(lower=0.0) * warmer_bound_by_row)
     hedge = hedge.where(gate, 0.0).fillna(0.0)
 
     out["Weather_Robustness_Hedge_MWH"] = hedge
-    out["Weather_Robustness_Jensen_MWH"] = jensen.clip(lower=0.0, upper=cap).where(gate, 0.0).fillna(0.0)
-    out["Weather_Robustness_Upper_MWH"] = upper.clip(lower=0.0, upper=cap).where(gate, 0.0).fillna(0.0)
+    out["Weather_Robustness_Jensen_MWH"] = np.minimum(jensen.clip(lower=0.0), cap_by_row).where(gate, 0.0).fillna(0.0)
+    out["Weather_Robustness_Upper_MWH"] = np.minimum(upper.clip(lower=0.0), cap_by_row).where(gate, 0.0).fillna(0.0)
     out["Weather_Robustness_Warmer_Delta_MWH"] = warmer_delta.clip(lower=0.0).where(gate, 0.0).fillna(0.0)
     out["Weather_Robustness_Temp_Sigma_F"] = sigma.where(gate, np.nan)
     out["Weather_Robustness_Temp_Bias_Damping"] = bias_damping.where(gate, np.nan)
     out["Weather_Robustness_Gate"] = gate.astype(int)
-    out["Weather_Robustness_Hedge_Source"] = np.where(
-        hedge.to_numpy() > 0.0, "weather_uncertainty_peak_hedge", "none"
+    out["Weather_Robustness_Hedge_Source"] = np.select(
+        [
+            (hedge.to_numpy() > 0.0) & (ramp_gate.to_numpy() & ~peak_gate.to_numpy()),
+            hedge.to_numpy() > 0.0,
+        ],
+        ["weather_uncertainty_ramp_hedge", "weather_uncertainty_peak_hedge"],
+        default="none",
     )
     out[base_col] = (base + hedge).clip(lower=0.0)
     if base_col == "Final_Backtest_Forecast_MWH" and "Final_Forecast_MWH" in out.columns:

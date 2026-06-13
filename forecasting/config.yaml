@@ -472,6 +472,33 @@ calibration:
       enabled: true
       total_cap_mwh: 18.0
       rules:
+        # 2026-06-12 targeted replay: long-horizon 102.3F June ramp underforecasted
+        # by 20-31 MWh from HE06-15, while the existing June rules started at 105F.
+        # Keep this separate from the >=105F rules and only score days 8-16.
+        - name: june_long_hot_100_105_morning_ramp_up
+          adjustment_mwh: 5.0
+          months: [6]
+          hours: [8, 9]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 100.0
+          max_maxtemp_f: 105.0
+        - name: june_long_hot_100_105_core_ramp_up
+          adjustment_mwh: 10.0
+          months: [6]
+          hours: [10, 11, 12, 13]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 100.0
+          max_maxtemp_f: 105.0
+        - name: june_long_hot_100_105_peak_ramp_up
+          adjustment_mwh: 8.0
+          months: [6]
+          hours: [14, 15]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 100.0
+          max_maxtemp_f: 105.0
         - name: june_extreme_heat_morning_ramp_up
           adjustment_mwh: 7.0
           months: [6]
@@ -706,6 +733,15 @@ calibration:
     # uncertainty plus +/-3F scenario re-predictions.
     apply_to_realized_replay: true
     hours: [16, 17, 18, 19, 20]
+    # Lower-capped ramp path for the June 12-style long-horizon hot ramp. This
+    # lets scenario curvature add a small uplift before peak hours without
+    # loosening the existing peak hedge.
+    ramp_hours: [8, 9, 10, 11, 12, 13, 14, 15]
+    ramp_min_maxtemp_f: 100.0
+    ramp_min_forecast_day: 8
+    ramp_max_forecast_day: 16
+    ramp_cap_mwh: 2.5
+    ramp_max_fraction_of_warmer_delta: 0.25
     # Gate on the FORECASTED daily-max (operationally available), not the realized max.
     min_maxtemp_f: 90.0
     exclude_holidays: true
