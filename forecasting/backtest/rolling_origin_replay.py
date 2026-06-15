@@ -451,7 +451,11 @@ def _origin_raw_forecasts(
             "Prophet training",
             started,
             rows=len(hist),
-            detail=f"regressors={len(prophet_fit.regressors) if prophet_fit is not None else 0}",
+            detail=(
+                f"regressors={len(prophet_fit.regressors) if prophet_fit is not None else 0};"
+                f"fit_rows={prophet_fit.train_rows if prophet_fit is not None else 0};"
+                f"source_rows={prophet_fit.source_rows if prophet_fit is not None else 0}"
+            ),
         )
     prophet_features = prophet_fit.regressors if prophet_fit is not None else []
 

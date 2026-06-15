@@ -85,6 +85,15 @@ def _bool_series(df: pd.DataFrame, col: str) -> pd.Series:
     return _as_num(values).fillna(0).ne(0)
 
 
+def _optional_num_series(df: pd.DataFrame, *cols: str) -> pd.Series:
+    for col in cols:
+        if col in df.columns:
+            values = _as_num(df[col])
+            if values.notna().any():
+                return values
+    return pd.Series(np.nan, index=df.index, dtype=float)
+
+
 def _list_mask(values: pd.Series, allowed) -> pd.Series:
     if allowed is None:
         return pd.Series(True, index=values.index, dtype=bool)
@@ -101,7 +110,10 @@ def _rule_mask(
     hour: pd.Series,
     forecast_day: pd.Series,
     daily_max: pd.Series,
+    cloud_cover: pd.Series,
+    solar_loss: pd.Series,
     is_holiday: pd.Series,
+    is_weekend: pd.Series,
 ) -> pd.Series:
     mask = pd.Series(True, index=df.index, dtype=bool)
     mask &= _list_mask(month, rule.get("months"))
@@ -122,6 +134,16 @@ def _rule_mask(
         mask &= forecast.lt(float(rule["max_forecast_mwh"]))
     if "holiday" in rule:
         mask &= is_holiday.eq(bool(rule["holiday"]))
+    if "weekend" in rule:
+        mask &= is_weekend.eq(bool(rule["weekend"]))
+    if "min_cloud_cover_norm" in rule:
+        mask &= cloud_cover.ge(float(rule["min_cloud_cover_norm"]))
+    if "max_cloud_cover_norm" in rule:
+        mask &= cloud_cover.le(float(rule["max_cloud_cover_norm"]))
+    if "min_solar_loss_mw" in rule:
+        mask &= solar_loss.ge(float(rule["min_solar_loss_mw"]))
+    if "max_solar_loss_mw" in rule:
+        mask &= solar_loss.le(float(rule["max_solar_loss_mw"]))
 
     return mask.fillna(False)
 
@@ -157,7 +179,14 @@ def apply_focused_scorecard_guard(
     hour = _hour_series(out)
     forecast_day = _forecast_day_series(out, anchor_col=forecast_col)
     daily_max = _as_num(out.get("Temperature_DailyMax", pd.Series(np.nan, index=out.index)))
+    cloud_cover = _optional_num_series(out, "CloudCover_Norm")
+    solar_loss = _optional_num_series(
+        out,
+        "BTM_Solar_Loss_From_ClearSky_MW",
+        "Midday_Overcast_Solar_Loss_MW",
+    )
     is_holiday = _bool_series(out, "IsHoliday")
+    is_weekend = _bool_series(out, "IsWeekend")
 
     total_adjustment = pd.Series(0.0, index=out.index, dtype=float)
     source = pd.Series("none", index=out.index, dtype="object")
@@ -178,7 +207,10 @@ def apply_focused_scorecard_guard(
             hour=hour,
             forecast_day=forecast_day,
             daily_max=daily_max,
+            cloud_cover=cloud_cover,
+            solar_loss=solar_loss,
             is_holiday=is_holiday,
+            is_weekend=is_weekend,
         )
         if not mask.any():
             continue

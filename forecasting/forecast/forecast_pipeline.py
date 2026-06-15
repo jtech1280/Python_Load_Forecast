@@ -1049,6 +1049,7 @@ def run_pipeline(
         residual_lookup=residual_band_lookup,
         band_scale=float(bands_cfg.get("band_scale", 1.0)),
         weather_input_risk=bands_cfg.get("weather_input_risk", {}),
+        hot_bucket_band_floor=bands_cfg.get("hot_bucket_band_floor", {}),
     )
     final_future = apply_conformal_weather_bands(
         final_future,

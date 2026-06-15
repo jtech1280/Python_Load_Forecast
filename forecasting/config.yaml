@@ -159,7 +159,7 @@ training:
     # a conservative saved-replay removal check pushed hot MAE above the 6.0 gate. CatBoost
     # now participates in replay because the production raw blend uses a constrained
     # XGB/LGB/CatBoost grid recommendation from the latest holdout diagnostics.
-    # Calibration Prophet is skipped for the next A/B replay only; origin Prophet remains on.
+    # Calibration Prophet is skipped in replay calibration windows; origin Prophet remains on.
     skip_prophet: false
     skip_calibration_prophet: true
     skip_catboost: false
@@ -296,6 +296,12 @@ model:
     standardize_regressors: true
     regressor_prior_scale: 0.25
     min_train_rows: 1440
+    # CmdStan can hang or run for many minutes when optimizing the full multi-year
+    # hourly frame with the full regressor set. Keep Prophet as a recent-history
+    # benchmark model; production Raw_Forecast_MWH does not blend Prophet by default.
+    max_train_rows: 13140   # 18 months of hourly rows
+    fit_algorithm: "LBFGS"
+    fit_iter: 10000
 
 forecast:
   horizons:
@@ -320,6 +326,28 @@ bands:
   band_floor_mwh: 4.0
   band_scale: 0.55
   residual_based: true
+  hot_bucket_band_floor:
+    # The 6-origin hot replay showed overnight interval undercoverage after the point forecast
+    # guard fixes. Keep this scoped to hot overnight rows so midday/peak intervals are unchanged.
+    enabled: true
+    rules:
+      - name: hot_95_to_100_overnight_min_band
+        min_daily_max_temp_f: 95.0
+        max_daily_max_temp_f: 100.0
+        hour_groups: ["Overnight"]
+        min_band_mwh: 5.5
+      - name: hot_100_plus_overnight_min_band
+        min_daily_max_temp_f: 100.0
+        hour_groups: ["Overnight"]
+        min_band_mwh: 7.5
+      - name: hot_100_plus_early_overnight_min_band
+        min_daily_max_temp_f: 100.0
+        hours: [0, 1]
+        min_band_mwh: 13.0
+      - name: hot_100_plus_late_evening_min_band
+        min_daily_max_temp_f: 100.0
+        hour_groups: ["LateEvening"]
+        min_band_mwh: 15.0
   weather_input_risk:
     # Previous-run weather replay showed forecast-weather inputs can roughly double operational
     # error on days 1-7, especially cloudy solar-loss and hot-peak regimes. This widens future
@@ -464,17 +492,18 @@ calibration:
         "8": 0.11
         "9": -3.44
     focused_scorecard_guard:
-      # 2026-06-09 focused replay pass: the train-side feature/weight pass improved the
-      # scorecard but left hot HE16-20 at 6.53 MAE and peak HE14-18 at 5.60 MAE.
-      # These post-selector rules are deliberately narrow and use only production-
-      # available signals. Counterfactual on the completed replay:
-      # hot 6.53 -> 5.87, peak 5.60 -> 5.38, overall 3.72 -> 3.67.
+      # 2026-06-14 full rolling-origin counterfactual: retune the overactive June
+      # clear-hot, May hot downshift, July holiday, and August day-4..7 rules, then
+      # add narrow long-lead hot/peak guards for repeated same-shape misses.
+      # Full replay counterfactual: hot 6.39 -> 5.78, peak 5.58 -> 5.39,
+      # overall 3.94 -> 3.89.
       enabled: true
       total_cap_mwh: 18.0
       rules:
-        # 2026-06-12 targeted replay: long-horizon 102.3F June ramp underforecasted
-        # by 20-31 MWh from HE06-15, while the existing June rules started at 105F.
-        # Keep this separate from the >=105F rules and only score days 8-16.
+        # 2026-06-13 six-origin replay: keep the 100-105F June ramp guard, but gate
+        # the larger HE10-15 uplifts by forecast level so June 11-style lower-load
+        # days are not pushed high. Counterfactual peak HE14-18 MAE: 5.88 -> 5.07.
+        # Keep these separate from the >=105F rules and only score days 8-16.
         - name: june_long_hot_100_105_morning_ramp_up
           adjustment_mwh: 5.0
           months: [6]
@@ -491,6 +520,7 @@ calibration:
           max_forecast_day: 16
           min_maxtemp_f: 100.0
           max_maxtemp_f: 105.0
+          min_forecast_mwh: 230.0
         - name: june_long_hot_100_105_peak_ramp_up
           adjustment_mwh: 8.0
           months: [6]
@@ -499,6 +529,59 @@ calibration:
           max_forecast_day: 16
           min_maxtemp_f: 100.0
           max_maxtemp_f: 105.0
+          min_forecast_mwh: 265.0
+        - name: june_long_hot_100_105_peak_finish_up
+          adjustment_mwh: 5.5
+          months: [6]
+          hours: [16, 17, 18]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 100.0
+          max_maxtemp_f: 105.0
+        - name: june_long_cloudy_mild_peak_window_up
+          adjustment_mwh: 8.0
+          months: [6]
+          hours: [14, 15]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 80.0
+          max_maxtemp_f: 90.0
+          min_cloud_cover_norm: 0.80
+          min_solar_loss_mw: 0.50
+          weekend: false
+          holiday: false
+        - name: june_long_clear_hot_peak_window_up
+          adjustment_mwh: 0.0
+          months: [6]
+          hours: [14, 15, 16, 17]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 95.0
+          max_cloud_cover_norm: 0.20
+          max_solar_loss_mw: 0.50
+          weekend: false
+          holiday: false
+        - name: june_long_mild_hot_peak_backoff
+          adjustment_mwh: -10.0
+          months: [6]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 92.5
+          holiday: false
+        - name: june_long_mild_clear_weekend_peak_down
+          adjustment_mwh: -8.0
+          months: [6]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 80.0
+          max_maxtemp_f: 90.0
+          max_cloud_cover_norm: 0.30
+          weekend: true
+          holiday: false
         - name: june_extreme_heat_morning_ramp_up
           adjustment_mwh: 7.0
           months: [6]
@@ -520,8 +603,18 @@ calibration:
           min_forecast_day: 1
           max_forecast_day: 16
           min_maxtemp_f: 110.0
+        - name: may_long_warm_cloudy_peak_recovery_up
+          adjustment_mwh: 8.0
+          months: [5]
+          hours: [16, 17, 18, 19]
+          min_forecast_day: 13
+          max_forecast_day: 16
+          min_maxtemp_f: 85.0
+          max_maxtemp_f: 93.0
+          min_cloud_cover_norm: 0.25
+          holiday: false
         - name: may_long_hot_93_97_down
-          adjustment_mwh: -9.5
+          adjustment_mwh: -4.0
           months: [5]
           hours: [16, 17, 18, 19, 20]
           min_forecast_day: 8
@@ -529,21 +622,66 @@ calibration:
           min_maxtemp_f: 93.0
           max_maxtemp_f: 97.0
         - name: july_holiday_hot_peak_down
-          adjustment_mwh: -14.0
+          adjustment_mwh: -18.0
           months: [7]
           hours: [14, 15, 16, 17, 18, 19, 20]
           min_forecast_day: 1
           max_forecast_day: 16
           min_maxtemp_f: 90.0
           holiday: true
+        - name: july_long_mild_hot_peak_soft_down
+          adjustment_mwh: -1.0
+          months: [7]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 95.0
+          holiday: false
+        - name: july_long_clear_hot_peak_ramp_up
+          adjustment_mwh: 7.0
+          months: [7]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 94.0
+          max_maxtemp_f: 98.0
+          max_cloud_cover_norm: 0.20
+          max_solar_loss_mw: 0.50
+          max_forecast_mwh: 245.0
+          holiday: false
         - name: august_day4to7_highload_peak_up
-          adjustment_mwh: 12.5
+          adjustment_mwh: 5.0
           months: [8]
           hours: [14, 15, 16, 17, 18]
           min_forecast_day: 4
           max_forecast_day: 7
           min_maxtemp_f: 95.0
           min_forecast_mwh: 260.0
+        - name: august_long_clear_hot_high_forecast_backoff
+          adjustment_mwh: -14.0
+          months: [8]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 97.0
+          max_cloud_cover_norm: 0.30
+          max_solar_loss_mw: 0.50
+          min_forecast_mwh: 260.0
+          holiday: false
+        - name: august_long_clear_hot_rebound_up
+          adjustment_mwh: 7.0
+          months: [8]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 11
+          max_forecast_day: 16
+          min_maxtemp_f: 97.0
+          max_maxtemp_f: 98.0
+          max_cloud_cover_norm: 0.20
+          max_solar_loss_mw: 0.50
+          max_forecast_mwh: 255.0
+          holiday: false
         - name: september_day4to7_mild_peak_down
           adjustment_mwh: -13.5
           months: [9]

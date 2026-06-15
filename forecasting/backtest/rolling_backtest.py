@@ -77,7 +77,11 @@ def run_rolling_backtest(
             stage="Prophet training",
             started=started,
             rows=len(hist),
-            detail=f"regressors={len(bt_prophet_fit.regressors) if bt_prophet_fit is not None else 0}",
+            detail=(
+                f"regressors={len(bt_prophet_fit.regressors) if bt_prophet_fit is not None else 0};"
+                f"fit_rows={bt_prophet_fit.train_rows if bt_prophet_fit is not None else 0};"
+                f"source_rows={bt_prophet_fit.source_rows if bt_prophet_fit is not None else 0}"
+            ),
         )
     else:
         bt_prophet_fit = None

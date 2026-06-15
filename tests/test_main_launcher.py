@@ -42,6 +42,16 @@ class MainLauncherTests(unittest.TestCase):
         finally:
             sys.path[:] = original_path
 
+    def test_relative_output_dir_resolves_against_project_root(self):
+        config = {"project": {"output_dir": "forecast_outputs"}}
+
+        out = forecast_main._normalize_project_paths(config)
+
+        self.assertEqual(
+            Path(out["project"]["output_dir"]),
+            forecast_main.PROJECT_ROOT / "forecast_outputs",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

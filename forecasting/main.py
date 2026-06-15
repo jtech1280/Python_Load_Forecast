@@ -21,6 +21,15 @@ def load_config():
         return yaml.safe_load(f)
 
 
+def _normalize_project_paths(config: dict) -> dict:
+    project_cfg = config.setdefault("project", {})
+    output_dir = Path(project_cfg.get("output_dir", "forecast_outputs"))
+    if not output_dir.is_absolute():
+        output_dir = PROJECT_ROOT / output_dir
+    project_cfg["output_dir"] = str(output_dir)
+    return config
+
+
 def _read_lock_pid(lock_path: Path) -> int | None:
     try:
         text = lock_path.read_text(encoding="utf-8")
@@ -207,7 +216,7 @@ def main(argv: list[str] | None = None):
     parser.add_argument("--train-start-date", type=str, default=None, help="Override training and historical weather start date, e.g. 2018-01-01")
     args = parser.parse_args(_resolve_default_argv(argv))
 
-    config = load_config()
+    config = _normalize_project_paths(load_config())
 
     if args.disable_prophet:
         config.setdefault("model", {}).setdefault("prophet", {})["enabled"] = False

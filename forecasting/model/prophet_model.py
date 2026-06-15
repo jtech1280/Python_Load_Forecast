@@ -81,6 +81,8 @@ class ProphetFitResult:
     model: Any
     regressors: list[str]
     fill_values: dict[str, float]
+    train_rows: int = 0
+    source_rows: int = 0
 
 
 def _cfg(config: dict | None, *keys, default=None):
@@ -195,8 +197,14 @@ def train_prophet(
     work["DT"] = _to_prophet_naive_datetime(work["DT"])
     work["MWH"] = pd.to_numeric(work["MWH"], errors="coerce")
     work = work.dropna(subset=["DT", "MWH"])
-    if len(work) < int(_cfg(config, "model", "prophet", "min_train_rows", default=24 * 60)):
+    min_train_rows = int(_cfg(config, "model", "prophet", "min_train_rows", default=24 * 60))
+    if len(work) < min_train_rows:
         return None
+
+    source_rows = len(work)
+    max_train_rows = int(_cfg(config, "model", "prophet", "max_train_rows", default=0) or 0)
+    if max_train_rows > 0 and len(work) > max(max_train_rows, min_train_rows):
+        work = work.tail(max(max_train_rows, min_train_rows)).reset_index(drop=True)
 
     reg_candidates = _available_regressors(work, regressors or DEFAULT_PROPHET_REGRESSORS)
     reg_candidates = _remove_constant_regressors(work, reg_candidates)
@@ -226,7 +234,13 @@ def train_prophet(
         model.add_regressor(col, **kwargs)
 
     try:
-        model.fit(prophet_df)
+        fit_kwargs: dict[str, Any] = {}
+        fit_algorithm = p.get("fit_algorithm")
+        if fit_algorithm:
+            fit_kwargs["algorithm"] = str(fit_algorithm)
+        if p.get("fit_iter") is not None:
+            fit_kwargs["iter"] = int(p.get("fit_iter"))
+        model.fit(prophet_df, **fit_kwargs)
     except Exception as exc:
         warnings.warn(
             "Prophet benchmark training failed and will be skipped. "
@@ -238,7 +252,15 @@ def train_prophet(
 
     setattr(model, "_forecasting_regressors", reg_candidates)
     setattr(model, "_forecasting_regressor_fill_values", fill_values)
-    return ProphetFitResult(model=model, regressors=reg_candidates, fill_values=fill_values)
+    setattr(model, "_forecasting_train_rows", len(work))
+    setattr(model, "_forecasting_source_rows", source_rows)
+    return ProphetFitResult(
+        model=model,
+        regressors=reg_candidates,
+        fill_values=fill_values,
+        train_rows=len(work),
+        source_rows=source_rows,
+    )
 
 
 def predict_prophet(model_or_fit: Any | ProphetFitResult | None, df: pd.DataFrame, regressors: list[str] | None = None) -> pd.DataFrame:

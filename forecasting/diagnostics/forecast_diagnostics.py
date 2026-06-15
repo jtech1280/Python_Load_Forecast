@@ -8,6 +8,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from forecasting.forecast.uncertainty_bands import (
+    _band_risk_multiplier,
+    _hot_bucket_band_floor,
+    _prep as _prep_band_inputs,
+)
+
 
 RAW_STAGE = "raw_xgb_lgb_production"
 FINAL_STAGE = "final_corrected_production"
@@ -781,6 +787,7 @@ def _diagnostic_band_for_row(
     percent_band: float,
     floor_mwh: float,
     band_scale: float = 1.0,
+    hot_bucket_band_floor: dict | None = None,
 ) -> tuple[float, str]:
     band = max(float(floor_mwh), abs(float(forecast)) * float(percent_band)) if np.isfinite(forecast) else float(floor_mwh)
     method = "percent_or_floor"
@@ -803,33 +810,14 @@ def _diagnostic_band_for_row(
                 except Exception:
                     pass
     scale = max(0.10, float(band_scale or 1.0))
-    hour = int(row.get("Hour")) if pd.notna(row.get("Hour")) else -1
-    hour_group = str(row.get("HourGroup", ""))
-    cloud = str(row.get("CloudCoverBucket", ""))
-    loss = str(row.get("SolarLossBucket", ""))
-    event_cls = str(row.get("CloudSolarEventClass", ""))
-    mult = 1.0
-    if hour_group in {"Overnight", "Morning"}:
-        mult *= 0.78
-    if hour == 14:
-        mult *= 1.35
-    if hour == 15:
-        mult *= 1.45
-    if hour == 16:
-        mult *= 1.55
-    if hour == 17:
-        mult *= 1.45
-    if hour == 18:
-        mult *= 1.25
-    if hour_group == "Peak":
-        mult *= 1.12
-    if cloud in {"Mostly Cloudy", "Overcast"} and loss in {"High", "Extreme"}:
-        mult *= 1.35
-    if event_cls in {"weekday_core_highimpact_solar_loss", "weekday_core_solar_loss", "weekday_core_hour14_solar_loss"}:
-        mult *= 1.20
-    if 16 <= hour <= 18 and cloud in {"Mostly Cloudy", "Overcast"}:
-        mult *= 1.15
-    return band * scale * float(np.clip(mult, 0.65, 2.25)), method
+    band_inputs = _prep_band_inputs(row.to_frame().T)
+    mult = float(_band_risk_multiplier(band_inputs).iloc[0])
+    band_value = band * scale * mult
+    hot_floor = _hot_bucket_band_floor(band_inputs, hot_bucket_band_floor)
+    if hot_floor.notna().any() and float(hot_floor.iloc[0]) > band_value:
+        band_value = float(hot_floor.iloc[0])
+        method = f"{method}+hot_bucket_floor"
+    return band_value, method
 
 
 def build_band_coverage_by_stage(df: pd.DataFrame, residual_band_lookup: dict | None, config: dict | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -847,7 +835,15 @@ def build_band_coverage_by_stage(df: pd.DataFrame, residual_band_lookup: dict | 
             forecast = float(row[col]) if col in row.index and pd.notna(row.get(col)) else np.nan
             if not np.isfinite(actual) or not np.isfinite(forecast):
                 continue
-            band, method = _diagnostic_band_for_row(row, forecast, residual_band_lookup, percent_band, floor_mwh, band_scale)
+            band, method = _diagnostic_band_for_row(
+                row,
+                forecast,
+                residual_band_lookup,
+                percent_band,
+                floor_mwh,
+                band_scale,
+                bands_cfg.get("hot_bucket_band_floor", {}),
+            )
             residual = actual - forecast
             rows.append({
                 "Stage": stage,

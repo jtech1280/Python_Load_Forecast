@@ -164,6 +164,48 @@ def _band_risk_multiplier(out: pd.DataFrame) -> pd.Series:
     return mult.clip(0.65, 5.00)
 
 
+def _hot_bucket_band_floor(out: pd.DataFrame, cfg: dict | None) -> pd.Series:
+    cfg = cfg or {}
+    floor = pd.Series(np.nan, index=out.index, dtype=float)
+    if not bool(cfg.get("enabled", False)):
+        return floor
+
+    hour = pd.to_numeric(out.get("Hour", pd.Series(np.nan, index=out.index)), errors="coerce")
+    hour_group = out.get("HourGroup", pd.Series("", index=out.index)).astype(str)
+    temp_max = pd.to_numeric(out.get("Temperature_DailyMax", pd.Series(np.nan, index=out.index)), errors="coerce")
+
+    for rule in cfg.get("rules", []) or []:
+        if not isinstance(rule, dict):
+            continue
+        try:
+            min_band = float(rule["min_band_mwh"])
+        except Exception:
+            continue
+        mask = pd.Series(True, index=out.index)
+
+        min_temp = rule.get("min_daily_max_temp_f", rule.get("min_maxtemp_f"))
+        max_temp = rule.get("max_daily_max_temp_f", rule.get("max_maxtemp_f"))
+        if min_temp is not None:
+            mask &= temp_max.ge(float(min_temp))
+        if max_temp is not None:
+            mask &= temp_max.le(float(max_temp))
+
+        hour_groups = rule.get("hour_groups", rule.get("hour_group"))
+        if hour_groups is not None:
+            if isinstance(hour_groups, str):
+                hour_groups = [hour_groups]
+            mask &= hour_group.isin([str(v) for v in hour_groups])
+
+        hours = rule.get("hours")
+        if hours is not None:
+            mask &= hour.isin([int(v) for v in hours])
+
+        if mask.any():
+            floor.loc[mask] = np.maximum(floor.loc[mask].fillna(0.0), min_band)
+
+    return floor
+
+
 def _forecast_day_index(out: pd.DataFrame) -> pd.Series:
     if "Forecast_Day" in out.columns:
         day = pd.to_numeric(out["Forecast_Day"], errors="coerce")
@@ -328,6 +370,7 @@ def apply_bands(
     residual_lookup: dict | None = None,
     band_scale: float = 1.0,
     weather_input_risk: dict | None = None,
+    hot_bucket_band_floor: dict | None = None,
 ) -> pd.DataFrame:
     out = _prep(df)
     base = out["Calibrated_Forecast_MWH"].astype(float)
@@ -364,6 +407,11 @@ def apply_bands(
     out["Weather_Input_Risk_Multiplier"] = weather_mult
     out["Weather_Input_Risk_Reason"] = weather_reason
     out["Band"] = out["Band"].astype(float) * weather_mult
+    hot_floor = _hot_bucket_band_floor(out, hot_bucket_band_floor)
+    hot_floor_mask = hot_floor.notna() & out["Band"].astype(float).lt(hot_floor)
+    if hot_floor_mask.any():
+        out.loc[hot_floor_mask, "Band_Method"] = out.loc[hot_floor_mask, "Band_Method"].astype(str) + "+hot_bucket_floor"
+        out.loc[hot_floor_mask, "Band"] = hot_floor.loc[hot_floor_mask].astype(float)
     forecast_day = _forecast_day_index(out)
     out["Operational_Horizon_Label"] = "Informational"
     out.loc[forecast_day.eq(1), "Operational_Horizon_Label"] = "Day1"
