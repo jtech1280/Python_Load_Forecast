@@ -5,6 +5,17 @@ import os
 import sys
 from pathlib import Path
 
+if __package__ in {None, ""}:
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+from forecasting.main import _disable_windows_platform_wmi_probe
+
+_disable_windows_platform_wmi_probe()
+
 import pandas as pd
 import numpy as np
 import plotly.graph_objs as go
@@ -15,12 +26,8 @@ from dash import Dash, Input, Output, State, html, dcc, ALL
 from dash import callback_context
 
 if __package__ in {None, ""}:
-    PROJECT_ROOT = Path(__file__).resolve().parents[2]
-    if str(PROJECT_ROOT) not in sys.path:
-        sys.path.insert(0, str(PROJECT_ROOT))
     from forecasting.dashboard.layout import make_layout
 else:
-    PROJECT_ROOT = Path(__file__).resolve().parents[2]
     from .layout import make_layout
 
 BRAND_BLUE = "#0057B8"

@@ -3,6 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 import os
 
+from forecasting.main import _disable_windows_platform_wmi_probe
+
+_disable_windows_platform_wmi_probe()
+
 import pandas as pd
 import yaml
 
@@ -109,6 +113,11 @@ def main():
         diagnostics_results=diagnostics,
     )
     port = int(os.environ.get("DASH_PORT", "8051"))
+    print(
+        "Dashboard server starting from saved outputs at http://127.0.0.1:"
+        f"{port}. This process will keep running until stopped.",
+        flush=True,
+    )
     app.run(host="0.0.0.0", port=port, debug=False)
 
 

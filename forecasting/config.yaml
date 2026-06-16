@@ -571,6 +571,13 @@ calibration:
           min_maxtemp_f: 90.0
           max_maxtemp_f: 92.5
           holiday: false
+        - name: june_recent_hot_midday_peak_backoff
+          adjustment_mwh: -4.0
+          months: [6]
+          hours: [12, 13, 14, 15, 16, 17, 18]
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 100.0
+          holiday: false
         - name: june_long_mild_clear_weekend_peak_down
           adjustment_mwh: -8.0
           months: [6]
@@ -629,6 +636,15 @@ calibration:
           max_forecast_day: 16
           min_maxtemp_f: 90.0
           holiday: true
+        - name: july_long_90_94_peak_window_backoff
+          adjustment_mwh: -6.0
+          months: [7]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 94.0
+          holiday: false
         - name: july_long_mild_hot_peak_soft_down
           adjustment_mwh: -1.0
           months: [7]

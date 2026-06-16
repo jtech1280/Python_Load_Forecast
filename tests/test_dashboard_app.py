@@ -1,6 +1,10 @@
 import math
 import unittest
 
+from forecasting.main import _disable_windows_platform_wmi_probe
+
+_disable_windows_platform_wmi_probe()
+
 import numpy as np
 import pandas as pd
 

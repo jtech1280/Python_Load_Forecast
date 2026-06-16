@@ -30,6 +30,32 @@ def _normalize_project_paths(config: dict) -> dict:
     return config
 
 
+def _disable_windows_platform_wmi_probe() -> None:
+    if os.name != "nt":
+        return
+    enabled = str(os.environ.get("FORECAST_ENABLE_PLATFORM_WMI", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if enabled:
+        return
+    try:
+        import platform
+    except ImportError:
+        return
+    if not hasattr(platform, "_wmi_query"):
+        return
+
+    def _wmi_disabled(*_args, **_kwargs):
+        raise OSError("Windows platform WMI probing disabled by forecasting launcher")
+
+    platform._wmi_query = _wmi_disabled
+    if hasattr(platform, "_uname_cache"):
+        platform._uname_cache = None
+
+
 def _read_lock_pid(lock_path: Path) -> int | None:
     try:
         text = lock_path.read_text(encoding="utf-8")
@@ -178,10 +204,11 @@ def _resolve_default_argv(argv: list[str] | None) -> list[str] | None:
     if not enabled:
         return []
 
-    defaults = ["--save-csv", "--run-dashboard"]
+    defaults = ["--save-csv"]
     print(
         "No CLI args supplied; defaulting to: "
         f"{' '.join(defaults)}. "
+        "Add --run-dashboard to launch the blocking Dash server after the forecast. "
         "Set FORECAST_DEFAULT_RUN_ARGS=0 to require explicit flags.",
         flush=True,
     )
@@ -191,6 +218,7 @@ def _resolve_default_argv(argv: list[str] | None) -> list[str] | None:
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Roseville System Load Forecast V12.8 (targeted solar-loss refinement + risk bands + max CPU/GPU)")
     parser.add_argument("--run-dashboard", action="store_true", help="Launch Dash dashboard after forecast")
+    parser.add_argument("--dashboard-port", type=int, default=8050, help="Port for --run-dashboard (default: 8050)")
     parser.add_argument("--horizon-days", type=int, default=None, help="Override forecast horizon days (default from config)")
     parser.add_argument("--save-csv", action="store_true", help="Export forecast/backtest CSVs to output directory")
     parser.add_argument("--skip-diagnostics", action="store_true", help="Skip detailed tuning diagnostics export")
@@ -299,6 +327,7 @@ def main(argv: list[str] | None = None):
 
     output_dir = Path(config["project"]["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
+    _disable_windows_platform_wmi_probe()
     replay_cfg = ((config.get("training", {}) or {}).get("rolling_origin_replay", {}) or {})
     if bool(replay_cfg.get("enabled", False)) and not bool(replay_cfg.get("allow_concurrent", False)):
         lock = _acquire_replay_lock(output_dir)
@@ -438,7 +467,12 @@ def main(argv: list[str] | None = None):
             config=config,
             diagnostics_results=results.get("diagnostics", {}),
         )
-        app.run(host="0.0.0.0", port=8050, debug=False)
+        print(
+            "Dashboard server starting at http://127.0.0.1:"
+            f"{args.dashboard_port}. This process will keep running until stopped.",
+            flush=True,
+        )
+        app.run(host="0.0.0.0", port=args.dashboard_port, debug=False)
 
 
 if __name__ == "__main__":
