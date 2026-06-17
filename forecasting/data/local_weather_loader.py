@@ -161,3 +161,56 @@ def local_temperature_bias_summary(matched: pd.DataFrame, lookup: pd.DataFrame) 
     if lookup is not None and not lookup.empty:
         summary["Lookup_Rows"] = len(lookup)
     return summary
+
+
+def apply_dynamic_temperature_calibration(fut_wx: pd.DataFrame, hist_wx: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """
+    Dynamically correct the future weather forecast temperature if the actual local station
+    temperatures in the last 24 hours have been trending higher or lower than the Open-Meteo actuals.
+    This directly models transient cooling/warming events like the Delta Breeze.
+    """
+    cfg = ((config.get("local_weather", {}) or {}).get("temperature_calibration", {}) or {})
+    if not bool(cfg.get("dynamic_enabled", True)):
+        return fut_wx
+
+    if fut_wx is None or fut_wx.empty or hist_wx is None or hist_wx.empty:
+        return fut_wx
+
+    if "LocalStation_TempF" not in hist_wx.columns:
+        return fut_wx
+
+    matched = hist_wx.dropna(subset=["LocalStation_TempF"]).copy()
+    if matched.empty:
+        return fut_wx
+
+    recent_window_hours = int(cfg.get("dynamic_window_hours", 24))
+    recent = matched.tail(recent_window_hours)
+    
+    temp_om = pd.to_numeric(recent.get("TempF_OpenMeteo", recent.get("TempF")), errors="coerce")
+    temp_local = pd.to_numeric(recent["LocalStation_TempF"], errors="coerce")
+    recent_bias = (temp_local - temp_om).dropna()
+    
+    if recent_bias.empty:
+        return fut_wx
+
+    mean_bias = float(recent_bias.mean())
+    
+    cap_f = float(cfg.get("dynamic_cap_f", 6.0))
+    blend = float(cfg.get("dynamic_blend", 0.80))
+    applied_bias = np.clip(mean_bias, -cap_f, cap_f) * blend
+
+    out = fut_wx.copy()
+    out["DT"] = pd.to_datetime(out["DT"])
+    min_dt = out["DT"].min()
+    
+    decay_hours = float(cfg.get("dynamic_decay_hours", 48.0))
+    
+    hours_ahead = (out["DT"] - min_dt).dt.total_seconds() / 3600.0
+    decay_factor = np.exp(-hours_ahead / decay_hours)
+    
+    correction = applied_bias * decay_factor
+    out["TempF"] = out["TempF"] + correction
+    
+    out["Dynamic_Weather_Correction_F"] = correction
+    
+    return out

@@ -960,6 +960,7 @@ def build_diagnostics_bundle(
         "cloud_solar_event_error_by_stage": build_metrics_by_group_by_stage(bt, ["CloudSolarEventClass", "HourGroup"], min_count=min_segment_count),
         "cloud_solar_event_hour_error_by_stage": build_metrics_by_group_by_stage(bt, ["CloudSolarEventClass", "Hour"], min_count=min_segment_count),
         "daily_peak_miss_by_stage": build_daily_peak_miss_by_stage(bt),
+        "stage_marginal_contributions": build_stage_marginal_contributions(bt),
         "top_100_underforecast_hours_by_stage": under_stage,
         "top_100_overforecast_hours_by_stage": over_stage,
         "band_coverage_summary": band_summary,

@@ -10,6 +10,7 @@ from forecasting.data.btm_loader import load_btm_monthly_capacity
 from forecasting.data.five_min_load_loader import load_five_min_system_load
 from forecasting.data.local_weather_loader import (
     apply_temperature_bias_calibration,
+    apply_dynamic_temperature_calibration,
     build_temperature_bias_lookup,
     load_local_station_weather,
     local_temperature_bias_summary,
@@ -764,6 +765,9 @@ def run_pipeline(
         if bool(temp_cal_cfg.get("enabled", False)) and not local_temp_lookup.empty:
             hist_wx = apply_temperature_bias_calibration(hist_wx, local_temp_lookup, config)
             fut_wx = apply_temperature_bias_calibration(fut_wx, local_temp_lookup, config)
+        
+        if bool(temp_cal_cfg.get("dynamic_enabled", True)):
+            fut_wx = apply_dynamic_temperature_calibration(fut_wx, hist_wx, config)
     _progress(progress_callback, "Processed local weather", advance=1)
 
     official_hourly_latest_dt = load_df["DT"].max() if "DT" in load_df.columns and not load_df.empty else pd.NaT

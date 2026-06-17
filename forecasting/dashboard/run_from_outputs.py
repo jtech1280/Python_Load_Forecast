@@ -92,6 +92,7 @@ def main():
         "daily_peak_miss_by_stage",
         "backtest_metrics_by_segment_by_stage",
         "top_100_underforecast_hours_by_stage",
+        "stage_marginal_contributions",
     ]:
         path = out_dir / f"{name}.csv"
         if path.exists():

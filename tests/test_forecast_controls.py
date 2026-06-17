@@ -12,6 +12,7 @@ from forecasting.diagnostics.forecast_diagnostics import _diagnostic_band_for_ro
 from forecasting.forecast.uncertainty_bands import _band_risk_multiplier, _prep, apply_bands
 from forecasting.forecast.weather_robustness_hedge import apply_weather_robustness_hedge
 from forecasting.model.ensemble import blend_predictions
+from forecasting.data.local_weather_loader import apply_dynamic_temperature_calibration
 
 
 class ForecastControlTests(unittest.TestCase):
@@ -430,6 +431,41 @@ class ForecastControlTests(unittest.TestCase):
 
         self.assertTrue(np.allclose(blended[0], 11.4))
         self.assertTrue(np.allclose(blended[1:], [20.75, 30.75]))
+
+    def test_apply_dynamic_temperature_calibration_adjusts_temperatures_with_decay(self):
+        hist_wx = pd.DataFrame(
+            {
+                "DT": pd.date_range("2026-06-15 00:00", periods=24, freq="h"),
+                "TempF": [90.0] * 24,
+                "LocalStation_TempF": [85.0] * 24, # Cooler by 5 degrees consistently
+            }
+        )
+        fut_wx = pd.DataFrame(
+            {
+                "DT": pd.date_range("2026-06-16 00:00", periods=24, freq="h"),
+                "TempF": [95.0] * 24,
+            }
+        )
+        config = {
+            "local_weather": {
+                "temperature_calibration": {
+                    "dynamic_enabled": True,
+                    "dynamic_window_hours": 24,
+                    "dynamic_cap_f": 6.0,
+                    "dynamic_blend": 0.80, # Expected bias: -5.0 * 0.80 = -4.0
+                    "dynamic_decay_hours": 24.0,
+                }
+            }
+        }
+        
+        out = apply_dynamic_temperature_calibration(fut_wx, hist_wx, config)
+        
+        self.assertIn("Dynamic_Weather_Correction_F", out.columns)
+        # Verify the first hour (hour 0) has approx -4.0 degrees correction
+        self.assertAlmostEqual(out.loc[0, "Dynamic_Weather_Correction_F"], -4.0, places=2)
+        # Verify the 24th hour has decayed towards 0 (factor of exp(-23/24) = ~0.38 -> -4 * 0.38 = ~-1.5)
+        self.assertTrue(-4.0 < out.loc[23, "Dynamic_Weather_Correction_F"] < -1.0)
+        self.assertAlmostEqual(out.loc[0, "TempF"], 91.0, places=2)
 
 
 if __name__ == "__main__":

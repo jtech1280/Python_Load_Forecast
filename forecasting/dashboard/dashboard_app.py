@@ -822,6 +822,68 @@ def _make_validation_detail_graph(backtest_df: pd.DataFrame):
     return fig
 
 
+def _make_stage_marginal_contributions_graph(diagnostics_results: dict, backtest_df: pd.DataFrame):
+    contributions = (diagnostics_results or {}).get("stage_marginal_contributions")
+    if contributions is None or not isinstance(contributions, pd.DataFrame) or contributions.empty:
+        try:
+            from forecasting.diagnostics.forecast_diagnostics import build_stage_marginal_contributions
+            contributions = build_stage_marginal_contributions(backtest_df)
+        except Exception:
+            contributions = None
+
+    fig = go.Figure()
+    if contributions is None or not isinstance(contributions, pd.DataFrame) or contributions.empty:
+        fig.update_layout(title="Correction Stage Marginal Contributions unavailable", plot_bgcolor="white", paper_bgcolor="white")
+        return fig
+
+    df_overall = contributions[contributions["Slice"] == "Overall"].copy()
+    if df_overall.empty:
+        df_overall = contributions.copy()
+
+    df_overall["Marginal_dMAE_MWH"] = pd.to_numeric(df_overall["Marginal_dMAE_MWH"], errors="coerce")
+    df_overall["MAE_MWH"] = pd.to_numeric(df_overall["MAE_MWH"], errors="coerce")
+    df_overall["Bias_MWH"] = pd.to_numeric(df_overall["Bias_MWH"], errors="coerce")
+    
+    df_plot = df_overall.dropna(subset=["Marginal_dMAE_MWH"])
+
+    if df_plot.empty:
+        fig.update_layout(title="Correction Stage Marginal Contributions empty", plot_bgcolor="white", paper_bgcolor="white")
+        return fig
+
+    colors = np.where(df_plot["Marginal_dMAE_MWH"] <= 0.0, BRAND_GREEN, BRAND_GOLD)
+
+    fig.add_trace(go.Bar(
+        x=df_plot["Stage"],
+        y=df_plot["Marginal_dMAE_MWH"],
+        name="Marginal MAE Change",
+        marker_color=colors,
+        customdata=np.stack([
+            df_plot["MAE_MWH"],
+            df_plot["Bias_MWH"],
+        ], axis=-1),
+        hovertemplate="<b>%{x}</b><br>Marginal MAE Change: %{y:+.3f} MWh<br>Resulting MAE: %{customdata[0]:.2f} MWh<br>Resulting Bias: %{customdata[1]:+.2f} MWh<extra></extra>",
+    ))
+
+    fig.add_shape(
+        type="line",
+        x0=-0.5,
+        y0=0,
+        x1=len(df_plot) - 0.5,
+        y1=0,
+        line=dict(color="gray", width=1.5, dash="dash"),
+    )
+
+    fig.update_layout(
+        title="Incremental (Marginal) Contribution of Correction Stages (Negative = Error Reduction)",
+        xaxis={"title": "Correction Stage Layer Added", "tickangle": -25},
+        yaxis={"title": "MAE Change (MWh)"},
+        margin={"l": 55, "r": 55, "t": 60, "b": 95},
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+    )
+    return fig
+
+
 def _make_production_scorecard_graph(diagnostics_results: dict):
     scorecard = (diagnostics_results or {}).get("production_readiness_scorecard")
     fig = go.Figure()
@@ -1578,6 +1640,7 @@ def create_dashboard_app(historical_fit_df: pd.DataFrame, future_results: dict, 
         Output("main-graph", "figure"),
         Output("stats-graph", "figure"),
         Output("stats-detail-graph", "figure"),
+        Output("stats-marginal-graph", "figure"),
         Output("aux-graph", "figure"),
         Output("forecast-table", "data"),
         Output("forecast-table", "columns"),
@@ -1680,6 +1743,8 @@ def create_dashboard_app(historical_fit_df: pd.DataFrame, future_results: dict, 
             stats_fig = _make_backtest_graph(backtest_df)
             stats_detail = _make_validation_detail_graph(backtest_df)
 
+        stats_marginal = _make_stage_marginal_contributions_graph(diagnostics_results, backtest_df)
+
         # Apply tab mode visibility.
         is_aux = model_type in {"comparable", "temp_sens"}
 
@@ -1723,7 +1788,7 @@ def create_dashboard_app(historical_fit_df: pd.DataFrame, future_results: dict, 
             stats_style = {"display": "none"}
         # Spreadsheet mode keeps the table visible; main_fig is still computed but hidden.
 
-        return dual_style, stats_style, aux_style, main_fig, stats_fig, stats_detail, aux_fig, data, columns, cards
+        return dual_style, stats_style, aux_style, main_fig, stats_fig, stats_detail, stats_marginal, aux_fig, data, columns, cards
 
     @app.callback(
         Output("download-spreadsheet", "data"),

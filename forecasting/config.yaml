@@ -65,6 +65,14 @@ local_weather:
     cap_f: 8.0
     max_abs_delta_f: 25.0
     min_count: 24
+    # Real-time dynamic calibration to correct for transient cooling/warming events
+    # like the Roseville Delta Breeze. Looks at the last 24 hours of actual weather station
+    # readings vs Open-Meteo and applies a decaying correction factor to the future forecast.
+    dynamic_enabled: true
+    dynamic_window_hours: 24
+    dynamic_cap_f: 6.0
+    dynamic_blend: 0.80
+    dynamic_decay_hours: 48.0
 
 openmeteo:
   latitude: 38.7521

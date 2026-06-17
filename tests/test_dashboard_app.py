@@ -99,6 +99,23 @@ class DashboardAppHelperTests(unittest.TestCase):
         self.assertTrue(np.allclose(upper.to_numpy(), [118.0] * 5))
         self.assertTrue(np.allclose(lower.to_numpy(), [82.0] * 5))
 
+    def test_make_stage_marginal_contributions_graph_renders_correctly(self):
+        contributions = pd.DataFrame(
+            {
+                "Slice": ["Overall", "Overall"],
+                "Stage": ["Raw XGB+LGB", "+Residual"],
+                "Marginal_dMAE_MWH": [np.nan, -0.5],
+                "MAE_MWH": [5.25, 4.75],
+                "Bias_MWH": [-1.41, -0.91],
+            }
+        )
+        diagnostics = {"stage_marginal_contributions": contributions}
+        fig = dashboard_app._make_stage_marginal_contributions_graph(diagnostics, pd.DataFrame())
+        
+        self.assertIsNotNone(fig)
+        self.assertEqual(fig.data[0].name, "Marginal MAE Change")
+        self.assertEqual(list(fig.data[0].x), ["+Residual"])
+
     def test_forecast_series_controls_only_offer_present_numeric_series(self):
         df = pd.DataFrame(
             {

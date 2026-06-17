@@ -430,6 +430,7 @@ def make_layout(
                                 children=[
                                     dcc.Graph(id="stats-graph", config={"displayModeBar": True}, style={"height": "calc(100vh - 170px)"}),
                                     dcc.Graph(id="stats-detail-graph", config={"displayModeBar": True}, style={"height": "320px"}),
+                                    dcc.Graph(id="stats-marginal-graph", config={"displayModeBar": True}, style={"height": "340px", "marginTop": "20px"}),
                                 ],
                             ),
                             # Sensitivity / comparable view (graph-only).
