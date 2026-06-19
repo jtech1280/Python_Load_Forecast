@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+# Add project root to sys.path to support executing this script directly
+project_root = str(Path(__file__).resolve().parents[2])
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 import os
 
 from forecasting.main import _disable_windows_platform_wmi_probe
