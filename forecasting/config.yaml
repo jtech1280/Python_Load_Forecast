@@ -13,6 +13,44 @@ sql:
     FROM [Informatica].[dbo].[METRIX_HRLY_SYSTEM_VW]
     ORDER BY YEAR, MONTH, DAY
 
+output_sql:
+  # Default persistence for high-churn outputs that are overwritten on each CSV run.
+  # Use --no-save-sql for local dry runs that should not write to SQL Server.
+  enabled: true
+  dashboard_read_enabled: false
+  dsn_name: "Forecast_DB"
+  database: ""
+  schema: "Forecasting"
+  run_table: "LoadForecastRun"
+  forecast_table: "LoadForecastOutput"
+  backtest_table: "LoadForecastBacktest"
+  weather_table: "LoadForecastWeather"
+  replay_tables:
+    rolling_origin_replay_summary: "LoadForecastReplaySummary"
+    rolling_origin_replay_results: "LoadForecastReplayResult"
+    rolling_origin_replay_origin_coverage: "LoadForecastReplayOriginCoverage"
+    rolling_origin_replay_scorecard: "LoadForecastReplayScorecard"
+    rolling_origin_replay_weather_realism_scorecard: "LoadForecastReplayWeatherRealismScorecard"
+    rolling_origin_replay_weather_input_error_by_lead: "LoadForecastReplayWeatherInputErrorByLead"
+    rolling_origin_replay_weather_input_sensitivity_scorecard: "LoadForecastReplayWeatherInputSensitivityScorecard"
+    rolling_origin_replay_weather_input_sensitivity_detail: "LoadForecastReplayWeatherInputSensitivityDetail"
+    rolling_origin_replay_stage_metrics: "LoadForecastReplayStageMetric"
+    rolling_origin_replay_origin_metrics_by_stage: "LoadForecastReplayOriginMetricByStage"
+    rolling_origin_replay_scored_season_metrics_by_stage: "LoadForecastReplayScoredSeasonMetricByStage"
+    rolling_origin_replay_origin_season_metrics_by_stage: "LoadForecastReplayOriginSeasonMetricByStage"
+    rolling_origin_replay_horizon_metrics_by_stage: "LoadForecastReplayHorizonMetricByStage"
+    rolling_origin_replay_peak_window_metrics_by_stage: "LoadForecastReplayPeakWindowMetricByStage"
+    rolling_origin_replay_hot_peak_metrics_by_stage: "LoadForecastReplayHotPeakMetricByStage"
+    rolling_origin_replay_shoulder_heat_metrics_by_stage: "LoadForecastReplayShoulderHeatMetricByStage"
+    rolling_origin_replay_cloud_solar_midday_metrics_by_stage: "LoadForecastReplayCloudSolarMiddayMetricByStage"
+    rolling_origin_replay_weekend_metrics_by_stage: "LoadForecastReplayWeekendMetricByStage"
+    rolling_origin_replay_holiday_metrics_by_stage: "LoadForecastReplayHolidayMetricByStage"
+    rolling_origin_replay_long_horizon_metrics_by_stage: "LoadForecastReplayLongHorizonMetricByStage"
+    rolling_origin_replay_daily_peak_miss_by_stage: "LoadForecastReplayDailyPeakMissByStage"
+    rolling_origin_replay_timing: "LoadForecastReplayTiming"
+    production_readiness_scorecard: "LoadForecastProductionReadinessScorecard"
+  chunksize: 1000
+
 five_min_load:
   enabled: true
   dsn_name: "PowerSupply"

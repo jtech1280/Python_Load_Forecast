@@ -208,6 +208,7 @@ def _resolve_default_argv(argv: list[str] | None) -> list[str] | None:
     print(
         "No CLI args supplied; defaulting to: "
         f"{' '.join(defaults)}. "
+        "SQL Server output persistence follows output_sql.enabled in config.yaml. "
         "Add --run-dashboard to launch the blocking Dash server after the forecast. "
         "Set FORECAST_DEFAULT_RUN_ARGS=0 to require explicit flags.",
         flush=True,
@@ -221,6 +222,8 @@ def main(argv: list[str] | None = None):
     parser.add_argument("--dashboard-port", type=int, default=8050, help="Port for --run-dashboard (default: 8050)")
     parser.add_argument("--horizon-days", type=int, default=None, help="Override forecast horizon days (default from config)")
     parser.add_argument("--save-csv", action="store_true", help="Export forecast/backtest CSVs to output directory")
+    parser.add_argument("--save-sql", action="store_true", help="Persist forecast/backtest/weather outputs to SQL Server")
+    parser.add_argument("--no-save-sql", action="store_true", help="Skip SQL Server output persistence for this run")
     parser.add_argument("--skip-diagnostics", action="store_true", help="Skip detailed tuning diagnostics export")
     parser.add_argument("--disable-prophet", action="store_true", help="Skip Prophet benchmark training/prediction even if enabled in config.yaml")
     parser.add_argument("--disable-catboost", action="store_true", help="Skip CatBoost benchmark training/prediction even if enabled in config.yaml")
@@ -245,6 +248,11 @@ def main(argv: list[str] | None = None):
     args = parser.parse_args(_resolve_default_argv(argv))
 
     config = _normalize_project_paths(load_config())
+
+    if args.save_sql:
+        config.setdefault("output_sql", {})["enabled"] = True
+    if args.no_save_sql:
+        config.setdefault("output_sql", {})["enabled"] = False
 
     if args.disable_prophet:
         config.setdefault("model", {}).setdefault("prophet", {})["enabled"] = False
@@ -368,7 +376,8 @@ def main(argv: list[str] | None = None):
         progress.close()
 
     replay_cfg = ((config.get("training", {}) or {}).get("rolling_origin_replay", {}) or {})
-    if results is not None and bool(replay_cfg.get("enabled", False)):
+    replay_enabled = bool(replay_cfg.get("enabled", False))
+    if results is not None and replay_enabled:
         from forecasting.backtest.rolling_origin_replay import (
             build_rolling_origin_replay_bundle,
             run_rolling_origin_replay,
@@ -457,6 +466,27 @@ def main(argv: list[str] | None = None):
             written = export_diagnostics_bundle(results.get("diagnostics", {}), output_dir)
             print(f"Saved diagnostics files: {len(written)}")
             print(f"Saved diagnostics manifest to: {written.get('diagnostics_manifest')}")
+
+    if results is not None:
+        from forecasting.data.output_sql_store import output_sql_enabled, persist_run_outputs
+
+        if output_sql_enabled(config):
+            sql_run_id = persist_run_outputs(
+                config,
+                forecast_df=(results.get("future", {}) or {}).get("display"),
+                backtest_df=results.get("backtest"),
+                weather_df=(results.get("diagnostics", {}) or {}).get("forecast_weather_used"),
+                replay_diagnostics=results.get("diagnostics"),
+                source="forecasting.main",
+                metadata={
+                    "output_dir": str(output_dir),
+                    "save_csv": bool(args.save_csv),
+                    "skip_diagnostics": bool(args.skip_diagnostics),
+                    "horizon_days": args.horizon_days,
+                    "rolling_origin_replay": replay_enabled,
+                },
+            )
+            print(f"Persisted forecast outputs to SQL Server RunID: {sql_run_id}")
 
     if args.run_dashboard and results is not None:
         from forecasting.dashboard.dashboard_app import create_dashboard_app

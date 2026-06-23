@@ -42,6 +42,38 @@ def _forecast_weather_frame_from_output(df: pd.DataFrame) -> pd.DataFrame:
     return out.dropna(subset=["DT"]).copy()
 
 
+def _load_latest_sql_outputs(cfg: dict) -> dict:
+    try:
+        from forecasting.data.output_sql_store import (
+            load_latest_run_outputs,
+            output_sql_dashboard_read_enabled,
+        )
+    except Exception as exc:
+        print(f"SQL output support is unavailable; using CSV outputs. Details: {exc}", flush=True)
+        return {}
+
+    if not output_sql_dashboard_read_enabled(cfg):
+        return {}
+
+    try:
+        bundle = load_latest_run_outputs(cfg)
+    except Exception as exc:
+        print(f"Could not load latest SQL forecast outputs; using CSV outputs. Details: {exc}", flush=True)
+        return {}
+
+    forecast = bundle.get("forecast")
+    backtest = bundle.get("backtest")
+    if not isinstance(forecast, pd.DataFrame) or forecast.empty:
+        print("SQL output loading is enabled but no forecast rows were found; using CSV outputs.", flush=True)
+        return {}
+    if not isinstance(backtest, pd.DataFrame) or backtest.empty:
+        print("SQL output loading is enabled but no backtest rows were found; using CSV outputs.", flush=True)
+        return {}
+
+    print(f"Loaded latest forecast outputs from SQL Server RunID: {bundle.get('run_id')}", flush=True)
+    return bundle
+
+
 def main():
     here = Path(__file__).resolve().parents[1]  # forecasting/
     cfg = yaml.safe_load((here / "config.yaml").read_text(encoding="utf-8"))
@@ -53,13 +85,18 @@ def main():
     forecast_csv = out_dir / "forecast_results.csv"
     backtest_csv = out_dir / "backtest_results.csv"
 
-    if not forecast_csv.exists():
-        raise SystemExit(f"Missing {forecast_csv}. Run the pipeline with --save-csv first.")
-    if not backtest_csv.exists():
-        raise SystemExit(f"Missing {backtest_csv}. Run the pipeline with --save-csv first.")
+    sql_bundle = _load_latest_sql_outputs(cfg)
+    if sql_bundle:
+        fut = sql_bundle["forecast"]
+        bt = sql_bundle["backtest"]
+    else:
+        if not forecast_csv.exists():
+            raise SystemExit(f"Missing {forecast_csv}. Run the pipeline with --save-csv first.")
+        if not backtest_csv.exists():
+            raise SystemExit(f"Missing {backtest_csv}. Run the pipeline with --save-csv first.")
+        fut = pd.read_csv(forecast_csv, low_memory=False)
+        bt = pd.read_csv(backtest_csv, low_memory=False)
 
-    fut = pd.read_csv(forecast_csv, low_memory=False)
-    bt = pd.read_csv(backtest_csv, low_memory=False)
     previous_forecast = load_latest_distinct_snapshot(
         out_dir / "forecast_runs",
         current_df=fut,
@@ -90,7 +127,7 @@ def main():
         hash_columns=["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay"],
     )
     diagnostics = {}
-    current_mtime = max(forecast_csv.stat().st_mtime, backtest_csv.stat().st_mtime)
+    current_mtime = max([p.stat().st_mtime for p in [forecast_csv, backtest_csv] if p.exists()] or [0.0])
     stale_scorecards = {}
     for name in [
         "forecast_weather_used",
@@ -106,6 +143,12 @@ def main():
             diagnostics[name] = pd.read_csv(path, low_memory=False)
             if name.endswith("scorecard") or name == "production_readiness_scorecard":
                 stale_scorecards[name] = path.stat().st_mtime < current_mtime
+    if sql_bundle and isinstance(sql_bundle.get("weather"), pd.DataFrame) and not sql_bundle["weather"].empty:
+        diagnostics["forecast_weather_used"] = sql_bundle["weather"]
+    if sql_bundle and isinstance(sql_bundle.get("diagnostics"), dict):
+        for name, frame in sql_bundle["diagnostics"].items():
+            if isinstance(frame, pd.DataFrame) and not frame.empty:
+                diagnostics[name] = frame
     diagnostics["_stale_scorecards"] = stale_scorecards
 
     app = create_dashboard_app(
