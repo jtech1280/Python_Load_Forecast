@@ -97,7 +97,7 @@ def _make_sql_engine(sql_cfg: dict):
     odbc = ";".join(parts) + ";"
     return create_engine(
         f"mssql+pyodbc:///?odbc_connect={quote_plus(odbc)}",
-        fast_executemany=True,
+        fast_executemany=False,
     )
 
 

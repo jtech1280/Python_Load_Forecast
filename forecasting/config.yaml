@@ -50,7 +50,7 @@ output_sql:
     rolling_origin_replay_daily_peak_miss_by_stage: "LoadForecastReplayDailyPeakMissByStage"
     rolling_origin_replay_timing: "LoadForecastReplayTiming"
     production_readiness_scorecard: "LoadForecastProductionReadinessScorecard"
-  chunksize: 100
+  chunksize: 10
 
 five_min_load:
   enabled: true
