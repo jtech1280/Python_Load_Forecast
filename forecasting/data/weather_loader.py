@@ -152,7 +152,31 @@ def _write_weather_cache(df: pd.DataFrame, path: Path) -> None:
     df[[col for col in cols if col in df.columns]].to_csv(path, index=False)
 
 
-def _archive_forecast_weather(df: pd.DataFrame, config: dict) -> Path | None:
+def _archive_forecast_weather(df: pd.DataFrame, config: dict) -> str | Path | None:
+    try:
+        from forecasting.data.output_sql_store import (
+            archive_forecast_weather_snapshot,
+            output_sql_enabled,
+            output_sql_config,
+        )
+
+        if output_sql_enabled(config):
+            snapshot_id = archive_forecast_weather_snapshot(
+                config,
+                df,
+                source="open_meteo_forecast",
+            )
+            sql_cfg = output_sql_config(config)
+            schema = str(sql_cfg.get("schema") or "Forecasting")
+            table = str(sql_cfg.get("forecast_weather_archive_table") or "LoadForecastWeatherArchive")
+            return f"sql:{schema}.{table}:{snapshot_id}" if snapshot_id else None
+    except Exception as exc:
+        warnings.warn(
+            f"SQL forecast weather archive failed ({exc}); continuing without CSV archive.",
+            RuntimeWarning,
+        )
+        return None
+
     archive_dir = _weather_cache_dir(config) / "forecast_weather_runs"
     hash_cols = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay"]
     return save_distinct_snapshot(
@@ -316,6 +340,25 @@ def fetch_previous_run_weather(
 ) -> pd.DataFrame:
     """Load fixed-lead archived forecast weather for replay realism checks."""
     max_days = max(1, min(7, int(max_previous_days or 7)))
+    try:
+        from forecasting.data.output_sql_store import load_archived_forecast_weather, output_sql_enabled
+
+        if output_sql_enabled(config):
+            archived = load_archived_forecast_weather(
+                config,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                max_previous_days=max_days,
+            )
+            if not archived.empty:
+                archived.attrs["weather_source"] = "forecast_weather_archive_sql"
+                return archived
+    except Exception as exc:
+        warnings.warn(
+            f"SQL forecast weather archive lookup failed ({exc}); falling back to Open-Meteo previous-runs API.",
+            RuntimeWarning,
+        )
+
     params = _standard_params(config)
     previous_hourly = []
     for lead_day in range(1, max_days + 1):

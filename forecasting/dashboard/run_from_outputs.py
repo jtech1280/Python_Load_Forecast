@@ -74,6 +74,26 @@ def _load_latest_sql_outputs(cfg: dict) -> dict:
     return bundle
 
 
+def _load_previous_sql_weather_snapshot(cfg: dict, current_weather: pd.DataFrame) -> pd.DataFrame:
+    try:
+        from forecasting.data.output_sql_store import (
+            load_latest_archived_forecast_weather_snapshot,
+            output_sql_enabled,
+        )
+    except Exception as exc:
+        print(f"SQL weather archive support is unavailable; using CSV weather archive. Details: {exc}", flush=True)
+        return pd.DataFrame()
+
+    if not output_sql_enabled(cfg):
+        return pd.DataFrame()
+
+    try:
+        return load_latest_archived_forecast_weather_snapshot(cfg, current_df=current_weather)
+    except Exception as exc:
+        print(f"Could not load SQL weather archive snapshot; using CSV weather archive. Details: {exc}", flush=True)
+        return pd.DataFrame()
+
+
 def main():
     here = Path(__file__).resolve().parents[1]  # forecasting/
     cfg = yaml.safe_load((here / "config.yaml").read_text(encoding="utf-8"))
@@ -121,11 +141,14 @@ def main():
     cache_dir = Path(str(cfg.get("openmeteo", {}).get("cache_dir") or "weather_cache"))
     if not cache_dir.is_absolute():
         cache_dir = here.parent / cache_dir
-    previous_weather = load_latest_distinct_snapshot(
-        cache_dir / "forecast_weather_runs",
-        current_df=_forecast_weather_frame_from_output(fut),
-        hash_columns=["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay"],
-    )
+    current_weather_for_snapshot = _forecast_weather_frame_from_output(fut)
+    previous_weather = _load_previous_sql_weather_snapshot(cfg, current_weather_for_snapshot)
+    if previous_weather.empty:
+        previous_weather = load_latest_distinct_snapshot(
+            cache_dir / "forecast_weather_runs",
+            current_df=current_weather_for_snapshot,
+            hash_columns=["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay"],
+        )
     diagnostics = {}
     current_mtime = max([p.stat().st_mtime for p in [forecast_csv, backtest_csv] if p.exists()] or [0.0])
     stale_scorecards = {}

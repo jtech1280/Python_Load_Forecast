@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import uuid
@@ -47,6 +48,7 @@ DEFAULT_OUTPUT_SQL_CONFIG = {
     "forecast_table": "LoadForecastOutput",
     "backtest_table": "LoadForecastBacktest",
     "weather_table": "LoadForecastWeather",
+    "forecast_weather_archive_table": "LoadForecastWeatherArchive",
     "replay_tables": DEFAULT_REPLAY_TABLES,
     "chunksize": 1000,
 }
@@ -157,11 +159,7 @@ def _normalize_object_value(value):
     return value
 
 
-def _prepare_frame_for_sql(
-    df: pd.DataFrame,
-    run_id: str,
-    inserted_at_utc,
-) -> pd.DataFrame:
+def _clean_frame_for_sql(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
 
@@ -175,10 +173,21 @@ def _prepare_frame_for_sql(
             or isinstance(out[col].dtype, pd.CategoricalDtype)
         ):
             out[col] = out[col].map(_normalize_object_value)
+    return out.where(pd.notna(out), None)
+
+
+def _prepare_frame_for_sql(
+    df: pd.DataFrame,
+    run_id: str,
+    inserted_at_utc,
+) -> pd.DataFrame:
+    out = _clean_frame_for_sql(df)
+    if out.empty:
+        return pd.DataFrame()
 
     out.insert(0, "InsertedAtUTC", inserted_at_utc)
     out.insert(0, "RunID", str(run_id))
-    return out.where(pd.notna(out), None)
+    return out
 
 
 def _infer_sql_type(column: str, series: pd.Series) -> str:
@@ -314,6 +323,40 @@ def _ensure_data_table(conn, schema: str, table: str, df: pd.DataFrame) -> None:
         _ensure_index(conn, schema, table, ["RunID", "Replay_Origin_DT"])
 
 
+def _ensure_forecast_weather_archive_table(conn, schema: str, table: str) -> None:
+    full = _full_name(schema, table)
+    conn.execute(
+        text(
+            f"""
+            IF OBJECT_ID({_sql_string(_object_name(schema, table))}, N'U') IS NULL
+            BEGIN
+                CREATE TABLE {full} (
+                    [WeatherArchiveRowID] BIGINT IDENTITY(1,1) NOT NULL CONSTRAINT [PK_{table}_WeatherArchiveRowID] PRIMARY KEY,
+                    [SnapshotID] UNIQUEIDENTIFIER NOT NULL,
+                    [ArchivedAtUTC] DATETIME2(7) NOT NULL,
+                    [Source] NVARCHAR(128) NULL,
+                    [ContentHash] NVARCHAR(64) NOT NULL,
+                    [FirstDT] DATETIMEOFFSET(7) NULL,
+                    [LastDT] DATETIMEOFFSET(7) NULL,
+                    [DT] DATETIMEOFFSET(7) NOT NULL,
+                    [TempF] FLOAT NULL,
+                    [HumidityPct] FLOAT NULL,
+                    [CloudCoverPct] FLOAT NULL,
+                    [WindSpeedMph] FLOAT NULL,
+                    [PrecipIn] FLOAT NULL,
+                    [GHI_Wm2] FLOAT NULL,
+                    [IsDay] BIGINT NULL
+                )
+            END
+            """
+        )
+    )
+    _ensure_index(conn, schema, table, ["SnapshotID"])
+    _ensure_index(conn, schema, table, ["ContentHash"])
+    _ensure_index(conn, schema, table, ["ArchivedAtUTC"])
+    _ensure_index(conn, schema, table, ["DT"])
+
+
 def _ensure_index(conn, schema: str, table: str, columns: list[str]) -> None:
     suffix = "_".join(columns)
     raw_name = f"IX_{table}_{suffix}"
@@ -389,18 +432,287 @@ def _insert_run_metadata(
     )
 
 
+def _sql_param_value(value):
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, pd.Timestamp):
+        return _format_datetime_value(value)
+    if hasattr(value, "item"):
+        try:
+            value = value.item()
+        except Exception:
+            pass
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
 def _append_frame(conn, schema: str, table: str, df: pd.DataFrame, chunksize: int) -> int:
     if df is None or df.empty:
         return 0
-    df.to_sql(
-        table,
-        con=conn,
-        schema=schema,
-        if_exists="append",
-        index=False,
-        chunksize=max(1, int(chunksize or 1000)),
-    )
+
+    columns = list(df.columns)
+    if not columns:
+        return 0
+    params = [f"p{i}" for i in range(len(columns))]
+    column_sql = ", ".join(_q(col) for col in columns)
+    values_sql = ", ".join(f":{name}" for name in params)
+    insert_sql = text(f"INSERT INTO {_full_name(schema, table)} ({column_sql}) VALUES ({values_sql})")
+    records = df.to_dict(orient="records")
+    chunk_size = max(1, int(chunksize or 1000))
+    for start in range(0, len(records), chunk_size):
+        batch = [
+            {
+                param_name: _sql_param_value(record.get(column))
+                for param_name, column in zip(params, columns)
+            }
+            for record in records[start:start + chunk_size]
+        ]
+        if batch:
+            conn.execute(insert_sql, batch)
     return int(len(df))
+
+
+def _forecast_weather_archive_frame(
+    df: pd.DataFrame,
+    *,
+    snapshot_id: str,
+    archived_at_utc,
+    source: str,
+    content_hash: str,
+    first_dt: str | None,
+    last_dt: str | None,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    cols = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay"]
+    out = df[[col for col in cols if col in df.columns]].copy()
+    if "DT" not in out.columns or out.empty:
+        return pd.DataFrame()
+    out.insert(0, "LastDT", last_dt)
+    out.insert(0, "FirstDT", first_dt)
+    out.insert(0, "ContentHash", content_hash)
+    out.insert(0, "Source", str(source or "")[:128])
+    out.insert(0, "ArchivedAtUTC", archived_at_utc)
+    out.insert(0, "SnapshotID", str(snapshot_id))
+    return _clean_frame_for_sql(out)
+
+
+def archive_forecast_weather_snapshot(
+    config: dict,
+    weather_df: pd.DataFrame,
+    *,
+    source: str = "open_meteo_forecast",
+    archived_at_utc=None,
+) -> str | None:
+    sql_cfg = output_sql_config(config)
+    if not bool(sql_cfg.get("enabled", False)):
+        return None
+    if weather_df is None or weather_df.empty:
+        return None
+
+    schema = _clean_identifier(sql_cfg.get("schema", "Forecasting"), "schema")
+    table = _clean_identifier(sql_cfg.get("forecast_weather_archive_table", "LoadForecastWeatherArchive"), "table")
+    chunksize = int(sql_cfg.get("chunksize") or 1000)
+    cols = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay"]
+    canonical = weather_df[[col for col in cols if col in weather_df.columns]].copy()
+    if "DT" not in canonical.columns or canonical.empty:
+        return None
+
+    content_hash = _frame_hash(canonical)
+    if not content_hash:
+        return None
+    try:
+        archived_at_missing = archived_at_utc is None or pd.isna(archived_at_utc)
+    except (TypeError, ValueError):
+        archived_at_missing = archived_at_utc is None
+    if archived_at_missing:
+        now = pd.Timestamp.now(tz="UTC").tz_localize(None).to_pydatetime()
+    else:
+        archived_ts = pd.Timestamp(archived_at_utc)
+        if archived_ts.tzinfo is not None:
+            archived_ts = archived_ts.tz_convert("UTC").tz_localize(None)
+        now = archived_ts.to_pydatetime()
+    first_dt, last_dt = _dt_bounds(canonical)
+
+    engine = _make_sql_engine(sql_cfg)
+    try:
+        with engine.begin() as conn:
+            _ensure_schema(conn, schema)
+            _ensure_forecast_weather_archive_table(conn, schema, table)
+            existing = conn.execute(
+                text(
+                    f"""
+                    SELECT TOP (1) [SnapshotID]
+                    FROM {_full_name(schema, table)}
+                    WHERE [ContentHash] = :content_hash
+                    ORDER BY [ArchivedAtUTC] DESC
+                    """
+                ),
+                {"content_hash": content_hash},
+            ).scalar()
+            if existing is not None:
+                return str(existing)
+
+            snapshot_id = str(uuid.uuid4())
+            archive_df = _forecast_weather_archive_frame(
+                canonical,
+                snapshot_id=snapshot_id,
+                archived_at_utc=now,
+                source=source,
+                content_hash=content_hash,
+                first_dt=first_dt,
+                last_dt=last_dt,
+            )
+            if archive_df.empty:
+                return None
+            _append_frame(conn, schema, table, archive_df, chunksize)
+            return snapshot_id
+    finally:
+        engine.dispose()
+
+
+def load_archived_forecast_weather(
+    config: dict,
+    *,
+    start_dt,
+    end_dt,
+    max_previous_days: int = 7,
+) -> pd.DataFrame:
+    sql_cfg = output_sql_config(config)
+    if not bool(sql_cfg.get("enabled", False)):
+        return pd.DataFrame()
+
+    schema = _clean_identifier(sql_cfg.get("schema", "Forecasting"), "schema")
+    table = _clean_identifier(sql_cfg.get("forecast_weather_archive_table", "LoadForecastWeatherArchive"), "table")
+    max_days = max(1, int(max_previous_days or 7))
+    start_ts = pd.Timestamp(start_dt)
+    end_ts = pd.Timestamp(end_dt)
+    min_archive_ts = start_ts - pd.Timedelta(days=max_days + 1)
+    max_archive_ts = end_ts
+    if min_archive_ts.tzinfo is not None:
+        min_archive_ts = min_archive_ts.tz_convert("UTC").tz_localize(None)
+    if max_archive_ts.tzinfo is not None:
+        max_archive_ts = max_archive_ts.tz_convert("UTC").tz_localize(None)
+
+    engine = _make_sql_engine(sql_cfg)
+    try:
+        with engine.connect() as conn:
+            if not _table_exists(conn, schema, table):
+                return pd.DataFrame()
+            df = pd.read_sql_query(
+                text(
+                    f"""
+                    SELECT
+                        [SnapshotID], [ArchivedAtUTC], [Source], [ContentHash],
+                        [DT], [TempF], [HumidityPct], [CloudCoverPct], [WindSpeedMph],
+                        [PrecipIn], [GHI_Wm2], [IsDay]
+                    FROM {_full_name(schema, table)}
+                    WHERE [DT] >= :start_dt
+                      AND [DT] <= :end_dt
+                      AND [ArchivedAtUTC] >= :min_archive_dt
+                      AND [ArchivedAtUTC] <= :max_archive_dt
+                    ORDER BY [ArchivedAtUTC] DESC
+                    """
+                ),
+                conn,
+                params={
+                    "start_dt": _format_datetime_value(start_ts),
+                    "end_dt": _format_datetime_value(end_ts),
+                    "min_archive_dt": _format_datetime_value(min_archive_ts),
+                    "max_archive_dt": _format_datetime_value(max_archive_ts),
+                },
+            )
+    finally:
+        engine.dispose()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    tz_name = str(((config.get("project", {}) or {}).get("timezone")) or "UTC")
+    dt_local = pd.to_datetime(df["DT"], errors="coerce", utc=True).dt.tz_convert(tz_name)
+    archived_local = pd.to_datetime(df["ArchivedAtUTC"], errors="coerce", utc=True).dt.tz_convert(tz_name)
+    df = df.assign(
+        DT=dt_local,
+        Previous_Run_Lead_Days=(dt_local.dt.normalize() - archived_local.dt.normalize()).dt.days + 1,
+    )
+    df = df[df["Previous_Run_Lead_Days"].between(1, max_days)].copy()
+    if df.empty:
+        return pd.DataFrame()
+    df["Previous_Run_Lead_Days"] = df["Previous_Run_Lead_Days"].astype(int)
+    df["_ArchivedAtUTC"] = pd.to_datetime(df["ArchivedAtUTC"], errors="coerce", utc=True)
+    df.sort_values(["DT", "Previous_Run_Lead_Days", "_ArchivedAtUTC"], ascending=[True, True, False], inplace=True)
+    df.drop_duplicates(subset=["DT", "Previous_Run_Lead_Days"], keep="first", inplace=True)
+    cols = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay", "Previous_Run_Lead_Days"]
+    return df[[col for col in cols if col in df.columns]].sort_values(["DT", "Previous_Run_Lead_Days"]).reset_index(drop=True)
+
+
+def _canonical_weather_frame(df: pd.DataFrame | None) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    cols = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay"]
+    out = df[[col for col in cols if col in df.columns]].copy()
+    return out if "DT" in out.columns else pd.DataFrame()
+
+
+def load_latest_archived_forecast_weather_snapshot(
+    config: dict,
+    *,
+    current_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    sql_cfg = output_sql_config(config)
+    if not bool(sql_cfg.get("enabled", False)):
+        return pd.DataFrame()
+
+    schema = _clean_identifier(sql_cfg.get("schema", "Forecasting"), "schema")
+    table = _clean_identifier(sql_cfg.get("forecast_weather_archive_table", "LoadForecastWeatherArchive"), "table")
+    current_hash = _frame_hash(_canonical_weather_frame(current_df)) if current_df is not None else ""
+
+    engine = _make_sql_engine(sql_cfg)
+    try:
+        with engine.connect() as conn:
+            if not _table_exists(conn, schema, table):
+                return pd.DataFrame()
+            snapshot_id = conn.execute(
+                text(
+                    f"""
+                    SELECT TOP (1) [SnapshotID]
+                    FROM {_full_name(schema, table)}
+                    WHERE (:current_hash = '' OR [ContentHash] <> :current_hash)
+                    GROUP BY [SnapshotID], [ArchivedAtUTC]
+                    ORDER BY [ArchivedAtUTC] DESC
+                    """
+                ),
+                {"current_hash": current_hash},
+            ).scalar()
+            if snapshot_id is None:
+                return pd.DataFrame()
+            df = pd.read_sql_query(
+                text(
+                    f"""
+                    SELECT [DT], [TempF], [HumidityPct], [CloudCoverPct], [WindSpeedMph],
+                           [PrecipIn], [GHI_Wm2], [IsDay]
+                    FROM {_full_name(schema, table)}
+                    WHERE [SnapshotID] = :snapshot_id
+                    ORDER BY [DT]
+                    """
+                ),
+                conn,
+                params={"snapshot_id": str(snapshot_id)},
+            )
+    finally:
+        engine.dispose()
+
+    if df.empty:
+        return pd.DataFrame()
+    tz_name = str(((config.get("project", {}) or {}).get("timezone")) or "UTC")
+    df["DT"] = pd.to_datetime(df["DT"], errors="coerce", utc=True).dt.tz_convert(tz_name)
+    return df.dropna(subset=["DT"]).reset_index(drop=True)
 
 
 def _clean_table_map(value: dict | None) -> dict[str, str]:

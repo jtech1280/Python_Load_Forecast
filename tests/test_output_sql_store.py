@@ -16,6 +16,10 @@ class OutputSqlStoreTests(unittest.TestCase):
             output_sql_store.output_sql_config({})["replay_tables"]["rolling_origin_replay_results"],
             "LoadForecastReplayResult",
         )
+        self.assertEqual(
+            output_sql_store.output_sql_config({})["forecast_weather_archive_table"],
+            "LoadForecastWeatherArchive",
+        )
 
     def test_replay_table_config_overrides_merge_with_defaults(self):
         cfg = output_sql_store.output_sql_config(
@@ -122,6 +126,51 @@ class OutputSqlStoreTests(unittest.TestCase):
             frames["rolling_origin_replay_summary"].loc[0, "horizon_buckets"],
             '["Day1", "Days2to7"]',
         )
+
+    def test_append_frame_uses_explicit_insert_batches(self):
+        class FakeConn:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, statement, params=None):
+                self.calls.append((str(statement), params))
+
+        conn = FakeConn()
+        df = pd.DataFrame({"DT": ["2026-06-23T05:00:00-07:00"], "Value": [float("nan")]})
+
+        with patch.object(pd.DataFrame, "to_sql", side_effect=AssertionError("to_sql should not be used")):
+            count = output_sql_store._append_frame(conn, "Forecasting", "AnyTable", df, chunksize=1)
+
+        self.assertEqual(count, 1)
+        self.assertEqual(len(conn.calls), 1)
+        self.assertIn("INSERT INTO [Forecasting].[AnyTable]", conn.calls[0][0])
+        self.assertIsNone(conn.calls[0][1][0]["p1"])
+
+    def test_forecast_weather_archive_frame_adds_snapshot_metadata(self):
+        archived_at = pd.Timestamp("2026-06-23T12:00:00Z").tz_localize(None).to_pydatetime()
+        df = pd.DataFrame(
+            {
+                "DT": ["2026-06-23 05:00:00-07:00"],
+                "TempF": [91.2],
+                "CloudCoverPct": [10.0],
+                "Unused": ["x"],
+            }
+        )
+
+        out = output_sql_store._forecast_weather_archive_frame(
+            df,
+            snapshot_id="snapshot-1",
+            archived_at_utc=archived_at,
+            source="open_meteo_forecast",
+            content_hash="abc",
+            first_dt="2026-06-23T12:00:00+00:00",
+            last_dt="2026-06-24T12:00:00+00:00",
+        )
+
+        self.assertEqual(out.loc[0, "SnapshotID"], "snapshot-1")
+        self.assertEqual(out.loc[0, "ContentHash"], "abc")
+        self.assertEqual(out.loc[0, "DT"], "2026-06-23T05:00:00-07:00")
+        self.assertNotIn("Unused", out.columns)
 
 
 if __name__ == "__main__":

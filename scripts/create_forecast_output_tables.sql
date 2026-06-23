@@ -13,6 +13,9 @@
 
     Rolling replay diagnostic tables are created with RunID metadata columns here.
     The Python writer adds the current diagnostic columns automatically on insert.
+
+    LoadForecastWeatherArchive stores distinct Open-Meteo forecast weather
+    snapshots for replay weather-realism checks, replacing CSV snapshot archives.
 */
 
 SET NOCOUNT ON;
@@ -278,6 +281,28 @@ BEGIN
 END;
 GO
 
+IF OBJECT_ID(N'[Forecasting].[LoadForecastWeatherArchive]', N'U') IS NULL
+BEGIN
+    CREATE TABLE [Forecasting].[LoadForecastWeatherArchive] (
+        [WeatherArchiveRowID] BIGINT IDENTITY(1,1) NOT NULL CONSTRAINT [PK_LoadForecastWeatherArchive_WeatherArchiveRowID] PRIMARY KEY,
+        [SnapshotID] UNIQUEIDENTIFIER NOT NULL,
+        [ArchivedAtUTC] DATETIME2(7) NOT NULL,
+        [Source] NVARCHAR(128) NULL,
+        [ContentHash] NVARCHAR(64) NOT NULL,
+        [FirstDT] DATETIMEOFFSET(7) NULL,
+        [LastDT] DATETIMEOFFSET(7) NULL,
+        [DT] DATETIMEOFFSET(7) NOT NULL,
+        [TempF] FLOAT NULL,
+        [HumidityPct] FLOAT NULL,
+        [CloudCoverPct] FLOAT NULL,
+        [WindSpeedMph] FLOAT NULL,
+        [PrecipIn] FLOAT NULL,
+        [GHI_Wm2] FLOAT NULL,
+        [IsDay] BIGINT NULL
+    );
+END;
+GO
+
 DECLARE @ReplayTables TABLE (
     [TableName] SYSNAME NOT NULL PRIMARY KEY
 );
@@ -419,4 +444,40 @@ IF NOT EXISTS (
 )
     CREATE INDEX [IX_LoadForecastWeather_RunID_DT]
         ON [Forecasting].[LoadForecastWeather] ([RunID], [DT]);
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name = N'IX_LoadForecastWeatherArchive_SnapshotID'
+      AND object_id = OBJECT_ID(N'[Forecasting].[LoadForecastWeatherArchive]')
+)
+    CREATE INDEX [IX_LoadForecastWeatherArchive_SnapshotID]
+        ON [Forecasting].[LoadForecastWeatherArchive] ([SnapshotID]);
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name = N'IX_LoadForecastWeatherArchive_ContentHash'
+      AND object_id = OBJECT_ID(N'[Forecasting].[LoadForecastWeatherArchive]')
+)
+    CREATE INDEX [IX_LoadForecastWeatherArchive_ContentHash]
+        ON [Forecasting].[LoadForecastWeatherArchive] ([ContentHash]);
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name = N'IX_LoadForecastWeatherArchive_ArchivedAtUTC'
+      AND object_id = OBJECT_ID(N'[Forecasting].[LoadForecastWeatherArchive]')
+)
+    CREATE INDEX [IX_LoadForecastWeatherArchive_ArchivedAtUTC]
+        ON [Forecasting].[LoadForecastWeatherArchive] ([ArchivedAtUTC]);
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes
+    WHERE name = N'IX_LoadForecastWeatherArchive_DT'
+      AND object_id = OBJECT_ID(N'[Forecasting].[LoadForecastWeatherArchive]')
+)
+    CREATE INDEX [IX_LoadForecastWeatherArchive_DT]
+        ON [Forecasting].[LoadForecastWeatherArchive] ([DT]);
 GO

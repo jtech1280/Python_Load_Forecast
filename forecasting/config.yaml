@@ -25,6 +25,7 @@ output_sql:
   forecast_table: "LoadForecastOutput"
   backtest_table: "LoadForecastBacktest"
   weather_table: "LoadForecastWeather"
+  forecast_weather_archive_table: "LoadForecastWeatherArchive"
   replay_tables:
     rolling_origin_replay_summary: "LoadForecastReplaySummary"
     rolling_origin_replay_results: "LoadForecastReplayResult"
