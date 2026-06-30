@@ -8,6 +8,7 @@ from forecasting.data.history_loader import load_hourly_system_mwh
 from forecasting.data.weather_loader import fetch_historical_weather, fetch_forecast_weather
 from forecasting.data.btm_loader import load_btm_monthly_capacity
 from forecasting.data.five_min_load_loader import load_five_min_system_load
+from forecasting.data.solar_loader import load_solar_forecast
 from forecasting.data.local_weather_loader import (
     apply_temperature_bias_calibration,
     apply_dynamic_temperature_calibration,
@@ -700,7 +701,7 @@ def _apply_future_correction_chain(
             min_maxtemp_f=float(cal_cfg.get("warm_ramp_min_maxtemp_f", 75.0)),
             max_maxtemp_f=float(cal_cfg.get("warm_ramp_max_maxtemp_f", 93.0)),
             hours=list(cal_cfg.get("warm_ramp_hours", [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22])),
-            cap_mwh=float(cal_cfg.get("warm_ramp_cap_mwh", 12.0)),
+            cap_mwh=float(cal_cfg.get("warm_ramp_cap_mwh", 16.0)),
         )
     if bool(cal_cfg.get("cloud_solar_shape_enabled", True)):
         cal_future = apply_cloud_solar_shape_correction(
@@ -754,6 +755,10 @@ def run_pipeline(
     fut_wx = fetch_forecast_weather(config)
     _progress(progress_callback, "Fetched forecast weather", advance=1)
 
+    _progress(progress_callback, "Loading solar forecast")
+    solar_df = load_solar_forecast(config)
+    _progress(progress_callback, "Loaded solar forecast", advance=1)
+
     _progress(progress_callback, "Loading local weather")
     local_wx = load_local_station_weather(config)
     local_temp_lookup = pd.DataFrame()
@@ -801,7 +806,7 @@ def run_pipeline(
     _progress(progress_callback, "Built intraday load features", advance=1)
 
     _progress(progress_callback, "Building training frame")
-    train_df = build_training_frame(load_df, hist_wx, btm_monthly, intraday_load_features=intraday_features)
+    train_df = build_training_frame(load_df, hist_wx, btm_monthly, intraday_load_features=intraday_features, solar_df=solar_df)
     train_df.attrs["config"] = config
     _progress(progress_callback, "Built training frame", advance=1)
 
@@ -870,6 +875,7 @@ def run_pipeline(
         intraday_load_features=intraday_features,
         max_intraday_carry_forward_hours=int(five_min_cfg.get("max_carry_forward_hours", 24)),
         use_future_intraday_load_features=bool(five_min_cfg.get("future_model_features_enabled", False)),
+        solar_df=solar_df,
     )
     latest_hist_dt = train_df["DT"].max()
     future_frame = future_frame[future_frame["DT"] > latest_hist_dt].copy()
@@ -946,7 +952,7 @@ def run_pipeline(
             min_maxtemp_f=float(cal_cfg.get("warm_ramp_min_maxtemp_f", 75.0)),
             max_maxtemp_f=float(cal_cfg.get("warm_ramp_max_maxtemp_f", 93.0)),
             hours=list(cal_cfg.get("warm_ramp_hours", [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22])),
-            cap_mwh=float(cal_cfg.get("warm_ramp_cap_mwh", 12.0)),
+            cap_mwh=float(cal_cfg.get("warm_ramp_cap_mwh", 16.0)),
         )
 
     if bool(cal_cfg.get("cloud_solar_shape_enabled", True)):
@@ -1110,7 +1116,7 @@ def run_pipeline(
     _progress(progress_callback, "Built diagnostics", advance=1)
 
     return {
-        "historical_fit_df": train_df,
+        "historical_fit_df": train_.df,
         "future": {
             "raw": raw_future,
             "calibrated": final_future,

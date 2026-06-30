@@ -343,6 +343,9 @@ def main(argv: list[str] | None = None):
             _, lock_path = lock
             print(f"Acquired rolling-origin replay lock: {lock_path}", flush=True)
 
+    print("Running solar forecast...")
+    subprocess.run([sys.executable, "forecasting/solar/solar_forecaster.py"], check=True)
+
     # Apply thread env before importing NumPy / XGBoost / LightGBM-heavy modules.
     from forecasting.utils.performance import apply_runtime_thread_settings, write_runtime_performance_info
 

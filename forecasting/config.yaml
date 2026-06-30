@@ -17,7 +17,7 @@ output_sql:
   # Default persistence for high-churn outputs that are overwritten on each CSV run.
   # Use --no-save-sql for local dry runs that should not write to SQL Server.
   enabled: true
-  dashboard_read_enabled: false
+  dashboard_read_enabled: true
   dsn_name: "Forecast_DB"
   database: ""
   schema: "Forecasting"

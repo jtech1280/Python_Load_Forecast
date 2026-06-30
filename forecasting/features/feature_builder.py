@@ -12,11 +12,12 @@ def build_training_frame(
     weather_df: pd.DataFrame,
     btm_monthly_df: pd.DataFrame,
     intraday_load_features: pd.DataFrame | None = None,
+    solar_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     df = load_df.merge(weather_df, on="DT", how="left")
     df = add_time_features(df)
     df = add_weather_features(df)
-    df = add_solar_features(df, btm_monthly_df)
+    df = add_solar_features(df, btm_monthly_df, solar_df)
     df = merge_intraday_load_features(df, intraday_load_features, allow_carry_forward=False)
     df = add_basic_lags(df)
     df = df.dropna(subset=["MWH", "Temperature"])  # require target + temp
@@ -28,11 +29,12 @@ def build_forecast_frame(
     intraday_load_features: pd.DataFrame | None = None,
     max_intraday_carry_forward_hours: int = 24,
     use_future_intraday_load_features: bool = True,
+    solar_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     df = weather_df.copy()
     df = add_time_features(df)
     df = add_weather_features(df)
-    df = add_solar_features(df, btm_monthly_df)
+    df = add_solar_features(df, btm_monthly_df, solar_df)
     if use_future_intraday_load_features:
         df = merge_intraday_load_features(
             df,

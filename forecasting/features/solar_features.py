@@ -24,7 +24,7 @@ def _month_period_start(dt: pd.Series) -> pd.Series:
     return parsed.dt.to_period("M").dt.to_timestamp()
 
 
-def add_solar_features(df: pd.DataFrame, btm_monthly_df: pd.DataFrame) -> pd.DataFrame:
+def add_solar_features(df: pd.DataFrame, btm_monthly_df: pd.DataFrame, solar_df: pd.DataFrame | None = None) -> pd.DataFrame:
     out = df.copy()
     btm = btm_monthly_df.copy()
     btm["PeriodStart"] = _month_period_start(btm["DT"])
@@ -40,16 +40,16 @@ def add_solar_features(df: pd.DataFrame, btm_monthly_df: pd.DataFrame) -> pd.Dat
     out["Capacity_Ratio_To_Current"] = out["Capacity_Ratio_To_Current"].ffill().bfill().fillna(0.0)
     out["Impact_Cap_MW"] = out["Impact_Cap_MW"].ffill().bfill().fillna(0.0)
 
+    if solar_df is not None and not solar_df.empty:
+        out = out.merge(solar_df[["DT", "Solar_Forecast_MW"]], on="DT", how="left")
+        out["Solar_Forecast_MW"] = out["Solar_Forecast_MW"].fillna(0.0)
+        out["BTM_Solar_Proxy_MW"] = out["Solar_Forecast_MW"]
+    else:
+        out["BTM_Solar_Proxy_MW"] = 0.0
+
     out["Solar_Irradiance"] = pd.to_numeric(out.get("GHI_Wm2"), errors="coerce").fillna(0.0).clip(lower=0.0)
     out["Solar_Hour_Shape"] = solar_hour_shape_from_hour(out["DT"].dt.hour)
     out["Solar_Season_Factor"] = _solar_season_factor(out["DT"])
-
-    # Existing production proxy retained for compatibility. It is intentionally conservative.
-    out["BTM_Solar_Proxy_MW"] = (
-        out["Impact_Cap_MW"]
-        * (out["Solar_Irradiance"].clip(lower=0.0) / 950.0)
-        * out["Solar_Hour_Shape"]
-    ).clip(lower=0.0)
 
     # V12 cloud/clear-sky features. These help the model learn that cloudy midday periods increase
     # system load by reducing behind-the-meter PV output.
