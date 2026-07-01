@@ -52,6 +52,22 @@ def _month_series(df: pd.DataFrame) -> pd.Series:
     return pd.Series(np.nan, index=df.index, dtype=float)
 
 
+def _season_series(df: pd.DataFrame, month: pd.Series) -> pd.Series:
+    if "Season" in df.columns:
+        season = df["Season"].where(pd.notna(df["Season"]), "").astype(str).str.strip()
+        season = season.mask(season.str.lower().isin({"nan", "nat", "none"}), "")
+        if season.ne("").any():
+            return season
+
+    season_from_month = pd.Series("", index=df.index, dtype="object")
+    month_int = month.round().astype("Int64")
+    season_from_month.loc[month_int.isin([12, 1, 2]).fillna(False)] = "Winter"
+    season_from_month.loc[month_int.isin([3, 4, 5]).fillna(False)] = "Spring"
+    season_from_month.loc[month_int.isin([6, 7, 8, 9]).fillna(False)] = "Summer"
+    season_from_month.loc[month_int.isin([10, 11]).fillna(False)] = "Fall"
+    return season_from_month
+
+
 def _forecast_day_series(df: pd.DataFrame, anchor_col: str | None = None) -> pd.Series:
     if "Forecast_Day" in df.columns:
         day = _as_num(df["Forecast_Day"])
@@ -107,6 +123,7 @@ def _rule_mask(
     *,
     forecast: pd.Series,
     month: pd.Series,
+    season: pd.Series,
     hour: pd.Series,
     forecast_day: pd.Series,
     daily_max: pd.Series,
@@ -117,6 +134,9 @@ def _rule_mask(
 ) -> pd.Series:
     mask = pd.Series(True, index=df.index, dtype=bool)
     mask &= _list_mask(month, rule.get("months"))
+    if rule.get("seasons") is not None:
+        allowed_seasons = {str(x).strip() for x in rule.get("seasons", [])}
+        mask &= season.astype(str).str.strip().isin(allowed_seasons)
     mask &= _list_mask(hour, rule.get("hours"))
 
     if "min_forecast_day" in rule:
@@ -163,6 +183,14 @@ def apply_focused_scorecard_guard(
     explicit diagnostics so replay can attribute the change.
     """
     out = df.copy()
+    forecast = (
+        _as_num(out[forecast_col])
+        if forecast_col in out.columns
+        else pd.Series(np.nan, index=out.index, dtype=float)
+    )
+    out["Pre_Focused_Guard_Forecast_MWH"] = forecast
+    out["Post_Focused_Guard_Forecast_MWH"] = forecast
+    out["Focused_Guard_Applied_Flag"] = 0
     out["Focused_Scorecard_Guard_MWH"] = 0.0
     out["Focused_Scorecard_Guard_Source"] = "none"
 
@@ -174,8 +202,8 @@ def apply_focused_scorecard_guard(
     if not rules:
         return out
 
-    forecast = _as_num(out[forecast_col])
     month = _month_series(out)
+    season = _season_series(out, month)
     hour = _hour_series(out)
     forecast_day = _forecast_day_series(out, anchor_col=forecast_col)
     daily_max = _as_num(out.get("Temperature_DailyMax", pd.Series(np.nan, index=out.index)))
@@ -191,6 +219,7 @@ def apply_focused_scorecard_guard(
     total_adjustment = pd.Series(0.0, index=out.index, dtype=float)
     source = pd.Series("none", index=out.index, dtype="object")
     cap = abs(float(cfg.get("total_cap_mwh", 20.0)))
+    dynamic_cap = pd.Series(cap, index=out.index, dtype=float)
 
     for raw_rule in rules:
         rule = raw_rule or {}
@@ -204,6 +233,7 @@ def apply_focused_scorecard_guard(
             rule,
             forecast=forecast,
             month=month,
+            season=season,
             hour=hour,
             forecast_day=forecast_day,
             daily_max=daily_max,
@@ -216,16 +246,23 @@ def apply_focused_scorecard_guard(
             continue
         name = str(rule.get("name", "focused_scorecard_guard")).strip() or "focused_scorecard_guard"
         total_adjustment.loc[mask] += adjustment
+        rule_cap = rule.get("max_total_cap_mwh")
+        if rule_cap is not None:
+            dynamic_cap.loc[mask] = np.maximum(dynamic_cap.loc[mask], abs(float(rule_cap)))
         prior = source.loc[mask].astype(str)
         source.loc[mask] = np.where(prior.eq("none"), name, prior + "+" + name)
 
-    total_adjustment = total_adjustment.clip(lower=-cap, upper=cap)
+    total_adjustment = total_adjustment.where(total_adjustment.ge(-dynamic_cap), -dynamic_cap)
+    total_adjustment = total_adjustment.where(total_adjustment.le(dynamic_cap), dynamic_cap)
     if not total_adjustment.ne(0.0).any():
         return out
 
     out["Focused_Scorecard_Guard_MWH"] = total_adjustment
     out["Focused_Scorecard_Guard_Source"] = source
-    out[forecast_col] = (forecast + total_adjustment).clip(lower=0.0)
+    post_guard = (forecast + total_adjustment).clip(lower=0.0)
+    out["Post_Focused_Guard_Forecast_MWH"] = post_guard
+    out["Focused_Guard_Applied_Flag"] = total_adjustment.ne(0.0).astype(int)
+    out[forecast_col] = post_guard
 
     if forecast_col == "Final_Backtest_Forecast_MWH" and "Final_Forecast_MWH" in out.columns:
         out["Final_Forecast_MWH"] = out[forecast_col]

@@ -42,10 +42,10 @@ def add_solar_features(df: pd.DataFrame, btm_monthly_df: pd.DataFrame, solar_df:
 
     if solar_df is not None and not solar_df.empty:
         out = out.merge(solar_df[["DT", "Solar_Forecast_MW"]], on="DT", how="left")
-        out["Solar_Forecast_MW"] = out["Solar_Forecast_MW"].fillna(0.0)
-        out["BTM_Solar_Proxy_MW"] = out["Solar_Forecast_MW"]
+        explicit_solar = pd.to_numeric(out["Solar_Forecast_MW"], errors="coerce")
     else:
-        out["BTM_Solar_Proxy_MW"] = 0.0
+        out["Solar_Forecast_MW"] = np.nan
+        explicit_solar = pd.Series(np.nan, index=out.index, dtype=float)
 
     out["Solar_Irradiance"] = pd.to_numeric(out.get("GHI_Wm2"), errors="coerce").fillna(0.0).clip(lower=0.0)
     out["Solar_Hour_Shape"] = solar_hour_shape_from_hour(out["DT"].dt.hour)
@@ -61,6 +61,13 @@ def add_solar_features(df: pd.DataFrame, btm_monthly_df: pd.DataFrame, solar_df:
         * (out["ClearSky_GHI_Proxy_Wm2"] / 950.0)
         * out["Solar_Hour_Shape"]
     ).clip(lower=0.0)
+    weather_solar_proxy = (
+        out["Impact_Cap_MW"]
+        * (out["Solar_Irradiance"] / 950.0).clip(lower=0.0)
+        * out["Solar_Hour_Shape"]
+    ).clip(lower=0.0)
+    out["BTM_Solar_Proxy_MW"] = explicit_solar.combine_first(weather_solar_proxy).fillna(0.0).clip(lower=0.0)
+    out["Solar_Forecast_MW"] = explicit_solar
     out["BTM_Solar_Cloud_Adjusted_MW"] = out["BTM_Solar_Proxy_MW"]
     out["BTM_Solar_Loss_From_ClearSky_MW"] = (out["BTM_ClearSky_Proxy_MW"] - out["BTM_Solar_Cloud_Adjusted_MW"]).clip(lower=0.0)
 

@@ -407,6 +407,65 @@ def apply_operational_stage_selector(df: pd.DataFrame, config: dict, forecast_co
         if suppress_hot_for_overrides:
             allow_hot_uplift.loc[mask] = False
 
+    def _conditional_allowed_mask(values: pd.Series, allowed, *, numeric: bool = True) -> pd.Series:
+        if allowed is None:
+            return pd.Series(True, index=out.index, dtype=bool)
+        if numeric:
+            allowed_set = {int(x) for x in allowed}
+            return pd.to_numeric(values, errors="coerce").round().astype("Int64").isin(allowed_set).fillna(False)
+        allowed_set = {str(x).strip() for x in allowed}
+        return values.astype(str).str.strip().isin(allowed_set)
+
+    def _month_values() -> pd.Series:
+        if "Month" in out.columns:
+            month = pd.to_numeric(out["Month"], errors="coerce")
+            if month.notna().any():
+                return month
+        if "DT" in out.columns:
+            return pd.to_datetime(out["DT"], errors="coerce").dt.month.astype(float)
+        return pd.Series(np.nan, index=out.index, dtype=float)
+
+    def _season_values(month: pd.Series) -> pd.Series:
+        if "Season" in out.columns:
+            season = out["Season"].where(pd.notna(out["Season"]), "").astype(str).str.strip()
+            season = season.mask(season.str.lower().isin({"nan", "nat", "none"}), "")
+            if season.ne("").any():
+                return season
+        season = pd.Series("", index=out.index, dtype="object")
+        month_int = pd.to_numeric(month, errors="coerce").round().astype("Int64")
+        season.loc[month_int.isin([12, 1, 2]).fillna(False)] = "Winter"
+        season.loc[month_int.isin([3, 4, 5]).fillna(False)] = "Spring"
+        season.loc[month_int.isin([6, 7, 8, 9]).fillna(False)] = "Summer"
+        season.loc[month_int.isin([10, 11]).fillna(False)] = "Fall"
+        return season
+
+    def _conditional_stage_mask(rule: dict) -> pd.Series:
+        mask = pd.Series(True, index=out.index, dtype=bool)
+        month = _month_values()
+        season = _season_values(month)
+        temp_bucket = pd.to_numeric(
+            out.get("DailyMaxTempBucket", out.get("DailyMaxTempBin", pd.Series(np.nan, index=out.index))),
+            errors="coerce",
+        )
+        mask &= _conditional_allowed_mask(month, rule.get("months"))
+        mask &= _conditional_allowed_mask(season, rule.get("seasons"), numeric=False)
+        mask &= _conditional_allowed_mask(hour, rule.get("hours"))
+        if "min_forecast_day" in rule:
+            mask &= day.ge(float(rule["min_forecast_day"]))
+        if "max_forecast_day" in rule:
+            mask &= day.le(float(rule["max_forecast_day"]))
+        if "min_maxtemp_f" in rule:
+            mask &= daily_max.ge(float(rule["min_maxtemp_f"]))
+        if "max_maxtemp_f" in rule:
+            mask &= daily_max.lt(float(rule["max_maxtemp_f"]))
+        min_temp_bucket = rule.get("min_daily_max_temp_bucket", rule.get("min_daily_max_temp_bin"))
+        if min_temp_bucket is not None:
+            mask &= temp_bucket.ge(float(min_temp_bucket))
+        max_temp_bucket = rule.get("max_daily_max_temp_bucket", rule.get("max_daily_max_temp_bin"))
+        if max_temp_bucket is not None:
+            mask &= temp_bucket.le(float(max_temp_bucket))
+        return mask.fillna(False)
+
     day1 = horizon_policy_enabled & day.eq(1)
     if day1.any():
         day1_stage = str(selector_cfg.get("day1_stage", "blend_raw_peak")).strip().lower()
@@ -630,6 +689,21 @@ def apply_operational_stage_selector(df: pd.DataFrame, config: dict, forecast_co
         if uplift_mask.any():
             selected.loc[uplift_mask] = selected.loc[uplift_mask] + hour_uplift.loc[uplift_mask]
             reason.loc[uplift_mask] = reason.loc[uplift_mask].astype(str) + "+ultra_extreme_heat_wave_uplift"
+
+    conditional_overrides = selector_cfg.get("conditional_stage_overrides", []) or []
+    if horizon_policy_enabled and conditional_overrides:
+        for raw_rule in conditional_overrides:
+            rule = raw_rule or {}
+            if not bool(rule.get("enabled", True)):
+                continue
+            override_mask = _conditional_stage_mask(rule)
+            if not override_mask.any():
+                continue
+            selected_col, values = _stage_values(rule.get("stage", "raw"), raw_col)
+            selected.loc[override_mask] = values.loc[override_mask]
+            source.loc[override_mask] = selected_col
+            name = str(rule.get("name", "conditional_stage_override")).strip() or "conditional_stage_override"
+            reason.loc[override_mask] = reason.loc[override_mask].astype(str) + f"+conditional_stage_override:{name}"
 
     out["Stage_Selected_Forecast_MWH"] = selected.clip(lower=0.0)
     out["Stage_Selector_Source"] = source
@@ -1116,7 +1190,7 @@ def run_pipeline(
     _progress(progress_callback, "Built diagnostics", advance=1)
 
     return {
-        "historical_fit_df": train_.df,
+        "historical_fit_df": train_df,
         "future": {
             "raw": raw_future,
             "calibrated": final_future,
@@ -1329,6 +1403,8 @@ def build_display_df(train_df: pd.DataFrame, future_df: pd.DataFrame) -> pd.Data
         "Weather_Robustness_Jensen_MWH", "Weather_Robustness_Upper_MWH",
         "Weather_Robustness_Warmer_Delta_MWH", "Weather_Robustness_Temp_Sigma_F",
         "Weather_Robustness_Temp_Bias_Damping", "Weather_Robustness_Gate",
+        "Pre_Focused_Guard_Forecast_MWH", "Post_Focused_Guard_Forecast_MWH",
+        "Focused_Guard_Applied_Flag",
         "Focused_Scorecard_Guard_MWH", "Focused_Scorecard_Guard_Source",
         "Calibration_Level", "Calibration_Matched_Levels", "Targeted_Meta_Source", "Warm_Ramp_Correction_Source", "Cloud_Solar_Correction_Source", "Peak_Risk_Source", "Recent_Correction_Source",
         "Long_Horizon_Peak_Month_Correction_MWH", "Long_Horizon_Hot_Month_Correction_MWH",

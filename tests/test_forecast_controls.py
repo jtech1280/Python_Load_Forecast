@@ -7,8 +7,12 @@ _disable_windows_platform_wmi_probe()
 import numpy as np
 import pandas as pd
 
+from forecasting.features.solar_features import add_solar_features
+from forecasting.backtest.rolling_origin_replay import _apply_replay_focused_guard
 from forecasting.forecast.focused_scorecard_guard import apply_focused_scorecard_guard
-from forecasting.diagnostics.forecast_diagnostics import _diagnostic_band_for_row
+from forecasting.diagnostics.forecast_diagnostics import _diagnostic_band_for_row, prep_backtest
+from forecasting.forecast.forecast_pipeline import apply_operational_stage_selector
+from forecasting.forecast.peak_risk_correction import apply_peak_risk_correction
 from forecasting.forecast.uncertainty_bands import _band_risk_multiplier, _prep, apply_bands
 from forecasting.forecast.weather_robustness_hedge import apply_weather_robustness_hedge
 from forecasting.model.ensemble import blend_predictions
@@ -236,6 +240,9 @@ class ForecastControlTests(unittest.TestCase):
         self.assertEqual(out.loc[0, "Focused_Scorecard_Guard_MWH"], 10.0)
         self.assertEqual(out.loc[0, "Final_Forecast_MWH"], 290.0)
         self.assertEqual(out.loc[0, "Stage_Selected_Forecast_MWH"], 290.0)
+        self.assertEqual(out.loc[0, "Pre_Focused_Guard_Forecast_MWH"], 280.0)
+        self.assertEqual(out.loc[0, "Post_Focused_Guard_Forecast_MWH"], 290.0)
+        self.assertEqual(out.loc[0, "Focused_Guard_Applied_Flag"], 1)
 
     def test_focused_guard_applies_june_100_to_105_long_hot_ramp_rule(self):
         df = pd.DataFrame(
@@ -302,6 +309,59 @@ class ForecastControlTests(unittest.TestCase):
 
         self.assertEqual(out["Focused_Scorecard_Guard_MWH"].tolist(), [0.0, 10.0, 8.0, 5.5])
         self.assertEqual(out["Final_Forecast_MWH"].tolist(), [226.0, 262.0, 294.0, 317.5])
+
+    def test_focused_guard_rule_can_extend_total_cap_for_narrow_pattern(self):
+        df = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2026-08-26 14:00"), pd.Timestamp("2026-08-26 15:00")],
+                "Forecast_Day": [10, 10],
+                "Final_Forecast_MWH": [250.0, 250.0],
+                "Stage_Selected_Forecast_MWH": [250.0, 250.0],
+                "Temperature_DailyMax": [96.8, 96.8],
+                "CloudCover_Norm": [0.10, 0.10],
+                "BTM_Solar_Loss_From_ClearSky_MW": [0.0, 0.0],
+                "IsHoliday": [0, 0],
+            }
+        )
+        config = {
+            "calibration": {
+                "stage_selector": {
+                    "focused_scorecard_guard": {
+                        "enabled": True,
+                        "total_cap_mwh": 30.0,
+                        "rules": [
+                            {
+                                "name": "normal_cap_backoff",
+                                "adjustment_mwh": -30.0,
+                                "months": [8],
+                                "hours": [14, 15],
+                                "min_forecast_day": 8,
+                                "max_forecast_day": 12,
+                                "min_maxtemp_f": 95.0,
+                                "max_maxtemp_f": 99.0,
+                            },
+                            {
+                                "name": "extended_cap_backoff",
+                                "adjustment_mwh": -30.0,
+                                "months": [8],
+                                "hours": [14],
+                                "min_forecast_day": 8,
+                                "max_forecast_day": 12,
+                                "min_maxtemp_f": 95.0,
+                                "max_maxtemp_f": 99.0,
+                                "max_total_cap_mwh": 60.0,
+                            },
+                        ],
+                    }
+                }
+            }
+        }
+
+        out = apply_focused_scorecard_guard(df, config, forecast_col="Final_Forecast_MWH")
+
+        self.assertEqual(out["Focused_Scorecard_Guard_MWH"].tolist(), [-60.0, -30.0])
+        self.assertEqual(out["Final_Forecast_MWH"].tolist(), [190.0, 220.0])
+        self.assertEqual(out["Stage_Selected_Forecast_MWH"].tolist(), [190.0, 220.0])
 
     def test_focused_guard_applies_weather_shape_and_weekend_filters(self):
         df = pd.DataFrame(
@@ -420,6 +480,172 @@ class ForecastControlTests(unittest.TestCase):
 
         self.assertEqual(out.loc[0, "Focused_Scorecard_Guard_MWH"], 0.0)
         self.assertTrue((out.loc[1:, "Focused_Scorecard_Guard_MWH"] == 4.0).all())
+
+    def test_prep_backtest_handles_mixed_offset_export_timestamps(self):
+        df = pd.DataFrame(
+            {
+                "DT": [
+                    "2026-03-08 01:00:00-08:00",
+                    "2026-03-08 03:00:00-07:00",
+                ],
+                "Actual_MWH": [100.0, 110.0],
+                "Raw_Forecast_MWH": [99.0, 108.0],
+            }
+        )
+
+        out = prep_backtest(df)
+
+        self.assertEqual(out["Hour"].tolist(), [1, 3])
+        self.assertEqual(out["Residual_MWH"].tolist(), [1.0, 2.0])
+
+    def test_replay_focused_guard_applies_without_weather_hedge(self):
+        df = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2025-06-26 19:00")],
+                "Actual_MWH": [243.0],
+                "Final_Backtest_Forecast_MWH": [215.0],
+                "Final_Forecast_MWH": [215.0],
+                "Stage_Selected_Forecast_MWH": [215.0],
+                "Forecast_Day": [5],
+                "Month": [6],
+                "Hour": [19],
+                "Temperature_DailyMax": [90.1],
+                "IsHoliday": [0],
+            }
+        )
+        config = {
+            "calibration": {
+                "stage_selector": {
+                    "focused_scorecard_guard": {
+                        "enabled": True,
+                        "total_cap_mwh": 40.0,
+                        "rules": [
+                            {
+                                "name": "june_days4to7_mild_hot_evening_recovery_up",
+                                "adjustment_mwh": 40.0,
+                                "months": [6],
+                                "hours": [19],
+                                "min_forecast_day": 4,
+                                "max_forecast_day": 7,
+                                "min_maxtemp_f": 90.0,
+                                "max_maxtemp_f": 95.0,
+                            }
+                        ],
+                    }
+                }
+            }
+        }
+
+        out = _apply_replay_focused_guard(df, config, also_update_stage=True)
+
+        self.assertEqual(out.loc[0, "Pre_Focused_Guard_Forecast_MWH"], 215.0)
+        self.assertEqual(out.loc[0, "Post_Focused_Guard_Forecast_MWH"], 255.0)
+        self.assertEqual(out.loc[0, "Final_Backtest_Forecast_MWH"], 255.0)
+        self.assertEqual(out.loc[0, "Final_Forecast_MWH"], 255.0)
+        self.assertEqual(out.loc[0, "Stage_Selected_Forecast_MWH"], 255.0)
+        self.assertEqual(out.loc[0, "Final_Residual_MWH"], -12.0)
+
+    def test_solar_features_use_weather_proxy_when_solar_forecast_missing(self):
+        df = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2026-06-15 12:00")],
+                "GHI_Wm2": [900.0],
+                "CloudCover_Norm": [0.10],
+            }
+        )
+        btm = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2026-06-01")],
+                "Nameplate_MW": [25.0],
+                "Capacity_Ratio_To_Current": [1.0],
+                "Impact_Cap_MW": [20.0],
+            }
+        )
+
+        out = add_solar_features(df, btm)
+
+        self.assertGreater(out.loc[0, "BTM_Solar_Proxy_MW"], 0.0)
+        self.assertGreater(out.loc[0, "BTM_ClearSky_Proxy_MW"], out.loc[0, "BTM_Solar_Proxy_MW"])
+        self.assertGreater(out.loc[0, "BTM_Solar_Loss_From_ClearSky_MW"], 0.0)
+
+    def test_peak_risk_uses_tree_gap_without_prophet(self):
+        df = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2026-06-15 17:00")],
+                "Hour": [17],
+                "Temperature_DailyMax": [100.0],
+                "Forecast_Day": [3],
+                "Calibrated_Forecast_MWH": [100.0],
+                "XGB_Pred_MWH": [112.0],
+                "LGB_Pred_MWH": [111.0],
+                "CatBoost_Pred_MWH": [105.0],
+            }
+        )
+        config = {
+            "calibration": {
+                "peak_risk": {
+                    "enabled": True,
+                    "hours": [17],
+                    "min_maxtemp_f": 90.0,
+                    "prophet_gap_threshold_mwh": 99.0,
+                    "catboost_gap_threshold_mwh": 99.0,
+                    "tree_gap_threshold_mwh": 5.0,
+                    "tree_gap_signal_strength": 0.50,
+                    "tree_gap_model_cols": ["XGB_Pred_MWH", "LGB_Pred_MWH", "CatBoost_Pred_MWH"],
+                    "blend": 1.0,
+                    "cap_mwh": 10.0,
+                }
+            }
+        }
+
+        out = apply_peak_risk_correction(df, config)
+
+        self.assertAlmostEqual(out.loc[0, "Peak_Risk_Cal_MWH"], 3.5)
+        self.assertEqual(out.loc[0, "Peak_Risk_Source"], "tree_peak_gap")
+        self.assertAlmostEqual(out.loc[0, "Peak_Risk_Adjusted_Forecast_MWH"], 103.5)
+
+    def test_stage_selector_conditional_override_respects_hour_filter(self):
+        df = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2026-07-15 12:00"), pd.Timestamp("2026-07-15 16:00")],
+                "Forecast_Day": [9, 9],
+                "Season": ["Summer", "Summer"],
+                "Hour": [12, 16],
+                "Temperature_DailyMax": [104.0, 104.0],
+                "DailyMaxTempBucket": [6, 6],
+                "Raw_Forecast_MWH": [250.0, 252.0],
+                "Residual_Calibrated_Forecast_MWH": [265.0, 267.0],
+                "Final_Forecast_MWH": [280.0, 282.0],
+            }
+        )
+        config = {
+            "calibration": {
+                "stage_selector": {
+                    "enabled": True,
+                    "conditional_stage_overrides": [
+                        {
+                            "name": "summer_high_temp_raw_override",
+                            "enabled": True,
+                            "seasons": ["Summer"],
+                            "hours": [9, 10, 11, 12, 13],
+                            "min_daily_max_temp_bucket": 6,
+                            "min_forecast_day": 1,
+                            "max_forecast_day": 16,
+                            "stage": "raw",
+                        }
+                    ],
+                }
+            }
+        }
+
+        out = apply_operational_stage_selector(df, config, forecast_col="Final_Forecast_MWH")
+
+        self.assertEqual(out.loc[0, "Stage_Selected_Forecast_MWH"], 250.0)
+        self.assertEqual(out.loc[0, "Stage_Selector_Source"], "Raw_Forecast_MWH")
+        self.assertIn("conditional_stage_override:summer_high_temp_raw_override", out.loc[0, "Stage_Selector_Reason"])
+        self.assertEqual(out.loc[1, "Stage_Selected_Forecast_MWH"], 282.0)
+        self.assertEqual(out.loc[1, "Stage_Selector_Source"], "Final_Forecast_MWH")
+        self.assertNotIn("conditional_stage_override", out.loc[1, "Stage_Selector_Reason"])
 
     def test_blend_predictions_pads_short_optional_components(self):
         blended = blend_predictions(

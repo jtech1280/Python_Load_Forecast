@@ -216,6 +216,60 @@ def _resolve_default_argv(argv: list[str] | None) -> list[str] | None:
     return defaults
 
 
+def _archive_replay_diagnostic_snapshots(
+    diagnostics: dict | None,
+    output_dir: Path,
+    save_distinct_snapshot_func,
+) -> list[Path]:
+    if not diagnostics:
+        return []
+    import pandas as pd
+
+    archive_dir = output_dir / "replay_runs"
+    replay_hash_columns = [
+        "DT",
+        "Replay_Origin_ID",
+        "Actual_MWH",
+        "Raw_Forecast_MWH",
+        "XGB_Pred_MWH",
+        "LGB_Pred_MWH",
+        "CatBoost_Pred_MWH",
+        "Pre_Focused_Guard_Forecast_MWH",
+        "Post_Focused_Guard_Forecast_MWH",
+        "Focused_Guard_Applied_Flag",
+        "Focused_Scorecard_Guard_MWH",
+        "Final_Backtest_Forecast_MWH",
+        "Final_Forecast_MWH",
+        "Final_Residual_MWH",
+    ]
+    archive_items = {
+        "rolling_origin_replay_results": replay_hash_columns,
+        "rolling_origin_replay_stage_metrics": None,
+        "rolling_origin_replay_origin_metrics_by_stage": None,
+        "production_readiness_scorecard": None,
+        "june_hot_origin_diagnostics": replay_hash_columns + [
+            "Analog_Count_SameHour_PreOrigin",
+            "Analog_Actual_Mean_SameHour_PreOrigin_MWH",
+            "Actual_Minus_Analog_SameHour_Mean_MWH",
+        ],
+    }
+    snapshots: list[Path] = []
+    for name, hash_columns in archive_items.items():
+        value = diagnostics.get(name)
+        if not isinstance(value, pd.DataFrame) or value.empty:
+            continue
+        snapshot = save_distinct_snapshot_func(
+            value,
+            archive_dir=archive_dir,
+            stem=name,
+            hash_columns=hash_columns,
+            metadata={"Source": "rolling_origin_replay"},
+        )
+        if snapshot is not None:
+            snapshots.append(Path(snapshot))
+    return snapshots
+
+
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Roseville System Load Forecast V12.8 (targeted solar-loss refinement + risk bands + max CPU/GPU)")
     parser.add_argument("--run-dashboard", action="store_true", help="Launch Dash dashboard after forecast")
@@ -466,9 +520,17 @@ def main(argv: list[str] | None = None):
 
         diagnostics_enabled = bool(config.get("diagnostics", {}).get("enabled", True))
         if diagnostics_enabled and not args.skip_diagnostics:
-            written = export_diagnostics_bundle(results.get("diagnostics", {}), output_dir)
+            diagnostics = results.get("diagnostics", {})
+            written = export_diagnostics_bundle(diagnostics, output_dir)
             print(f"Saved diagnostics files: {len(written)}")
             print(f"Saved diagnostics manifest to: {written.get('diagnostics_manifest')}")
+            replay_snapshots = _archive_replay_diagnostic_snapshots(
+                diagnostics,
+                output_dir,
+                save_distinct_snapshot,
+            )
+            if replay_snapshots:
+                print(f"Archived replay diagnostic snapshots: {len(replay_snapshots)}")
 
     if results is not None:
         from forecasting.data.output_sql_store import output_sql_enabled, persist_run_outputs

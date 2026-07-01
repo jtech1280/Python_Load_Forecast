@@ -157,13 +157,24 @@ def _add_baselines(out: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _local_datetime_series(values) -> pd.Series:
+    raw = values if isinstance(values, pd.Series) else pd.Series(values)
+    try:
+        return pd.to_datetime(raw, errors="coerce")
+    except ValueError:
+        # Exported CSVs can contain both standard-time and daylight-time offsets.
+        # Diagnostics bucket by local clock, so strip offsets instead of converting to UTC.
+        cleaned = raw.astype(str).str.strip().str.replace(r"(?:[+-]\d{2}:?\d{2}|Z)$", "", regex=True)
+        return pd.to_datetime(cleaned, errors="coerce")
+
+
 def prep_backtest(backtest_df: pd.DataFrame) -> pd.DataFrame:
     """Normalize the backtest frame into a diagnostics-friendly schema."""
     if backtest_df is None or backtest_df.empty:
         return pd.DataFrame()
 
     out = backtest_df.copy()
-    out["DT"] = pd.to_datetime(out["DT"], errors="coerce")
+    out["DT"] = _local_datetime_series(out["DT"])
     out = out.dropna(subset=["DT"]).sort_values("DT").reset_index(drop=True)
 
     if "Actual_MWH" not in out.columns and "Actual" in out.columns:

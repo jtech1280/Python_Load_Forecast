@@ -52,6 +52,9 @@ def apply_peak_risk_correction(df: pd.DataFrame, config: dict | None = None, bas
     min_maxtemp = float(cfg.get("min_maxtemp_f", 78.0))
     prophet_threshold = float(cfg.get("prophet_gap_threshold_mwh", 6.0))
     cat_threshold = float(cfg.get("catboost_gap_threshold_mwh", 7.5))
+    tree_threshold = float(cfg.get("tree_gap_threshold_mwh", 0.0) or 0.0)
+    tree_strength = float(cfg.get("tree_gap_signal_strength", 0.0) or 0.0)
+    tree_cols = list(cfg.get("tree_gap_model_cols", ["XGB_Pred_MWH", "LGB_Pred_MWH", "CatBoost_Pred_MWH"]) or [])
     blend = float(cfg.get("blend", 0.45))
     cap = float(cfg.get("cap_mwh", 8.0))
     min_recent_under = float(cfg.get("min_recent_underforecast_correction_mwh", 0.0))
@@ -96,6 +99,17 @@ def apply_peak_risk_correction(df: pd.DataFrame, config: dict | None = None, bas
         signal.loc[use] = np.maximum(signal.loc[use], add.loc[use] * 0.65)
         for ix in out.index[use]:
             sources[ix].append("catboost_peak_gap")
+
+    if tree_threshold > 0 and tree_strength > 0 and tree_cols:
+        present_tree_cols = [col for col in tree_cols if col in out.columns]
+        if present_tree_cols:
+            tree_preds = pd.concat([_as_num(out[col]) for col in present_tree_cols], axis=1)
+            gap = (tree_preds.max(axis=1, skipna=True) - base).fillna(0.0)
+            add = (gap - tree_threshold).clip(lower=0.0)
+            use = eligible & add.gt(0.0)
+            signal.loc[use] = np.maximum(signal.loc[use], add.loc[use] * tree_strength)
+            for ix in out.index[use]:
+                sources[ix].append("tree_peak_gap")
 
     cap_by_row = pd.Series(cap, index=out.index, dtype=float)
     if extreme_enabled:

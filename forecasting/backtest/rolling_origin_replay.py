@@ -60,7 +60,9 @@ WEATHER_REALISM_PREFIX_COLS = [
     "Weather_Robustness_Jensen_MWH", "Weather_Robustness_Upper_MWH",
     "Weather_Robustness_Warmer_Delta_MWH", "Weather_Robustness_Temp_Sigma_F",
     "Weather_Robustness_Temp_Bias_Damping", "Weather_Robustness_Gate",
-    "Focused_Scorecard_Guard_MWH", "Focused_Scorecard_Guard_Source",
+    "Pre_Focused_Guard_Forecast_MWH", "Post_Focused_Guard_Forecast_MWH",
+    "Focused_Guard_Applied_Flag", "Focused_Scorecard_Guard_MWH",
+    "Focused_Scorecard_Guard_Source",
 ]
 
 
@@ -73,6 +75,15 @@ def _as_int(value: Any, default: int, minimum: int = 1) -> int:
         return max(minimum, int(value))
     except Exception:
         return max(minimum, int(default))
+
+
+def _local_datetime_series(values, index: pd.Index | None = None) -> pd.Series:
+    raw = values if isinstance(values, pd.Series) else pd.Series(values, index=index)
+    try:
+        return pd.to_datetime(raw, errors="coerce")
+    except ValueError:
+        cleaned = raw.astype(str).str.strip().str.replace(r"(?:[+-]\d{2}:?\d{2}|Z)$", "", regex=True)
+        return pd.to_datetime(cleaned, errors="coerce")
 
 
 def _season_from_month(month: int) -> str:
@@ -638,14 +649,23 @@ def _apply_weather_scenarios_and_hedge(
             base_col="Final_Backtest_Forecast_MWH",
             also_update_cols=("Stage_Selected_Forecast_MWH",) if also_update_stage else (),
         )
-        out = apply_focused_scorecard_guard(
-            out,
-            config=config,
-            forecast_col="Final_Backtest_Forecast_MWH",
-            also_update_cols=("Stage_Selected_Forecast_MWH",) if also_update_stage else (),
-        )
         out = _recompute_final_errors(out, forecast_col="Final_Backtest_Forecast_MWH")
     return out
+
+
+def _apply_replay_focused_guard(
+    df: pd.DataFrame,
+    config: dict,
+    *,
+    also_update_stage: bool,
+) -> pd.DataFrame:
+    out = apply_focused_scorecard_guard(
+        df,
+        config=config,
+        forecast_col="Final_Backtest_Forecast_MWH",
+        also_update_cols=("Stage_Selected_Forecast_MWH",) if also_update_stage else (),
+    )
+    return _recompute_final_errors(out, forecast_col="Final_Backtest_Forecast_MWH")
 
 
 def run_rolling_origin_replay(train_df: pd.DataFrame, features: list[str], config: dict) -> pd.DataFrame:
@@ -761,6 +781,7 @@ def run_rolling_origin_replay(train_df: pd.DataFrame, features: list[str], confi
                 apply_hedge=True,
                 also_update_stage=True,
             )
+        corrected = _apply_replay_focused_guard(corrected, config, also_update_stage=True)
         if not raw_weather_realism.empty:
             corrected_weather_realism = apply_origin_available_correction_chain(raw_weather_realism, config, artifacts)
             # V12.9: apply the same weather-uncertainty peak hedge the production pipeline applies.
@@ -770,6 +791,11 @@ def run_rolling_origin_replay(train_df: pd.DataFrame, features: list[str], confi
                 config,
                 artifacts,
                 apply_hedge=True,
+                also_update_stage=False,
+            )
+            corrected_weather_realism = _apply_replay_focused_guard(
+                corrected_weather_realism,
+                config,
                 also_update_stage=False,
             )
             corrected = _merge_weather_realism(corrected, corrected_weather_realism)
@@ -823,6 +849,141 @@ def _daily_peak_by_origin(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
 
 
+def _june_hot_origin_diagnostics(bt: pd.DataFrame) -> pd.DataFrame:
+    """Detailed audit rows for recurring June hot/peak replay misses."""
+    if bt is None or bt.empty:
+        return pd.DataFrame()
+    required = {"DT", "Replay_Origin_ID", "Actual_MWH", "Month", "Hour", "Temperature_DailyMax"}
+    if not required.issubset(bt.columns):
+        return pd.DataFrame()
+
+    work = bt.copy()
+    month = pd.to_numeric(work["Month"], errors="coerce")
+    hour = pd.to_numeric(work["Hour"], errors="coerce")
+    daily_max = pd.to_numeric(work["Temperature_DailyMax"], errors="coerce")
+    mask = month.eq(6) & daily_max.ge(90.0) & hour.between(14, 20)
+    if not mask.any():
+        return pd.DataFrame()
+
+    diag = work.loc[mask].copy()
+    actual = pd.to_numeric(diag["Actual_MWH"], errors="coerce")
+    forecast_cols = {
+        "Raw": "Raw_Forecast_MWH",
+        "XGB": "XGB_Pred_MWH",
+        "LGB": "LGB_Pred_MWH",
+        "CatBoost": "CatBoost_Pred_MWH",
+        "Targeted_Meta": "Targeted_Meta_Adjusted_Forecast_MWH",
+        "Residual_Calibrated": "Residual_Calibrated_Forecast_MWH",
+        "Cloud_Solar": "Cloud_Solar_Adjusted_Forecast_MWH",
+        "Peak_Risk": "Peak_Risk_Adjusted_Forecast_MWH",
+        "Recent_Corrected": "Recent_Corrected_Forecast_MWH",
+        "Stage_Selected": "Stage_Selected_Forecast_MWH",
+        "Pre_Focused_Guard": "Pre_Focused_Guard_Forecast_MWH",
+        "Post_Focused_Guard": "Post_Focused_Guard_Forecast_MWH",
+        "Final_Backtest": "Final_Backtest_Forecast_MWH",
+        "Final": "Final_Forecast_MWH",
+    }
+    for label, col in forecast_cols.items():
+        if col in diag.columns:
+            diag[f"{label}_Residual_MWH"] = actual - pd.to_numeric(diag[col], errors="coerce")
+
+    stage_pairs = [
+        ("Targeted_Meta_Delta_From_Raw_MWH", "Targeted_Meta_Adjusted_Forecast_MWH", "Raw_Forecast_MWH"),
+        ("Residual_Cal_Delta_From_Targeted_MWH", "Residual_Calibrated_Forecast_MWH", "Targeted_Meta_Adjusted_Forecast_MWH"),
+        ("Cloud_Solar_Delta_From_Residual_Cal_MWH", "Cloud_Solar_Adjusted_Forecast_MWH", "Residual_Calibrated_Forecast_MWH"),
+        ("Peak_Risk_Delta_From_Cloud_Solar_MWH", "Peak_Risk_Adjusted_Forecast_MWH", "Cloud_Solar_Adjusted_Forecast_MWH"),
+        ("Recent_Delta_From_Peak_Risk_MWH", "Recent_Corrected_Forecast_MWH", "Peak_Risk_Adjusted_Forecast_MWH"),
+        ("Stage_Selected_Delta_From_Recent_MWH", "Stage_Selected_Forecast_MWH", "Recent_Corrected_Forecast_MWH"),
+        ("Focused_Guard_Delta_From_Pre_Guard_MWH", "Post_Focused_Guard_Forecast_MWH", "Pre_Focused_Guard_Forecast_MWH"),
+        ("Final_Delta_From_Raw_MWH", "Final_Forecast_MWH", "Raw_Forecast_MWH"),
+    ]
+    for out_col, hi_col, lo_col in stage_pairs:
+        if hi_col in diag.columns and lo_col in diag.columns:
+            diag[out_col] = pd.to_numeric(diag[hi_col], errors="coerce") - pd.to_numeric(diag[lo_col], errors="coerce")
+
+    source = work.drop_duplicates(subset=["DT"], keep="first").copy()
+    source["_DT_UTC"] = pd.to_datetime(source["DT"], errors="coerce", utc=True)
+    source["_Month_Num"] = pd.to_numeric(source["Month"], errors="coerce")
+    source["_Hour_Num"] = pd.to_numeric(source["Hour"], errors="coerce")
+    source["_DailyMax_Num"] = pd.to_numeric(source["Temperature_DailyMax"], errors="coerce")
+    source["_Actual_Num"] = pd.to_numeric(source["Actual_MWH"], errors="coerce")
+    diag["_Replay_Origin_UTC"] = pd.to_datetime(diag.get("Replay_Origin_DT"), errors="coerce", utc=True)
+    diag["_Hour_Num"] = pd.to_numeric(diag["Hour"], errors="coerce")
+    diag["_DailyMax_Num"] = pd.to_numeric(diag["Temperature_DailyMax"], errors="coerce")
+
+    analog_rows: list[dict[str, float | int]] = []
+    temp_window_f = 3.0
+    for _, row in diag.iterrows():
+        origin_dt = row["_Replay_Origin_UTC"]
+        temp = row["_DailyMax_Num"]
+        row_hour = row["_Hour_Num"]
+        prior = source[source["_DT_UTC"].lt(origin_dt)] if pd.notna(origin_dt) else source.iloc[0:0]
+        if pd.notna(temp):
+            prior = prior[
+                prior["_Month_Num"].eq(6)
+                & prior["_DailyMax_Num"].between(float(temp) - temp_window_f, float(temp) + temp_window_f)
+            ]
+        else:
+            prior = prior.iloc[0:0]
+        same_hour = prior[prior["_Hour_Num"].eq(row_hour)] if pd.notna(row_hour) else prior.iloc[0:0]
+        peak_window = prior[prior["_Hour_Num"].between(14, 20)]
+
+        same_values = same_hour["_Actual_Num"].dropna()
+        peak_values = peak_window["_Actual_Num"].dropna()
+        analog_rows.append({
+            "Analog_Temp_Window_F": temp_window_f,
+            "Analog_Count_SameHour_PreOrigin": int(len(same_values)),
+            "Analog_Actual_Mean_SameHour_PreOrigin_MWH": float(same_values.mean()) if len(same_values) else np.nan,
+            "Analog_Actual_P90_SameHour_PreOrigin_MWH": float(same_values.quantile(0.9)) if len(same_values) else np.nan,
+            "Analog_Count_HE14_20_PreOrigin": int(len(peak_values)),
+            "Analog_Actual_Mean_HE14_20_PreOrigin_MWH": float(peak_values.mean()) if len(peak_values) else np.nan,
+            "Analog_Actual_P90_HE14_20_PreOrigin_MWH": float(peak_values.quantile(0.9)) if len(peak_values) else np.nan,
+        })
+    analog = pd.DataFrame(analog_rows, index=diag.index)
+    diag = pd.concat(
+        [diag.drop(columns=["_Replay_Origin_UTC", "_Hour_Num", "_DailyMax_Num"], errors="ignore"), analog],
+        axis=1,
+    )
+    if "Analog_Actual_Mean_SameHour_PreOrigin_MWH" in diag.columns:
+        diag["Actual_Minus_Analog_SameHour_Mean_MWH"] = (
+            pd.to_numeric(diag["Actual_MWH"], errors="coerce")
+            - pd.to_numeric(diag["Analog_Actual_Mean_SameHour_PreOrigin_MWH"], errors="coerce")
+        )
+
+    preferred_cols = [
+        "DT", "Replay_Origin_ID", "Replay_Origin_DT", "Replay_Origin_Year", "Replay_Origin_Month",
+        "Forecast_Lead_Hour", "Forecast_Day", "Replay_Horizon_Bucket", "Season", "Month", "Hour",
+        "Actual_MWH", "Temperature", "Temperature_DailyMax", "CloudCover_Norm",
+        "BTM_Solar_Proxy_MW", "BTM_Solar_Loss_From_ClearSky_MW", "Midday_Overcast_Solar_Loss_MW",
+        "Raw_Forecast_MWH", "XGB_Pred_MWH", "LGB_Pred_MWH", "CatBoost_Pred_MWH",
+        "Targeted_Meta_Adjusted_Forecast_MWH", "Residual_Calibrated_Forecast_MWH",
+        "Cloud_Solar_Adjusted_Forecast_MWH", "Peak_Risk_Adjusted_Forecast_MWH",
+        "Recent_Corrected_Forecast_MWH", "Stage_Selected_Forecast_MWH",
+        "Pre_Focused_Guard_Forecast_MWH", "Post_Focused_Guard_Forecast_MWH",
+        "Focused_Guard_Applied_Flag", "Focused_Scorecard_Guard_MWH",
+        "Focused_Scorecard_Guard_Source", "Final_Backtest_Forecast_MWH", "Final_Forecast_MWH",
+        "Raw_Residual_MWH", "XGB_Residual_MWH", "LGB_Residual_MWH", "CatBoost_Residual_MWH",
+        "Stage_Selected_Residual_MWH", "Pre_Focused_Guard_Residual_MWH",
+        "Post_Focused_Guard_Residual_MWH", "Final_Residual_MWH", "Final_AbsError_MWH",
+        "Targeted_Meta_Delta_From_Raw_MWH", "Residual_Cal_Delta_From_Targeted_MWH",
+        "Cloud_Solar_Delta_From_Residual_Cal_MWH", "Peak_Risk_Delta_From_Cloud_Solar_MWH",
+        "Recent_Delta_From_Peak_Risk_MWH", "Stage_Selected_Delta_From_Recent_MWH",
+        "Focused_Guard_Delta_From_Pre_Guard_MWH", "Final_Delta_From_Raw_MWH",
+        "Stage_Selector_Source", "Stage_Selector_Reason", "Targeted_Meta_Source",
+        "Cloud_Solar_Correction_Source", "Peak_Risk_Source", "Recent_Correction_Source",
+        "Analog_Temp_Window_F", "Analog_Count_SameHour_PreOrigin",
+        "Analog_Actual_Mean_SameHour_PreOrigin_MWH", "Analog_Actual_P90_SameHour_PreOrigin_MWH",
+        "Analog_Count_HE14_20_PreOrigin", "Analog_Actual_Mean_HE14_20_PreOrigin_MWH",
+        "Analog_Actual_P90_HE14_20_PreOrigin_MWH", "Actual_Minus_Analog_SameHour_Mean_MWH",
+    ]
+    ordered = [col for col in preferred_cols if col in diag.columns]
+    extras = [col for col in diag.columns if col not in ordered]
+    return diag[ordered + extras].sort_values(
+        ["Replay_Origin_ID", "DT", "Hour"],
+        kind="stable",
+    ).reset_index(drop=True)
+
+
 def _origin_coverage(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "Replay_Origin_ID" not in df.columns:
         return pd.DataFrame()
@@ -851,7 +1012,7 @@ def _ensure_origin_context(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "Replay_Origin_DT" not in out.columns:
         return out
-    origin_dt = pd.to_datetime(out["Replay_Origin_DT"], errors="coerce")
+    origin_dt = _local_datetime_series(out["Replay_Origin_DT"])
     if "Replay_Origin_Year" not in out.columns:
         out["Replay_Origin_Year"] = origin_dt.dt.year
     if "Replay_Origin_Month" not in out.columns:
@@ -973,6 +1134,9 @@ def _weather_realism_metric_frame(bt: pd.DataFrame, use_previous_run_weather: bo
         "WeatherRealism_Weather_Robustness_Temp_Sigma_F": "Weather_Robustness_Temp_Sigma_F",
         "WeatherRealism_Weather_Robustness_Temp_Bias_Damping": "Weather_Robustness_Temp_Bias_Damping",
         "WeatherRealism_Weather_Robustness_Gate": "Weather_Robustness_Gate",
+        "WeatherRealism_Pre_Focused_Guard_Forecast_MWH": "Pre_Focused_Guard_Forecast_MWH",
+        "WeatherRealism_Post_Focused_Guard_Forecast_MWH": "Post_Focused_Guard_Forecast_MWH",
+        "WeatherRealism_Focused_Guard_Applied_Flag": "Focused_Guard_Applied_Flag",
         "WeatherRealism_Focused_Scorecard_Guard_MWH": "Focused_Scorecard_Guard_MWH",
         "WeatherRealism_Focused_Scorecard_Guard_Source": "Focused_Scorecard_Guard_Source",
     }
@@ -1436,6 +1600,7 @@ def build_rolling_origin_replay_bundle(replay_df: pd.DataFrame, config: dict) ->
             long_horizon, ["Season", "HourGroup", "DailyMaxTempBucket"], min_count=1,
         ),
         "rolling_origin_replay_daily_peak_miss_by_stage": _daily_peak_by_origin(bt),
+        "june_hot_origin_diagnostics": _june_hot_origin_diagnostics(bt),
     }
     if not timing_df.empty:
         bundle["rolling_origin_replay_timing"] = timing_df
