@@ -47,6 +47,7 @@ CONTEXT_COLS = [
 PRED_COLS = [
     "DT", "Raw_Forecast_MWH", "XGB_Pred_MWH", "LGB_Pred_MWH", "CatBoost_Pred_MWH",
     "Prophet_Pred_MWH", "Prophet_Lower_MWH", "Prophet_Upper_MWH",
+    "MWH_Lag24", "MWH_SameHour7DayMean",
 ]
 BTM_REPLAY_COLS = ["DT", "Nameplate_MW", "Capacity_Ratio_To_Current", "Impact_Cap_MW"]
 WEATHER_FRAME_COLS = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay"]
@@ -62,7 +63,8 @@ WEATHER_REALISM_PREFIX_COLS = [
     "Weather_Robustness_Temp_Bias_Damping", "Weather_Robustness_Gate",
     "Pre_Focused_Guard_Forecast_MWH", "Post_Focused_Guard_Forecast_MWH",
     "Focused_Guard_Applied_Flag", "Focused_Scorecard_Guard_MWH",
-    "Focused_Scorecard_Guard_Source",
+    "Focused_Scorecard_Guard_Source", "Raw_Minus_SameHour7DayMean_MWH",
+    "Raw_Minus_SameHourYesterday_MWH",
 ]
 
 

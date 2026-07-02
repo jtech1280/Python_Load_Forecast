@@ -10,6 +10,20 @@ from forecasting.model.prophet_model import train_prophet, DEFAULT_PROPHET_REGRE
 from forecasting.model.catboost_model import train_catboost, catboost_enabled
 
 
+PRED_COLS = [
+    "DT",
+    "Raw_Forecast_MWH",
+    "XGB_Pred_MWH",
+    "LGB_Pred_MWH",
+    "CatBoost_Pred_MWH",
+    "Prophet_Pred_MWH",
+    "Prophet_Lower_MWH",
+    "Prophet_Upper_MWH",
+    "MWH_Lag24",
+    "MWH_SameHour7DayMean",
+]
+
+
 def _safe_mape(actual: pd.Series, forecast: pd.Series) -> float:
     a = pd.to_numeric(actual, errors="coerce").astype(float)
     f = pd.to_numeric(forecast, errors="coerce").astype(float)
@@ -118,8 +132,7 @@ def run_rolling_backtest(
         "BTM_Solar_Proxy_MW", "BTM_Solar_Loss_From_ClearSky_MW", "Midday_Overcast_Solar_Loss_MW", "ClearSky_Index", "CloudCover_Norm", "Humidity_Norm", "WindSpeed_Mph", "PrecipIn",
     ]
     context_cols = [c for c in context_cols if c in test.columns]
-    pred_cols = ["DT", "Raw_Forecast_MWH", "XGB_Pred_MWH", "LGB_Pred_MWH", "CatBoost_Pred_MWH", "Prophet_Pred_MWH", "Prophet_Lower_MWH", "Prophet_Upper_MWH"]
-    pred_cols = [c for c in pred_cols if c in fut_preds.columns]
+    pred_cols = [c for c in PRED_COLS if c in fut_preds.columns]
     out = test[context_cols].merge(fut_preds[pred_cols], on="DT", how="left")
     out.rename(columns={"MWH": "Actual_MWH"}, inplace=True)
     out["Residual_MWH"] = out["Actual_MWH"].astype(float) - out["Raw_Forecast_MWH"].astype(float)

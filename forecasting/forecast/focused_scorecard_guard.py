@@ -117,11 +117,20 @@ def _list_mask(values: pd.Series, allowed) -> pd.Series:
     return values.round().astype("Int64").isin(allowed_set).fillna(False)
 
 
+def _first_rule_value(rule: dict, *keys: str):
+    for key in keys:
+        if key in rule and rule[key] is not None:
+            return rule[key]
+    return None
+
+
 def _rule_mask(
     df: pd.DataFrame,
     rule: dict,
     *,
     forecast: pd.Series,
+    raw_minus_samehour_7day: pd.Series,
+    raw_minus_samehour_yesterday: pd.Series,
     month: pd.Series,
     season: pd.Series,
     hour: pd.Series,
@@ -152,6 +161,34 @@ def _rule_mask(
         mask &= forecast.ge(float(rule["min_forecast_mwh"]))
     if "max_forecast_mwh" in rule:
         mask &= forecast.lt(float(rule["max_forecast_mwh"]))
+    min_raw_7day = _first_rule_value(
+        rule,
+        "min_raw_minus_samehour_7day_mean_mwh",
+        "min_raw_minus_rolling7_samehour_mwh",
+    )
+    if min_raw_7day is not None:
+        mask &= raw_minus_samehour_7day.ge(float(min_raw_7day))
+    max_raw_7day = _first_rule_value(
+        rule,
+        "max_raw_minus_samehour_7day_mean_mwh",
+        "max_raw_minus_rolling7_samehour_mwh",
+    )
+    if max_raw_7day is not None:
+        mask &= raw_minus_samehour_7day.le(float(max_raw_7day))
+    min_raw_yesterday = _first_rule_value(
+        rule,
+        "min_raw_minus_samehour_yesterday_mwh",
+        "min_raw_minus_lag24_mwh",
+    )
+    if min_raw_yesterday is not None:
+        mask &= raw_minus_samehour_yesterday.ge(float(min_raw_yesterday))
+    max_raw_yesterday = _first_rule_value(
+        rule,
+        "max_raw_minus_samehour_yesterday_mwh",
+        "max_raw_minus_lag24_mwh",
+    )
+    if max_raw_yesterday is not None:
+        mask &= raw_minus_samehour_yesterday.le(float(max_raw_yesterday))
     if "holiday" in rule:
         mask &= is_holiday.eq(bool(rule["holiday"]))
     if "weekend" in rule:
@@ -178,9 +215,10 @@ def apply_focused_scorecard_guard(
     """Apply bounded residual guards for the remaining hot/peak scorecard slices.
 
     The rules intentionally use only production-available inputs: month, hour,
-    forecast lead day, forecasted daily max temperature, holiday flag, and current
-    point-forecast level. They run after stage selection/weather hedge and write
-    explicit diagnostics so replay can attribute the change.
+    forecast lead day, forecasted daily max temperature, holiday flag, current
+    point-forecast level, and recursive load-state features. They run after stage
+    selection/weather hedge and write explicit diagnostics so replay can attribute
+    the change.
     """
     out = df.copy()
     forecast = (
@@ -213,6 +251,21 @@ def apply_focused_scorecard_guard(
         "BTM_Solar_Loss_From_ClearSky_MW",
         "Midday_Overcast_Solar_Loss_MW",
     )
+    raw_forecast = _optional_num_series(out, "Raw_Forecast_MWH")
+    samehour_7day = _optional_num_series(
+        out,
+        "MWH_SameHour7DayMean",
+        "Baseline_Rolling7DaySameHourAvg_MWH",
+    )
+    samehour_yesterday = _optional_num_series(
+        out,
+        "MWH_Lag24",
+        "Baseline_SameHourYesterday_MWH",
+    )
+    raw_minus_samehour_7day = raw_forecast - samehour_7day
+    raw_minus_samehour_yesterday = raw_forecast - samehour_yesterday
+    out["Raw_Minus_SameHour7DayMean_MWH"] = raw_minus_samehour_7day
+    out["Raw_Minus_SameHourYesterday_MWH"] = raw_minus_samehour_yesterday
     is_holiday = _bool_series(out, "IsHoliday")
     is_weekend = _bool_series(out, "IsWeekend")
 
@@ -232,6 +285,8 @@ def apply_focused_scorecard_guard(
             out,
             rule,
             forecast=forecast,
+            raw_minus_samehour_7day=raw_minus_samehour_7day,
+            raw_minus_samehour_yesterday=raw_minus_samehour_yesterday,
             month=month,
             season=season,
             hour=hour,

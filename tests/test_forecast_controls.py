@@ -8,11 +8,13 @@ import numpy as np
 import pandas as pd
 
 from forecasting.features.solar_features import add_solar_features
-from forecasting.backtest.rolling_origin_replay import _apply_replay_focused_guard
+from forecasting.backtest.rolling_backtest import PRED_COLS as ROLLING_BACKTEST_PRED_COLS
+from forecasting.backtest.rolling_origin_replay import PRED_COLS as ROLLING_REPLAY_PRED_COLS, _apply_replay_focused_guard
 from forecasting.forecast.focused_scorecard_guard import apply_focused_scorecard_guard
 from forecasting.diagnostics.forecast_diagnostics import _diagnostic_band_for_row, prep_backtest
 from forecasting.forecast.forecast_pipeline import apply_operational_stage_selector
 from forecasting.forecast.peak_risk_correction import apply_peak_risk_correction
+from forecasting.forecast.recursive_engine import recursive_forecast
 from forecasting.forecast.uncertainty_bands import _band_risk_multiplier, _prep, apply_bands
 from forecasting.forecast.weather_robustness_hedge import apply_weather_robustness_hedge
 from forecasting.model.ensemble import blend_predictions
@@ -439,6 +441,91 @@ class ForecastControlTests(unittest.TestCase):
 
         self.assertEqual(out["Focused_Scorecard_Guard_MWH"].tolist(), [8.0, 4.0, -8.0])
         self.assertEqual(out["Final_Forecast_MWH"].tolist(), [158.0, 228.0, 180.0])
+
+    def test_focused_guard_can_gate_on_raw_minus_same_hour_load_state(self):
+        df = pd.DataFrame(
+            {
+                "DT": [
+                    pd.Timestamp("2026-06-25 15:00"),
+                    pd.Timestamp("2026-06-25 16:00"),
+                    pd.Timestamp("2026-07-01 17:00"),
+                ],
+                "Final_Forecast_MWH": [220.0, 220.0, 220.0],
+                "Stage_Selected_Forecast_MWH": [220.0, 220.0, 220.0],
+                "Raw_Forecast_MWH": [230.0, 225.0, 220.0],
+                "MWH_SameHour7DayMean": [210.0, 215.0, 200.0],
+                "MWH_Lag24": [225.0, 220.0, 225.0],
+                "Temperature_DailyMax": [93.0, 93.0, 94.0],
+                "CloudCover_Norm": [0.0, 0.0, 0.0],
+            }
+        )
+        config = {
+            "calibration": {
+                "stage_selector": {
+                    "focused_scorecard_guard": {
+                        "enabled": True,
+                        "total_cap_mwh": 30.0,
+                        "rules": [
+                            {
+                                "name": "june_july_clear_hot_raw_level_backoff",
+                                "adjustment_mwh": -5.0,
+                                "months": [6, 7],
+                                "hours": [13, 14, 15, 16, 17, 18],
+                                "min_maxtemp_f": 90.0,
+                                "max_maxtemp_f": 100.0,
+                                "max_cloud_cover_norm": 0.20,
+                                "min_raw_minus_samehour_7day_mean_mwh": 15.0,
+                                "min_raw_minus_samehour_yesterday_mwh": 0.0,
+                            }
+                        ],
+                    }
+                }
+            }
+        }
+
+        out = apply_focused_scorecard_guard(df, config, forecast_col="Final_Forecast_MWH")
+
+        self.assertEqual(out["Focused_Scorecard_Guard_MWH"].tolist(), [-5.0, 0.0, 0.0])
+        self.assertEqual(out["Final_Forecast_MWH"].tolist(), [215.0, 220.0, 220.0])
+        self.assertEqual(out["Stage_Selected_Forecast_MWH"].tolist(), [215.0, 220.0, 220.0])
+        self.assertEqual(out["Raw_Minus_SameHour7DayMean_MWH"].tolist(), [20.0, 10.0, 20.0])
+        self.assertEqual(out["Raw_Minus_SameHourYesterday_MWH"].tolist(), [5.0, 5.0, -5.0])
+
+    def test_recursive_forecast_exposes_load_state_lags_for_guards(self):
+        class ConstantModel:
+            def __init__(self, value):
+                self.value = value
+
+            def predict(self, X):
+                return np.full(len(X), self.value, dtype=float)
+
+        hist = pd.DataFrame(
+            {
+                "DT": pd.date_range("2026-06-01 00:00", periods=168, freq="h"),
+                "MWH": np.arange(168, dtype=float),
+            }
+        )
+        future = pd.DataFrame({"DT": [pd.Timestamp("2026-06-08 00:00")]})
+
+        out = recursive_forecast(
+            future_frame=future,
+            historical_seed=hist,
+            xgb_model=ConstantModel(200.0),
+            lgb_model=ConstantModel(200.0),
+            features=["MWH_Lag24", "MWH_SameHour7DayMean"],
+            ensemble_weights={"xgb": 0.5, "lgb": 0.5},
+        )
+
+        self.assertIn("MWH_Lag24", out.columns)
+        self.assertIn("MWH_SameHour7DayMean", out.columns)
+        self.assertEqual(out.loc[0, "MWH_Lag24"], 144.0)
+        self.assertEqual(out.loc[0, "MWH_SameHour7DayMean"], 72.0)
+
+    def test_backtest_prediction_whitelists_retain_load_state_lags(self):
+        required = {"MWH_Lag24", "MWH_SameHour7DayMean"}
+
+        self.assertTrue(required.issubset(set(ROLLING_BACKTEST_PRED_COLS)))
+        self.assertTrue(required.issubset(set(ROLLING_REPLAY_PRED_COLS)))
 
     def test_focused_guard_handles_mixed_offset_export_timestamps(self):
         df = pd.DataFrame(

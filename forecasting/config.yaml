@@ -610,7 +610,7 @@ calibration:
           max_maxtemp_f: 105.0
           min_forecast_mwh: 265.0
         - name: june_long_hot_100_105_peak_finish_up
-          adjustment_mwh: 5.5
+          adjustment_mwh: 1.5
           months: [6]
           hours: [16, 17, 18]
           min_forecast_day: 8
@@ -677,15 +677,28 @@ calibration:
           min_maxtemp_f: 95.0
           max_maxtemp_f: 100.0
           holiday: false
+        - name: june_july_clear_hot_raw_level_backoff
+          # 2026-07-02 raw/tree diagnostics: recent clear 90-100F HE13-18 rows
+          # overforecast when raw is far above the recursive same-hour load state.
+          # Conservative counterfactual: Last45 MAE 3.180 -> 3.025 while slightly
+          # improving hot-peak and HE14-18 gates.
+          adjustment_mwh: -5.0
+          months: [6, 7]
+          hours: [13, 14, 15, 16, 17, 18]
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.20
+          min_raw_minus_samehour_7day_mean_mwh: 15.0
+          min_raw_minus_samehour_yesterday_mwh: 0.0
         - name: june_days4to7_mild_hot_evening_recovery_up
-          adjustment_mwh: 40.0
+          adjustment_mwh: 28.0
           months: [6]
           hours: [17, 18, 19, 20]
           min_forecast_day: 4
           max_forecast_day: 7
           min_maxtemp_f: 90.0
           max_maxtemp_f: 92.5
-          max_total_cap_mwh: 40.0
+          max_total_cap_mwh: 28.0
           holiday: false
         - name: june_days4to7_mild_hot_early_peak_recovery_up
           adjustment_mwh: 20.0
@@ -697,7 +710,7 @@ calibration:
           max_maxtemp_f: 92.5
           holiday: false
         - name: june_days4to7_hot_peak_recovery_up
-          adjustment_mwh: 24.0
+          adjustment_mwh: 14.0
           months: [6]
           hours: [14, 15, 16, 17, 18]
           min_forecast_day: 4
@@ -717,7 +730,10 @@ calibration:
         - name: june_long_95_100_evening_recovery_up
           adjustment_mwh: 12.0
           months: [6]
-          hours: [19, 20]
+          # Full replay with focused-guard application showed HE20 overcorrecting
+          # when this stacked with the low-forecast hot extra. Keep the evening
+          # recovery on HE19 only.
+          hours: [19]
           min_forecast_day: 8
           max_forecast_day: 16
           min_maxtemp_f: 95.0
@@ -887,7 +903,7 @@ calibration:
           max_maxtemp_f: 98.0
           holiday: false
         - name: july_long_90_94_peak_window_backoff
-          adjustment_mwh: -6.0
+          adjustment_mwh: 0.0
           months: [7]
           hours: [14, 15, 16, 17, 18]
           min_forecast_day: 8
@@ -933,11 +949,13 @@ calibration:
           min_maxtemp_f: 100.0
           min_forecast_mwh: 270.0
         - name: august_long_clear_hot_high_forecast_backoff
-          adjustment_mwh: -45.0
+          # Narrow the large Aug 26-style clear-hot backoff after the full replay
+          # showed Day 14 raw-good rows were being pulled down by roughly 49 MWh.
+          adjustment_mwh: -25.0
           months: [8]
           hours: [14, 15, 16, 17, 18]
           min_forecast_day: 8
-          max_forecast_day: 16
+          max_forecast_day: 12
           min_maxtemp_f: 95.0
           max_maxtemp_f: 97.0
           max_cloud_cover_norm: 0.30
@@ -946,7 +964,7 @@ calibration:
           max_total_cap_mwh: 60.0
           holiday: false
         - name: august_days8to12_clear_hot_midafternoon_backoff
-          adjustment_mwh: -50.0
+          adjustment_mwh: -32.0
           months: [8]
           hours: [14, 15]
           min_forecast_day: 8
@@ -995,7 +1013,7 @@ calibration:
           max_forecast_mwh: 255.0
           holiday: false
         - name: september_day4to7_mild_peak_down
-          adjustment_mwh: -13.5
+          adjustment_mwh: 0.0
           months: [9]
           hours: [14, 15, 16, 17, 18]
           min_forecast_day: 4

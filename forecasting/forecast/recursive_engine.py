@@ -68,6 +68,8 @@ def recursive_forecast(
     lgb_preds = []
     prophet_preds = []
     catboost_preds = []
+    lag24_values = []
+    same_hour_7day_values = []
 
     for i in range(len(fut)):
         row = fut.iloc[i].copy()
@@ -87,6 +89,8 @@ def recursive_forecast(
         row["MWH_Rolling168"] = _rolling(base_series, 168, min_periods=84)
         row["MWH_Rolling24Std"] = _rolling(base_series, 24, min_periods=12, std=True)
         row["MWH_SameHour7DayMean"] = _same_hour_7day_mean(base_series)
+        lag24_values.append(row["MWH_Lag24"])
+        same_hour_7day_values.append(row["MWH_SameHour7DayMean"])
 
         X_row = _prepare_x(row, features)
         
@@ -134,5 +138,7 @@ def recursive_forecast(
         for col in ["Prophet_Lower_MWH", "Prophet_Upper_MWH"]:
             if col in prophet_components.columns:
                 fut[col] = prophet_components[col].to_numpy()
+    fut["MWH_Lag24"] = lag24_values
+    fut["MWH_SameHour7DayMean"] = same_hour_7day_values
     fut["Raw_Forecast_MWH"] = preds
     return fut
