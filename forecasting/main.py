@@ -1,6 +1,7 @@
 import argparse
 import atexit
 import csv
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -270,6 +271,36 @@ def _archive_replay_diagnostic_snapshots(
     return snapshots
 
 
+def _run_solar_forecast(
+    output_dir: Path,
+    *,
+    skip_refresh: bool = False,
+    allow_stale_on_failure: bool = False,
+) -> None:
+    hourly_path = output_dir / "roseville_solar_forecast_hourly.csv"
+    if skip_refresh:
+        print(
+            f"Skipping solar forecast refresh; using existing file if available: {hourly_path}",
+            flush=True,
+        )
+        return
+
+    print("Running solar forecast...")
+    try:
+        subprocess.run([sys.executable, "forecasting/solar/solar_forecaster.py"], check=True)
+    except subprocess.CalledProcessError:
+        if allow_stale_on_failure and hourly_path.exists():
+            stat = hourly_path.stat()
+            modified = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            print(
+                "WARNING: solar forecast refresh failed; continuing with existing "
+                f"{hourly_path} last modified {modified}.",
+                flush=True,
+            )
+            return
+        raise
+
+
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Roseville System Load Forecast V12.8 (targeted solar-loss refinement + risk bands + max CPU/GPU)")
     parser.add_argument("--run-dashboard", action="store_true", help="Launch Dash dashboard after forecast")
@@ -279,6 +310,9 @@ def main(argv: list[str] | None = None):
     parser.add_argument("--save-sql", action="store_true", help="Persist forecast/backtest/weather outputs to SQL Server")
     parser.add_argument("--no-save-sql", action="store_true", help="Skip SQL Server output persistence for this run")
     parser.add_argument("--skip-diagnostics", action="store_true", help="Skip detailed tuning diagnostics export")
+    parser.add_argument("--skip-solar-forecast", action="store_true", help="Skip solar forecast refresh and use existing solar forecast CSV if present")
+    parser.add_argument("--allow-stale-solar-forecast", action="store_true", help="Continue with existing solar forecast CSV if solar refresh fails")
+    parser.add_argument("--strict-solar-forecast", action="store_true", help="Fail if solar refresh fails, even during rolling-origin replay")
     parser.add_argument("--disable-prophet", action="store_true", help="Skip Prophet benchmark training/prediction even if enabled in config.yaml")
     parser.add_argument("--disable-catboost", action="store_true", help="Skip CatBoost benchmark training/prediction even if enabled in config.yaml")
     parser.add_argument("--disable-five-min-load", action="store_true", help="Disable PowerSupply 5-minute load features for A/B replay testing")
@@ -397,8 +431,14 @@ def main(argv: list[str] | None = None):
             _, lock_path = lock
             print(f"Acquired rolling-origin replay lock: {lock_path}", flush=True)
 
-    print("Running solar forecast...")
-    subprocess.run([sys.executable, "forecasting/solar/solar_forecaster.py"], check=True)
+    allow_stale_solar = bool(args.allow_stale_solar_forecast)
+    if bool(replay_cfg.get("enabled", False)) and not bool(args.strict_solar_forecast):
+        allow_stale_solar = True
+    _run_solar_forecast(
+        output_dir,
+        skip_refresh=bool(args.skip_solar_forecast),
+        allow_stale_on_failure=allow_stale_solar,
+    )
 
     # Apply thread env before importing NumPy / XGBoost / LightGBM-heavy modules.
     from forecasting.utils.performance import apply_runtime_thread_settings, write_runtime_performance_info

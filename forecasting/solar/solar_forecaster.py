@@ -37,9 +37,11 @@ pip install pyodbc pandas requests scikit-learn SQLAlchemy pyarrow
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import math
 import sys
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -65,6 +67,8 @@ LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(message)s"
 INTERVAL_HOURS = 0.25
 DEFAULT_PERFORMANCE_RATIO = 0.75
 DEFAULT_PARQUET_ROOT = Path(r"C:\PY_LRS")
+DEFAULT_SOLAR_WEATHER_CACHE_DIR = Path("weather_cache") / "solar_weather"
+DEFAULT_FORECAST_WEATHER_CACHE_MAX_AGE_HOURS = 6.0
 ROSEVILLE_LATITUDE = 38.7522
 ROSEVILLE_LONGITUDE = -121.2880
 NET_METER_TYPES = {"AMI_NET", "AMI_NET_D"}
@@ -75,6 +79,9 @@ HOURLY_WEATHER_VARIABLES = [
     "cloud_cover_mid",
     "cloud_cover_high",
 ]
+OPEN_METEO_TIMEOUT_SECONDS = 60
+OPEN_METEO_MAX_ATTEMPTS = 4
+OPEN_METEO_RETRY_BACKOFF_SECONDS = 3.0
 
 
 def configure_logging(verbose: bool = False) -> None:
@@ -106,6 +113,167 @@ def current_local_timestamp(timezone_name: str) -> pd.Timestamp:
     Return the current local wall-clock timestamp without timezone info.
     """
     return pd.Timestamp(datetime.now(ZoneInfo(timezone_name))).tz_localize(None)
+
+
+def _open_meteo_get_json(
+    url: str,
+    params: dict,
+    *,
+    source_name: str,
+    start_date: date,
+    end_date: date,
+) -> dict | list:
+    """
+    Fetch Open-Meteo JSON with bounded retries for transient TLS/network resets.
+    """
+    last_error: Exception | None = None
+    for attempt in range(1, OPEN_METEO_MAX_ATTEMPTS + 1):
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                verify=False,
+                timeout=OPEN_METEO_TIMEOUT_SECONDS,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.HTTPError as exc:
+            last_error = exc
+            status_code = exc.response.status_code if exc.response is not None else None
+            if status_code is not None and 400 <= status_code < 500 and status_code != 429:
+                raise
+        except (requests.RequestException, ValueError) as exc:
+            last_error = exc
+
+        if attempt >= OPEN_METEO_MAX_ATTEMPTS:
+            break
+        sleep_seconds = OPEN_METEO_RETRY_BACKOFF_SECONDS * attempt
+        logging.warning(
+            "Open-Meteo %s weather request failed for %s to %s on attempt %s/%s: %s. "
+            "Retrying in %.1f seconds.",
+            source_name,
+            start_date,
+            end_date,
+            attempt,
+            OPEN_METEO_MAX_ATTEMPTS,
+            last_error,
+            sleep_seconds,
+        )
+        time.sleep(sleep_seconds)
+
+    raise RuntimeError(
+        f"Open-Meteo {source_name} weather request failed for {start_date} to {end_date} "
+        f"after {OPEN_METEO_MAX_ATTEMPTS} attempts."
+    ) from last_error
+
+
+def _safe_cache_token(value: object) -> str:
+    token = "".join(ch if ch.isalnum() else "_" for ch in str(value))
+    return "_".join(part for part in token.split("_") if part)
+
+
+def _solar_weather_cache_root(cache_dir: str | Path | None) -> Path:
+    path = Path(cache_dir) if cache_dir else DEFAULT_SOLAR_WEATHER_CACHE_DIR
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path
+
+
+def _solar_weather_site_signature(sites: pd.DataFrame) -> str:
+    if sites is None or sites.empty:
+        return "no_sites"
+    cols = [col for col in ["SolarSiteKey", "Latitude", "Longitude"] if col in sites.columns]
+    if not cols:
+        return "no_site_columns"
+    work = sites[cols].copy()
+    sort_cols = [col for col in ["SolarSiteKey", "Latitude", "Longitude"] if col in work.columns]
+    work.sort_values(sort_cols, inplace=True, ignore_index=True)
+    payload = work.to_csv(index=False, float_format="%.6f")
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _solar_weather_cache_path(
+    *,
+    cache_dir: str | Path | None,
+    kind: str,
+    source_name: str,
+    start_date: date,
+    end_date: date,
+    sites: pd.DataFrame,
+    timezone_name: str,
+) -> Path:
+    root = _solar_weather_cache_root(cache_dir)
+    site_hash = _solar_weather_site_signature(sites)
+    stem = "_".join(
+        [
+            "solar",
+            kind,
+            source_name,
+            start_date.isoformat(),
+            end_date.isoformat(),
+            _safe_cache_token(timezone_name),
+            site_hash,
+        ]
+    )
+    return root / f"{stem}.csv"
+
+
+def _read_solar_weather_cache(
+    path: Path,
+    *,
+    start_date: date,
+    end_date: date,
+    timestamp_col: str,
+) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        out = pd.read_csv(path)
+    except Exception as exc:
+        logging.warning("Ignoring unreadable solar weather cache %s: %s", path, exc)
+        return pd.DataFrame()
+    if timestamp_col not in out.columns:
+        return pd.DataFrame()
+
+    out = out.copy()
+    if timestamp_col == "date":
+        out[timestamp_col] = pd.to_datetime(out[timestamp_col], errors="coerce").dt.date
+        valid = out[timestamp_col].notna()
+        in_range = valid & out[timestamp_col].ge(start_date) & out[timestamp_col].le(end_date)
+    else:
+        out[timestamp_col] = pd.to_datetime(out[timestamp_col], errors="coerce")
+        valid = out[timestamp_col].notna()
+        in_range = valid & out[timestamp_col].dt.date.ge(start_date) & out[timestamp_col].dt.date.le(end_date)
+    out = out.loc[in_range].copy()
+    if out.empty:
+        return pd.DataFrame()
+    return out.sort_values(timestamp_col).reset_index(drop=True)
+
+
+def _write_solar_weather_cache(df: pd.DataFrame, path: Path) -> None:
+    if df is None or df.empty:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
+
+
+def _solar_weather_cache_is_fresh(path: Path, max_age_hours: float) -> bool:
+    if not path.exists():
+        return False
+    try:
+        age_seconds = time.time() - path.stat().st_mtime
+    except OSError:
+        return False
+    return age_seconds <= max(0.0, float(max_age_hours)) * 3600.0
+
+
+def _archive_solar_forecast_weather(df: pd.DataFrame, cache_dir: str | Path | None, source_path: Path) -> None:
+    if df is None or df.empty:
+        return
+    archive_dir = _solar_weather_cache_root(cache_dir) / "forecast_weather_runs"
+    timestamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%d_%H%M%S")
+    archive_path = archive_dir / f"{source_path.stem}_{timestamp}.csv"
+    _write_solar_weather_cache(df, archive_path)
 
 
 # =============================================================================
@@ -686,22 +854,42 @@ def fetch_historical_weather(
     sites: pd.DataFrame,
     start_date: date,
     end_date: date,
+    cache_dir: str | Path | None = DEFAULT_SOLAR_WEATHER_CACHE_DIR,
+    use_cache: bool = True,
 ) -> pd.DataFrame:
     """
     Fetch historical GHI from Open-Meteo for a list of sites.
     """
-    return fetch_open_meteo_weather(sites, start_date, end_date, use_forecast=False)
+    return fetch_open_meteo_weather(
+        sites,
+        start_date,
+        end_date,
+        use_forecast=False,
+        cache_dir=cache_dir,
+        use_cache=use_cache,
+    )
 
 
 def fetch_forecast_weather(
     sites: pd.DataFrame,
     start_date: date,
     end_date: date,
+    cache_dir: str | Path | None = DEFAULT_SOLAR_WEATHER_CACHE_DIR,
+    forecast_cache_max_age_hours: float = DEFAULT_FORECAST_WEATHER_CACHE_MAX_AGE_HOURS,
+    use_cache: bool = True,
 ) -> pd.DataFrame:
     """
     Fetch forecast GHI from Open-Meteo for a list of sites.
     """
-    return fetch_open_meteo_weather(sites, start_date, end_date, use_forecast=True)
+    return fetch_open_meteo_weather(
+        sites,
+        start_date,
+        end_date,
+        use_forecast=True,
+        cache_dir=cache_dir,
+        forecast_cache_max_age_hours=forecast_cache_max_age_hours,
+        use_cache=use_cache,
+    )
 
 
 def fetch_open_meteo_weather(
@@ -709,6 +897,9 @@ def fetch_open_meteo_weather(
     start_date: date,
     end_date: date,
     use_forecast: bool,
+    cache_dir: str | Path | None = DEFAULT_SOLAR_WEATHER_CACHE_DIR,
+    forecast_cache_max_age_hours: float = DEFAULT_FORECAST_WEATHER_CACHE_MAX_AGE_HOURS,
+    use_cache: bool = True,
 ) -> pd.DataFrame:
     """
     Fetch daily GHI from Open-Meteo archive or forecast API.
@@ -716,6 +907,28 @@ def fetch_open_meteo_weather(
     """
     source_name = "forecast" if use_forecast else "historical"
     logging.info("Fetching %s weather data from %s to %s", source_name, start_date, end_date)
+    cache_path = _solar_weather_cache_path(
+        cache_dir=cache_dir,
+        kind="daily",
+        source_name=source_name,
+        start_date=start_date,
+        end_date=end_date,
+        sites=sites,
+        timezone_name="auto",
+    )
+    cached = pd.DataFrame()
+    if use_cache:
+        cached = _read_solar_weather_cache(
+            cache_path,
+            start_date=start_date,
+            end_date=end_date,
+            timestamp_col="date",
+        )
+        if not cached.empty and (
+            not use_forecast or _solar_weather_cache_is_fresh(cache_path, forecast_cache_max_age_hours)
+        ):
+            logging.info("Using cached %s daily solar weather: %s", source_name, cache_path)
+            return cached
 
     url = (
         "https://api.open-meteo.com/v1/forecast"
@@ -733,9 +946,24 @@ def fetch_open_meteo_weather(
         "timezone": "auto",
     }
 
-    response = requests.get(url, params=params, verify=False, timeout=60)
-    response.raise_for_status()  # Raise an exception for bad status codes
-    results = response.json()
+    try:
+        results = _open_meteo_get_json(
+            url,
+            params,
+            source_name=source_name,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except Exception as exc:
+        if use_cache and not cached.empty:
+            logging.warning(
+                "Open-Meteo %s daily solar weather refresh failed; using stale cache %s. Details: %s",
+                source_name,
+                cache_path,
+                exc,
+            )
+            return cached
+        raise
 
     # If only one site is requested, the API returns a dict, not a list of dicts.
     # Wrap it in a list to handle this case.
@@ -757,6 +985,10 @@ def fetch_open_meteo_weather(
     weather_df = pd.concat(all_weather_data, ignore_index=True)
     weather_df.rename(columns={"time": "date"}, inplace=True)
     weather_df["date"] = pd.to_datetime(weather_df["date"]).dt.date
+    if use_cache:
+        _write_solar_weather_cache(weather_df, cache_path)
+        if use_forecast:
+            _archive_solar_forecast_weather(weather_df, cache_dir, cache_path)
 
     logging.info("Fetched %s weather data points", len(weather_df))
     return weather_df
@@ -768,12 +1000,37 @@ def fetch_open_meteo_hourly_weather(
     end_date: date,
     use_forecast: bool,
     timezone_name: str,
+    cache_dir: str | Path | None = DEFAULT_SOLAR_WEATHER_CACHE_DIR,
+    forecast_cache_max_age_hours: float = DEFAULT_FORECAST_WEATHER_CACHE_MAX_AGE_HOURS,
+    use_cache: bool = True,
 ) -> pd.DataFrame:
     """
     Fetch hourly GHI and cloud cover from Open-Meteo archive or forecast API.
     """
     source_name = "forecast" if use_forecast else "historical"
     logging.info("Fetching hourly %s weather data from %s to %s", source_name, start_date, end_date)
+    cache_path = _solar_weather_cache_path(
+        cache_dir=cache_dir,
+        kind="hourly",
+        source_name=source_name,
+        start_date=start_date,
+        end_date=end_date,
+        sites=sites,
+        timezone_name=timezone_name,
+    )
+    cached = pd.DataFrame()
+    if use_cache:
+        cached = _read_solar_weather_cache(
+            cache_path,
+            start_date=start_date,
+            end_date=end_date,
+            timestamp_col="IntervalStartDT",
+        )
+        if not cached.empty and (
+            not use_forecast or _solar_weather_cache_is_fresh(cache_path, forecast_cache_max_age_hours)
+        ):
+            logging.info("Using cached %s hourly solar weather: %s", source_name, cache_path)
+            return cached
 
     url = (
         "https://api.open-meteo.com/v1/forecast"
@@ -789,9 +1046,24 @@ def fetch_open_meteo_hourly_weather(
         "timezone": timezone_name,
     }
 
-    response = requests.get(url, params=params, verify=False, timeout=60)
-    response.raise_for_status()
-    results = response.json()
+    try:
+        results = _open_meteo_get_json(
+            url,
+            params,
+            source_name=source_name,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except Exception as exc:
+        if use_cache and not cached.empty:
+            logging.warning(
+                "Open-Meteo %s hourly solar weather refresh failed; using stale cache %s. Details: %s",
+                source_name,
+                cache_path,
+                exc,
+            )
+            return cached
+        raise
     if isinstance(results, dict):
         results = [results]
 
@@ -850,6 +1122,10 @@ def fetch_open_meteo_hourly_weather(
         raise ValueError(f"No hourly weather data returned from Open-Meteo for {start_date} to {end_date}.")
 
     weather_df = pd.concat(all_weather_data, ignore_index=True)
+    if use_cache:
+        _write_solar_weather_cache(weather_df, cache_path)
+        if use_forecast:
+            _archive_solar_forecast_weather(weather_df, cache_dir, cache_path)
     logging.info("Fetched %s hourly weather data points", len(weather_df))
     return weather_df
 
@@ -858,6 +1134,9 @@ def fetch_weather_for_date_range(
     sites: pd.DataFrame,
     start_date: date,
     end_date: date,
+    cache_dir: str | Path | None = DEFAULT_SOLAR_WEATHER_CACHE_DIR,
+    forecast_cache_max_age_hours: float = DEFAULT_FORECAST_WEATHER_CACHE_MAX_AGE_HOURS,
+    use_cache: bool = True,
 ) -> pd.DataFrame:
     """
     Fetch archive data for past dates and forecast data for today/future dates.
@@ -867,14 +1146,23 @@ def fetch_weather_for_date_range(
 
     archive_end = min(end_date, today - timedelta(days=1))
     if start_date <= archive_end:
-        frames.append(fetch_historical_weather(sites, start_date, archive_end))
+        frames.append(fetch_historical_weather(sites, start_date, archive_end, cache_dir=cache_dir, use_cache=use_cache))
 
     forecast_start = max(start_date, today)
     if forecast_start <= end_date:
-        frames.append(fetch_forecast_weather(sites, forecast_start, end_date))
+        frames.append(
+            fetch_forecast_weather(
+                sites,
+                forecast_start,
+                end_date,
+                cache_dir=cache_dir,
+                forecast_cache_max_age_hours=forecast_cache_max_age_hours,
+                use_cache=use_cache,
+            )
+        )
 
     if not frames:
-        frames.append(fetch_historical_weather(sites, start_date, end_date))
+        frames.append(fetch_historical_weather(sites, start_date, end_date, cache_dir=cache_dir, use_cache=use_cache))
 
     return pd.concat(frames, ignore_index=True)
 
@@ -884,6 +1172,9 @@ def fetch_hourly_weather_for_date_range(
     start_date: date,
     end_date: date,
     timezone_name: str,
+    cache_dir: str | Path | None = DEFAULT_SOLAR_WEATHER_CACHE_DIR,
+    forecast_cache_max_age_hours: float = DEFAULT_FORECAST_WEATHER_CACHE_MAX_AGE_HOURS,
+    use_cache: bool = True,
 ) -> pd.DataFrame:
     """
     Fetch hourly archive data for past dates and hourly forecast data for today/future dates.
@@ -893,14 +1184,45 @@ def fetch_hourly_weather_for_date_range(
 
     archive_end = min(end_date, today - timedelta(days=1))
     if start_date <= archive_end:
-        frames.append(fetch_open_meteo_hourly_weather(sites, start_date, archive_end, False, timezone_name))
+        frames.append(
+            fetch_open_meteo_hourly_weather(
+                sites,
+                start_date,
+                archive_end,
+                False,
+                timezone_name,
+                cache_dir=cache_dir,
+                use_cache=use_cache,
+            )
+        )
 
     forecast_start = max(start_date, today)
     if forecast_start <= end_date:
-        frames.append(fetch_open_meteo_hourly_weather(sites, forecast_start, end_date, True, timezone_name))
+        frames.append(
+            fetch_open_meteo_hourly_weather(
+                sites,
+                forecast_start,
+                end_date,
+                True,
+                timezone_name,
+                cache_dir=cache_dir,
+                forecast_cache_max_age_hours=forecast_cache_max_age_hours,
+                use_cache=use_cache,
+            )
+        )
 
     if not frames:
-        frames.append(fetch_open_meteo_hourly_weather(sites, start_date, end_date, False, timezone_name))
+        frames.append(
+            fetch_open_meteo_hourly_weather(
+                sites,
+                start_date,
+                end_date,
+                False,
+                timezone_name,
+                cache_dir=cache_dir,
+                use_cache=use_cache,
+            )
+        )
 
     return pd.concat(frames, ignore_index=True)
 
@@ -1214,12 +1536,15 @@ def run_forecaster(args: argparse.Namespace) -> None:
         raise ValueError("--same-day-correction-min-intervals must be greater than 0.")
     if args.same_day_correction_min_forecast_kwh < 0:
         raise ValueError("--same-day-correction-min-forecast-kwh must be greater than or equal to 0.")
+    if args.forecast_weather_cache_max_age_hours < 0:
+        raise ValueError("--forecast-weather-cache-max-age-hours must be greater than or equal to 0.")
     if not (0 < args.same_day_correction_lower_bound <= args.same_day_correction_upper_bound):
         raise ValueError(
             "--same-day-correction-lower-bound must be greater than 0 and less than or equal to "
             "--same-day-correction-upper-bound."
         )
     ZoneInfo(args.timezone)
+    weather_cache_dir = None if args.no_weather_cache else Path(args.weather_cache_dir)
 
     engine: Optional[Engine] = None
     try:
@@ -1285,6 +1610,8 @@ def run_forecaster(args: argparse.Namespace) -> None:
                 rec_end_date,
                 use_forecast=False,
                 timezone_name=args.timezone,
+                cache_dir=weather_cache_dir,
+                use_cache=not args.no_weather_cache,
             )
             performance_ratio = calibrate_performance_ratio(
                 rec_intervals=rec_interval_df,
@@ -1313,6 +1640,9 @@ def run_forecaster(args: argparse.Namespace) -> None:
             forecast_start_date,
             forecast_end_date,
             timezone_name=args.timezone,
+            cache_dir=weather_cache_dir,
+            forecast_cache_max_age_hours=args.forecast_weather_cache_max_age_hours,
+            use_cache=not args.no_weather_cache,
         )
 
         logging.info(
@@ -1503,6 +1833,22 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Forecast start date in YYYY-MM-DD format. Defaults to today.",
     )
     parser.add_argument("--forecast-days", type=int, default=16, help="Number of forecast days to produce (max 16).")
+    parser.add_argument(
+        "--weather-cache-dir",
+        default=str(DEFAULT_SOLAR_WEATHER_CACHE_DIR),
+        help="Directory for cached Open-Meteo solar weather responses.",
+    )
+    parser.add_argument(
+        "--forecast-weather-cache-max-age-hours",
+        type=float,
+        default=DEFAULT_FORECAST_WEATHER_CACHE_MAX_AGE_HOURS,
+        help="Freshness window for reusing cached forecast weather before trying Open-Meteo.",
+    )
+    parser.add_argument(
+        "--no-weather-cache",
+        action="store_true",
+        help="Disable Open-Meteo solar weather cache reads and writes.",
+    )
     parser.add_argument(
         "--performance-ratio",
         type=float,

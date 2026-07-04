@@ -491,6 +491,47 @@ class ForecastControlTests(unittest.TestCase):
         self.assertEqual(out["Raw_Minus_SameHour7DayMean_MWH"].tolist(), [20.0, 10.0, 20.0])
         self.assertEqual(out["Raw_Minus_SameHourYesterday_MWH"].tolist(), [5.0, 5.0, -5.0])
 
+    def test_focused_guard_can_gate_on_max_raw_minus_same_hour_load_state(self):
+        df = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2026-07-06 16:00"), pd.Timestamp("2026-07-29 16:00")],
+                "Final_Forecast_MWH": [250.0, 250.0],
+                "Stage_Selected_Forecast_MWH": [250.0, 250.0],
+                "Raw_Forecast_MWH": [240.0, 248.0],
+                "MWH_SameHour7DayMean": [235.0, 220.0],
+                "MWH_Lag24": [230.0, 230.0],
+                "Temperature_DailyMax": [97.0, 97.0],
+                "CloudCover_Norm": [0.0, 0.0],
+            }
+        )
+        config = {
+            "calibration": {
+                "stage_selector": {
+                    "focused_scorecard_guard": {
+                        "enabled": True,
+                        "total_cap_mwh": 30.0,
+                        "rules": [
+                            {
+                                "name": "july_low_state_backoff",
+                                "adjustment_mwh": -10.0,
+                                "months": [7],
+                                "hours": [16],
+                                "min_maxtemp_f": 95.0,
+                                "max_maxtemp_f": 98.0,
+                                "max_raw_minus_samehour_7day_mean_mwh": 12.0,
+                            }
+                        ],
+                    }
+                }
+            }
+        }
+
+        out = apply_focused_scorecard_guard(df, config, forecast_col="Final_Forecast_MWH")
+
+        self.assertEqual(out["Focused_Scorecard_Guard_MWH"].tolist(), [-10.0, 0.0])
+        self.assertEqual(out["Raw_Minus_SameHour7DayMean_MWH"].tolist(), [5.0, 28.0])
+        self.assertEqual(out["Final_Forecast_MWH"].tolist(), [240.0, 250.0])
+
     def test_recursive_forecast_exposes_load_state_lags_for_guards(self):
         class ConstantModel:
             def __init__(self, value):

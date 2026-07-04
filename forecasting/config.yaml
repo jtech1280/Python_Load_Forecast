@@ -680,8 +680,10 @@ calibration:
         - name: june_july_clear_hot_raw_level_backoff
           # 2026-07-02 raw/tree diagnostics: recent clear 90-100F HE13-18 rows
           # overforecast when raw is far above the recursive same-hour load state.
-          # Conservative counterfactual: Last45 MAE 3.180 -> 3.025 while slightly
-          # improving hot-peak and HE14-18 gates.
+          # Disabled after full replay with lag-state columns retained: it helped
+          # a few stacked June recovery rows, but hurt the larger standalone and
+          # July groups enough to worsen hot-peak and HE14-18.
+          enabled: false
           adjustment_mwh: -5.0
           months: [6, 7]
           hours: [13, 14, 15, 16, 17, 18]
@@ -727,6 +729,19 @@ calibration:
           min_maxtemp_f: 95.0
           max_maxtemp_f: 100.0
           holiday: false
+        - name: june_days4to7_clear_98_100_hot_recovery_trim_down
+          # 2026-07-02 full replay: June day-4..7 clear 98-100F HE16-20
+          # overstacked the hot recovery by 15-20 MWh. Trim only this clear
+          # narrow band instead of weakening the broader day-4..7 recovery.
+          adjustment_mwh: -14.0
+          months: [6]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 4
+          max_forecast_day: 7
+          min_maxtemp_f: 98.0
+          max_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.20
+          holiday: false
         - name: june_long_95_100_evening_recovery_up
           adjustment_mwh: 12.0
           months: [6]
@@ -740,7 +755,10 @@ calibration:
           max_maxtemp_f: 100.0
           holiday: false
         - name: june_long_95_100_low_forecast_hot_extra_up
-          adjustment_mwh: 14.0
+          # 2026-07-02 hot-peak replay: the old +14 MWh extra consistently
+          # overforecast the low-forecast 95-100F long-horizon cluster. Keep a
+          # small residual lift but remove the overstack.
+          adjustment_mwh: 2.0
           months: [6]
           hours: [16, 17, 18, 19, 20]
           min_forecast_day: 8
@@ -902,6 +920,19 @@ calibration:
           min_maxtemp_f: 95.0
           max_maxtemp_f: 98.0
           holiday: false
+        - name: july_long_95_98_low_state_peak_backoff
+          # 2026-07-02 hot-peak replay: July 95-98F long-horizon rows with raw
+          # near/below the same-hour 7-day state were overforecast after the
+          # recovery uplift. Do not touch high-state July rows that still need it.
+          adjustment_mwh: -10.0
+          months: [7]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 98.0
+          max_raw_minus_samehour_7day_mean_mwh: 12.0
+          holiday: false
         - name: july_long_90_94_peak_window_backoff
           adjustment_mwh: 0.0
           months: [7]
@@ -919,6 +950,19 @@ calibration:
           max_forecast_day: 16
           min_maxtemp_f: 90.0
           max_maxtemp_f: 95.0
+          holiday: false
+        - name: july_long_92_95_low_state_hot_backoff
+          # 2026-07-03 narrow hot-peak diagnostics: July day-8..16 92.5-95F
+          # rows split by recent same-hour state. Only low-state rows were
+          # overforecast after the stage-selection uplift.
+          adjustment_mwh: -8.0
+          months: [7]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 92.5
+          max_maxtemp_f: 95.0
+          max_raw_minus_samehour_7day_mean_mwh: -25.0
           holiday: false
         - name: july_long_clear_hot_peak_ramp_up
           adjustment_mwh: 7.0
@@ -1000,6 +1044,34 @@ calibration:
           max_cloud_cover_norm: 0.20
           max_solar_loss_mw: 0.50
           holiday: false
+        - name: august_long_95_98_high_state_rebound_up
+          # 2026-07-02 hot-peak replay: Aug 1-2 style clear 95-98F rows were
+          # underforecast when raw was far above recent same-hour state; Aug 26
+          # overforecast rows have negative raw-minus-state and are excluded.
+          adjustment_mwh: 10.0
+          months: [8]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 98.0
+          max_cloud_cover_norm: 0.20
+          min_raw_minus_samehour_7day_mean_mwh: 15.0
+          holiday: false
+        - name: august_long_95_97_low_state_he17_18_rebound_up
+          # 2026-07-03 diagnostics: the Aug 26 clear-hot backoff still slightly
+          # over-pulled HE17-18 after the large high-forecast backoff. Keep this
+          # rebound isolated to low-state clear rows.
+          adjustment_mwh: 7.0
+          months: [8]
+          hours: [17, 18]
+          min_forecast_day: 8
+          max_forecast_day: 12
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 97.0
+          max_cloud_cover_norm: 0.20
+          max_raw_minus_samehour_7day_mean_mwh: -15.0
+          holiday: false
         - name: august_long_clear_hot_rebound_up
           adjustment_mwh: 7.0
           months: [8]
@@ -1019,6 +1091,32 @@ calibration:
           min_forecast_day: 4
           max_forecast_day: 7
           max_maxtemp_f: 95.0
+        - name: september_day4to7_cloudy_92_95_hot_down
+          # 2026-07-02 hot-peak replay: one cloudy September day-5 92.5-95F
+          # hot-peak cluster overforecast by 12-26 MWh. Keep this isolated to
+          # cloudy HE16-20 rows.
+          adjustment_mwh: -14.0
+          months: [9]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 4
+          max_forecast_day: 7
+          min_maxtemp_f: 92.5
+          max_maxtemp_f: 95.0
+          min_cloud_cover_norm: 0.80
+          holiday: false
+        - name: september_long_90_92_cloudy_low_state_hot_backoff
+          # 2026-07-03 diagnostics: Sep 24-style long-horizon 90-92.5F cloudy
+          # hot-peak rows remained overforecast even after the month hot offset.
+          adjustment_mwh: -8.0
+          months: [9]
+          hours: [16, 17, 18, 19]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 92.5
+          min_cloud_cover_norm: 0.90
+          max_raw_minus_samehour_7day_mean_mwh: -15.0
+          holiday: false
         - name: march_long_65_85_clear_peak_recovery_up
           adjustment_mwh: 6.0
           months: [3]

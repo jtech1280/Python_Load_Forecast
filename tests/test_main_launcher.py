@@ -2,7 +2,9 @@ import os
 import platform
 from pathlib import Path
 import runpy
+import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -74,6 +76,34 @@ class MainLauncherTests(unittest.TestCase):
             Path(out["project"]["output_dir"]),
             forecast_main.PROJECT_ROOT / "forecast_outputs",
         )
+
+    def test_solar_forecast_refresh_failure_can_use_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            hourly = output_dir / "roseville_solar_forecast_hourly.csv"
+            hourly.write_text("IntervalStartDT,Forecast_MW\n", encoding="utf-8")
+
+            with patch.object(
+                forecast_main.subprocess,
+                "run",
+                side_effect=subprocess.CalledProcessError(1, ["python", "solar_forecaster.py"]),
+            ):
+                with redirect_stdout(StringIO()) as stdout:
+                    forecast_main._run_solar_forecast(output_dir, allow_stale_on_failure=True)
+
+            self.assertIn("continuing with existing", stdout.getvalue())
+
+    def test_solar_forecast_refresh_failure_raises_without_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+
+            with patch.object(
+                forecast_main.subprocess,
+                "run",
+                side_effect=subprocess.CalledProcessError(1, ["python", "solar_forecaster.py"]),
+            ):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    forecast_main._run_solar_forecast(output_dir, allow_stale_on_failure=True)
 
 
 if __name__ == "__main__":
