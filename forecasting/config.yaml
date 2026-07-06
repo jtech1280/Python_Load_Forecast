@@ -170,6 +170,9 @@ training:
     # Opt-in production-horizon replay. Use --rolling-origin-replay with --save-csv to export outputs.
     # Correction lookups/profile for each origin are learned from the preceding calibration window only.
     enabled: false
+    parallel:
+      enabled: true
+      processes: 4  # null to default to cpu_count() // 2
     horizon_days: 16
     calibration_days: 45
     origin_selection: "fixed" # Fixed set keeps tuning passes apples-to-apples; remove fixed_origins to rebalance.
@@ -313,7 +316,7 @@ model:
     l2_leaf_reg: 4.0
     loss_function: "RMSE"
     random_seed: 42
-    task_type: "GPU"        # GPU first when hardware.use_gpu=true; CPU fallback is automatic
+    task_type: "CPU"        # GPU first when hardware.use_gpu=true; CPU fallback is automatic
     devices: "0"
     thread_count: -1
 
@@ -767,6 +770,21 @@ calibration:
           max_maxtemp_f: 100.0
           max_forecast_mwh: 245.0
           holiday: false
+        - name: june_long_98_100_clear_high_state_overstack_backoff
+          # 2026-07-05 narrow hot-peak diagnostics: June day-8..16 clear
+          # 98-100F rows with raw 10-25 MWh above same-hour 7-day state were
+          # overstacked by the existing recovery rules.
+          adjustment_mwh: -6.0
+          months: [6]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 98.0
+          max_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.10
+          min_raw_minus_samehour_7day_mean_mwh: 10.0
+          max_raw_minus_samehour_7day_mean_mwh: 25.0
+          holiday: false
         - name: june_long_95_100_solar_loss_peak_extra_up
           adjustment_mwh: 12.0
           months: [6]
@@ -884,6 +902,20 @@ calibration:
           max_forecast_day: 16
           min_maxtemp_f: 93.0
           max_maxtemp_f: 97.0
+        - name: may_long_92_95_clear_high_state_hot_recovery_up
+          # 2026-07-05 narrow hot-peak diagnostics: May 9-style clear
+          # 92.5-95F day-8..16 rows were pulled too low by the 93-97F backoff,
+          # but neighboring 95-97F May rows still need the backoff.
+          adjustment_mwh: 8.0
+          months: [5]
+          hours: [16, 17, 18, 19]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 92.5
+          max_maxtemp_f: 95.0
+          max_cloud_cover_norm: 0.10
+          min_raw_minus_samehour_7day_mean_mwh: 50.0
+          holiday: false
         - name: july_holiday_hot_peak_down
           adjustment_mwh: -30.0
           months: [7]
@@ -933,6 +965,20 @@ calibration:
           max_maxtemp_f: 98.0
           max_raw_minus_samehour_7day_mean_mwh: 12.0
           holiday: false
+        - name: july_long_95_98_clear_low_mid_state_extra_backoff
+          # 2026-07-05 narrow hot-peak diagnostics: July 6-7 style clear
+          # 95-98F long-horizon rows still overforecast after the existing low
+          # state backoff when raw is no more than 12 MWh above recent state.
+          adjustment_mwh: -7.0
+          months: [7]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 98.0
+          max_cloud_cover_norm: 0.10
+          max_raw_minus_samehour_7day_mean_mwh: 12.0
+          holiday: false
         - name: july_long_90_94_peak_window_backoff
           adjustment_mwh: 0.0
           months: [7]
@@ -964,6 +1010,21 @@ calibration:
           max_maxtemp_f: 95.0
           max_raw_minus_samehour_7day_mean_mwh: -25.0
           holiday: false
+        - name: july_long_92_95_clear_high_state_hot_recovery_up
+          # 2026-07-05 narrow hot-peak diagnostics: July day-8..16 clear
+          # 92.5-95F rows with raw 10-25 MWh above same-hour 7-day state were
+          # still structurally underforecast after the mild-hot soft down.
+          adjustment_mwh: 6.0
+          months: [7]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 92.5
+          max_maxtemp_f: 95.0
+          max_cloud_cover_norm: 0.10
+          min_raw_minus_samehour_7day_mean_mwh: 10.0
+          max_raw_minus_samehour_7day_mean_mwh: 25.0
+          holiday: false
         - name: july_long_clear_hot_peak_ramp_up
           adjustment_mwh: 7.0
           months: [7]
@@ -985,6 +1046,9 @@ calibration:
           min_maxtemp_f: 95.0
           min_forecast_mwh: 260.0
         - name: august_long_100_plus_peak_finish_up
+          # 2026-07-05 narrow hot-peak diagnostics: keep this finish-up only
+          # when raw is at least 20 MWh above same-hour 7-day state. Lower-state
+          # Aug 30-style rows were overforecast by the unconditional +5.
           adjustment_mwh: 5.0
           months: [8]
           hours: [16, 17, 18]
@@ -992,6 +1056,7 @@ calibration:
           max_forecast_day: 16
           min_maxtemp_f: 100.0
           min_forecast_mwh: 270.0
+          min_raw_minus_samehour_7day_mean_mwh: 20.0
         - name: august_long_clear_hot_high_forecast_backoff
           # Narrow the large Aug 26-style clear-hot backoff after the full replay
           # showed Day 14 raw-good rows were being pulled down by roughly 49 MWh.
