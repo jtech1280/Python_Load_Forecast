@@ -93,6 +93,7 @@ DEFAULT_ACTUAL_QUALITY_MIN_CLEAR_SKY_INDEX = 0.55
 DEFAULT_ACTUAL_QUALITY_MIN_BAD_HOURS_PER_DAY = 2
 DEFAULT_ACTUAL_QUALITY_FORECAST_RATIO_THRESHOLD = 0.15
 DEFAULT_ACTUAL_QUALITY_AVAILABLE_RATIO_THRESHOLD = 0.08
+DEFAULT_ACTUAL_QUALITY_READ_COVERAGE_RATIO_THRESHOLD = 0.25
 ACTUAL_QUALITY_OK = "OK"
 ACTUAL_QUALITY_AMI_SUPPRESSED = "AMI_SUPPRESSED_ACTUAL"
 # Fallback air temperature (deg C) used when weather is missing. Roughly the
@@ -882,7 +883,13 @@ def load_rec_interval_data(
             df = df.drop_duplicates(["ServicePointID", "IntervalStartDT"], keep="last")
 
         total_rows += len(df)
-        interval_piece = df.groupby("IntervalStartDT", as_index=False)["Export_kWh"].sum()
+        interval_piece = (
+            df.groupby("IntervalStartDT", as_index=False)
+            .agg(
+                Export_kWh=("Export_kWh", "sum"),
+                ExportReadCount=("Export_kWh", "size"),
+            )
+        )
         interval_piece["ExportSource"] = export_source
         pieces.append(interval_piece)
 
@@ -894,6 +901,7 @@ def load_rec_interval_data(
         .groupby("IntervalStartDT", as_index=False)
         .agg(
             Export_kWh=("Export_kWh", "sum"),
+            ExportReadCount=("ExportReadCount", "sum"),
             ExportSource=("ExportSource", lambda values: "+".join(sorted(set(values)))),
         )
         .sort_values("IntervalStartDT")
@@ -1766,10 +1774,12 @@ def add_solar_actual_quality_flags(
     actual_kwh_col: str,
     expected_kwh_col: str,
     actual_to_expected_ratio_threshold: float,
+    actual_read_count_col: Optional[str] = None,
     min_expected_kwh: float = DEFAULT_ACTUAL_QUALITY_MIN_EXPECTED_KWH,
     min_ghi_kwh_m2: float = DEFAULT_ACTUAL_QUALITY_MIN_GHI_KWH_M2,
     min_clear_sky_index: float = DEFAULT_ACTUAL_QUALITY_MIN_CLEAR_SKY_INDEX,
     min_bad_hours_per_day: int = DEFAULT_ACTUAL_QUALITY_MIN_BAD_HOURS_PER_DAY,
+    read_coverage_ratio_threshold: float = DEFAULT_ACTUAL_QUALITY_READ_COVERAGE_RATIO_THRESHOLD,
 ) -> pd.DataFrame:
     """
     Flag AMI-suppressed actuals that are physically inconsistent with clear-sky solar.
@@ -1785,6 +1795,7 @@ def add_solar_actual_quality_flags(
         out["ActualToExpectedRatio"] = pd.Series(dtype="float64")
         out["ActualQualityExpected_kWh"] = pd.Series(dtype="float64")
         out["ActualQualitySuspiciousHour"] = pd.Series(dtype="bool")
+        out["ActualReadCoverageRatio"] = pd.Series(dtype="float64")
         return out
 
     out["IntervalStartDT"] = pd.to_datetime(out["IntervalStartDT"])
@@ -1797,23 +1808,61 @@ def add_solar_actual_quality_flags(
     expected_kwh = numeric_series(expected_kwh_col)
     ghi = numeric_series("GHI_kWh_per_m2")
     clear_sky_index = numeric_series("ClearSkyIndex")
+    read_count = (
+        numeric_series(actual_read_count_col)
+        if actual_read_count_col and actual_read_count_col in out.columns
+        else pd.Series(np.nan, index=out.index, dtype="float64")
+    )
 
     expected_denom = expected_kwh.where(expected_kwh > 0)
     ratio = (actual_kwh / expected_denom).replace([np.inf, -np.inf], np.nan)
     high_expected = expected_kwh >= min_expected_kwh
     high_irradiance = ghi >= min_ghi_kwh_m2
     clear_sky = clear_sky_index >= min_clear_sky_index
-    suspicious_hour = (
+    physical_suspicious_hour = (
         high_expected
         & high_irradiance
         & clear_sky
         & ratio.notna()
         & (ratio <= actual_to_expected_ratio_threshold)
     )
+    positive_read_count = read_count[read_count > 0].dropna()
+    typical_read_count = (
+        float(positive_read_count.quantile(0.90))
+        if not positive_read_count.empty
+        else np.nan
+    )
+    read_coverage_ratio = read_count / typical_read_count if pd.notna(typical_read_count) and typical_read_count > 0 else pd.Series(
+        np.nan,
+        index=out.index,
+        dtype="float64",
+    )
+    low_read_coverage = (
+        read_coverage_ratio.notna()
+        & (read_coverage_ratio <= read_coverage_ratio_threshold)
+    )
+    read_suspicious_hour = high_expected & high_irradiance & low_read_coverage
+    if actual_read_count_col and actual_read_count_col in out.columns:
+        severe_physical_suspicious_hour = physical_suspicious_hour & (
+            ratio <= actual_to_expected_ratio_threshold * 0.50
+        )
+        suspicious_hour = read_suspicious_hour | severe_physical_suspicious_hour
+    else:
+        suspicious_hour = physical_suspicious_hour
 
     dates = out["IntervalStartDT"].dt.date
+    min_bad_hours = max(1, int(min_bad_hours_per_day))
     bad_hour_counts = suspicious_hour.groupby(dates).sum()
-    bad_dates = set(bad_hour_counts[bad_hour_counts >= max(1, int(min_bad_hours_per_day))].index)
+    if actual_read_count_col and actual_read_count_col in out.columns:
+        daily_read_coverage = read_coverage_ratio.groupby(dates).median()
+        bad_dates = set(
+            bad_hour_counts[
+                (bad_hour_counts >= min_bad_hours)
+                & (daily_read_coverage <= read_coverage_ratio_threshold)
+            ].index
+        )
+    else:
+        bad_dates = set(bad_hour_counts[bad_hour_counts >= min_bad_hours].index)
     suppressed_day = dates.isin(bad_dates)
     quality_excluded = suspicious_hour | suppressed_day
 
@@ -1826,6 +1875,7 @@ def add_solar_actual_quality_flags(
     out["ActualToExpectedRatio"] = ratio
     out["ActualQualityExpected_kWh"] = expected_kwh
     out["ActualQualitySuspiciousHour"] = suspicious_hour.fillna(False).astype(bool)
+    out["ActualReadCoverageRatio"] = read_coverage_ratio
     return out
 
 
@@ -1894,11 +1944,14 @@ def train_performance_model(
     """
     Train a bounded model that predicts export performance ratio from weather and seasonality.
     """
+    export_agg_spec = {"Export_kWh": ("Export_kWh", "sum")}
+    if "ExportReadCount" in rec_intervals.columns:
+        export_agg_spec["ExportReadCount"] = ("ExportReadCount", "sum")
     hourly_export = (
         rec_intervals.copy()
         .set_index("IntervalStartDT")
         .resample("h")
-        .agg(Export_kWh=("Export_kWh", "sum"))
+        .agg(**export_agg_spec)
         .reset_index()
     )
     hourly_weather = add_performance_features(
@@ -1933,6 +1986,7 @@ def train_performance_model(
             actual_kwh_col="Export_kWh",
             expected_kwh_col="ModeledAvailable_kWh",
             actual_to_expected_ratio_threshold=DEFAULT_ACTUAL_QUALITY_AVAILABLE_RATIO_THRESHOLD,
+            actual_read_count_col="ExportReadCount",
         )
         excluded_rows = int(_actual_quality_exclusion_mask(training_data).sum())
         if excluded_rows:
@@ -2723,10 +2777,15 @@ def resample_actual_export_to_hourly(rec_interval_df: pd.DataFrame) -> pd.DataFr
     """
     Resample 15-minute actual export rows to hourly actual output.
     """
-    rec_hourly = rec_interval_df.set_index("IntervalStartDT").resample("h").agg(
-        Export_kWh=("Export_kWh", "sum"),
-        Export_kW=("Export_kW", "mean"),
-    )
+    agg_spec = {
+        "Export_kWh": ("Export_kWh", "sum"),
+        "Export_kW": ("Export_kW", "mean"),
+    }
+    if "ExportReadCount" in rec_interval_df.columns:
+        agg_spec["ExportReadCount"] = ("ExportReadCount", "sum")
+    rec_hourly = rec_interval_df.set_index("IntervalStartDT").resample("h").agg(**agg_spec)
+    if "ExportReadCount" not in rec_hourly.columns:
+        rec_hourly["ExportReadCount"] = pd.NA
     rec_hourly["Export_kW"] = rec_hourly["Export_kW"].fillna(rec_hourly["Export_kWh"])
     rec_hourly["Export_MW"] = rec_hourly["Export_kW"] / 1000.0
     rec_hourly.reset_index(inplace=True)
@@ -2747,13 +2806,21 @@ def build_hourly_backtest(
             "Export_MW": "Actual_MW",
             "Export_kWh": "Actual_kWh",
             "Export_kW": "Actual_kW",
+            "ExportReadCount": "ActualReadCount",
         }
     )
     forecast_hourly = resample_interval_forecast_to_hourly(
         interval_backtest_forecast,
         total_capacity_kw,
     )
-    backtest = actual_hourly[["IntervalStartDT", "HE", "Actual_MW", "Actual_kWh", "Actual_kW"]].merge(
+    backtest = actual_hourly[[
+        "IntervalStartDT",
+        "HE",
+        "Actual_MW",
+        "Actual_kWh",
+        "Actual_kW",
+        "ActualReadCount",
+    ]].merge(
         forecast_hourly[
             [
                 "IntervalStartDT",
@@ -2801,6 +2868,7 @@ def build_hourly_backtest(
             actual_kwh_col="Actual_kWh",
             expected_kwh_col="ActualQualityExpected_kWh",
             actual_to_expected_ratio_threshold=DEFAULT_ACTUAL_QUALITY_FORECAST_RATIO_THRESHOLD,
+            actual_read_count_col="ActualReadCount",
         )
     else:
         backtest["ActualQualityFlag"] = ACTUAL_QUALITY_OK
@@ -2811,6 +2879,7 @@ def build_hourly_backtest(
             )
         ).replace([np.inf, -np.inf], np.nan)
         backtest["ActualQualitySuspiciousHour"] = False
+        backtest["ActualReadCoverageRatio"] = np.nan
     backtest["APE"] = pd.NA
     backtest["BaseAPE"] = pd.NA
     positive_actual_mask = backtest["Actual_kWh"] > 0
@@ -2868,6 +2937,20 @@ def calculate_backtest_summary(backtest_df: pd.DataFrame) -> pd.DataFrame:
         )
 
     raw_backtest_df = backtest_df.copy()
+    if "APE" not in raw_backtest_df.columns:
+        raw_backtest_df["APE"] = pd.NA
+        positive_actual = pd.to_numeric(raw_backtest_df["Actual_kWh"], errors="coerce") > 0
+        raw_backtest_df.loc[positive_actual, "APE"] = (
+            raw_backtest_df.loc[positive_actual, "AbsError_kWh"]
+            / raw_backtest_df.loc[positive_actual, "Actual_kWh"]
+        )
+    if "BaseAPE" not in raw_backtest_df.columns:
+        raw_backtest_df["BaseAPE"] = pd.NA
+        positive_actual = pd.to_numeric(raw_backtest_df["Actual_kWh"], errors="coerce") > 0
+        raw_backtest_df.loc[positive_actual, "BaseAPE"] = (
+            raw_backtest_df.loc[positive_actual, "BaseAbsError_kWh"]
+            / raw_backtest_df.loc[positive_actual, "Actual_kWh"]
+        )
     excluded_mask = _actual_quality_exclusion_mask(raw_backtest_df)
     excluded_df = raw_backtest_df[excluded_mask].copy()
     backtest_df = raw_backtest_df[~excluded_mask].copy()
@@ -3245,6 +3328,7 @@ def build_solar_backtest_top_errors(
         "Actual_MW",
         "Forecast_MW",
         "BaseForecast_MW",
+        "ActualReadCount",
         "Error_MW",
         "AbsError_MW",
         "Underforecast_MW",
@@ -3266,6 +3350,7 @@ def build_solar_backtest_top_errors(
         "ActualToExpectedRatio",
         "ActualQualityExpected_kWh",
         "ActualQualitySuspiciousHour",
+        "ActualReadCoverageRatio",
         "ForecastSource",
     ]
     for column in review_columns:
@@ -3586,11 +3671,19 @@ def run_forecaster(args: argparse.Namespace) -> None:
             rec_interval_df = add_hour_ending_column(rec_interval_df)
             preloaded_export_intervals = rec_interval_df
             rec_interval_df[
-                ["IntervalStartDT", "HE", "Export_kWh", "Export_kW", "ExportSource", "SolarElevationDeg"]
+                [
+                    "IntervalStartDT",
+                    "HE",
+                    "Export_kWh",
+                    "Export_kW",
+                    "ExportReadCount",
+                    "ExportSource",
+                    "SolarElevationDeg",
+                ]
             ].to_csv(args.rec_actual_15min_output, index=False)
 
             rec_hourly = resample_actual_export_to_hourly(rec_interval_df)
-            rec_hourly[["IntervalStartDT", "HE", "Export_MW", "Export_kWh", "Export_kW"]].to_csv(
+            rec_hourly[["IntervalStartDT", "HE", "Export_MW", "Export_kWh", "Export_kW", "ExportReadCount"]].to_csv(
                 args.rec_actual_hourly_output,
                 index=False,
             )
@@ -3738,6 +3831,7 @@ def run_forecaster(args: argparse.Namespace) -> None:
                         "HE",
                         "Actual_MW",
                         "Actual_kWh",
+                        "ActualReadCount",
                         "BaseForecast_MW",
                         "BaseForecast_kWh",
                         "Forecast_MW",
@@ -3776,6 +3870,7 @@ def run_forecaster(args: argparse.Namespace) -> None:
                         "ActualToExpectedRatio",
                         "ActualQualityExpected_kWh",
                         "ActualQualitySuspiciousHour",
+                        "ActualReadCoverageRatio",
                         "BacktestForecast",
                         "ForecastSource",
                     ]
