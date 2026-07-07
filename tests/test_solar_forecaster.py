@@ -357,6 +357,70 @@ class SolarForecasterFeatureAndCapacityTests(unittest.TestCase):
         self.assertAlmostEqual(day1, 500.0, places=3)
         self.assertAlmostEqual(day2, 1000.0, places=3)
 
+    def test_capacity_weighted_weather_aggregates_per_site_rows(self):
+        timestamps = [pd.Timestamp("2026-07-01 12:00"), pd.Timestamp("2026-07-01 12:00")]
+        weather = pd.DataFrame(
+            {
+                "SolarSiteKey": [1, 2],
+                "IntervalStartDT": timestamps,
+                "GHI_kWh_per_m2": [0.4, 1.0],
+                "WeatherGHI_Wm2": [400.0, 1000.0],
+                "DirectRadiation_Wm2": [300.0, 900.0],
+                "DiffuseRadiation_Wm2": [80.0, 120.0],
+                "Temperature_C": [30.0, 36.0],
+                "WindSpeed_ms": [2.0, 4.0],
+                "CloudCoverPct": [80.0, 20.0],
+                "CloudCoverLowPct": [70.0, 10.0],
+                "CloudCoverMidPct": [50.0, 5.0],
+                "CloudCoverHighPct": [30.0, 1.0],
+            }
+        )
+        sites = pd.DataFrame(
+            {
+                "SolarSiteKey": [1, 2],
+                "SolarCECkW": [100.0, 300.0],
+            }
+        )
+
+        out = solar_forecaster.aggregate_capacity_weighted_weather(weather, sites)
+
+        self.assertEqual(len(out), 1)
+        self.assertAlmostEqual(float(out.loc[0, "GHI_kWh_per_m2"]), 0.85)
+        self.assertAlmostEqual(float(out.loc[0, "WeatherGHI_Wm2"]), 850.0)
+        self.assertAlmostEqual(float(out.loc[0, "CloudCoverPct"]), 35.0)
+
+    def test_capacity_weighted_weather_aggregates_cluster_rows(self):
+        weather = pd.DataFrame(
+            {
+                "SolarSiteKey": [0, 1],
+                "IntervalStartDT": [pd.Timestamp("2026-07-01 12:00")] * 2,
+                "GHI_kWh_per_m2": [0.2, 1.0],
+                "WeatherGHI_Wm2": [200.0, 1000.0],
+                "DirectRadiation_Wm2": [100.0, 900.0],
+                "DiffuseRadiation_Wm2": [50.0, 150.0],
+                "Temperature_C": [28.0, 34.0],
+                "WindSpeed_ms": [1.0, 3.0],
+                "CloudCoverPct": [90.0, 10.0],
+                "CloudCoverLowPct": [80.0, 5.0],
+                "CloudCoverMidPct": [70.0, 5.0],
+                "CloudCoverHighPct": [60.0, 5.0],
+            }
+        )
+        sites = pd.DataFrame(
+            {
+                "SolarSiteKey": [10, 11, 12],
+                "SolarCECkW": [100.0, 300.0, 600.0],
+                "WeatherCluster": [0, 1, 1],
+            }
+        )
+
+        out = solar_forecaster.aggregate_capacity_weighted_weather(weather, sites)
+
+        self.assertEqual(len(out), 1)
+        self.assertAlmostEqual(float(out.loc[0, "GHI_kWh_per_m2"]), 0.92)
+        self.assertAlmostEqual(float(out.loc[0, "WeatherGHI_Wm2"]), 920.0)
+        self.assertAlmostEqual(float(out.loc[0, "CloudCoverPct"]), 18.0)
+
     def test_add_performance_features_builds_clear_sky_metrics(self):
         features = solar_forecaster.add_performance_features(
             pd.DataFrame(
@@ -511,6 +575,198 @@ class SolarForecasterFeatureAndCapacityTests(unittest.TestCase):
         )
         by_minute = interval.set_index(interval["IntervalStartDT"].dt.minute)["Forecast_kWh"]
         self.assertGreater(float(by_minute.loc[45]), float(by_minute.loc[0]))
+
+
+class SolarForecasterBacktestDiagnosticTests(unittest.TestCase):
+    @staticmethod
+    def _sample_backtest():
+        timestamps = pd.to_datetime(
+            [
+                "2026-04-01 10:00",
+                "2026-04-01 12:00",
+                "2026-04-01 14:00",
+                "2026-04-01 22:00",
+            ]
+        )
+        actual_mw = np.array([10.0, 20.0, 5.0, 0.0])
+        forecast_mw = np.array([8.0, 24.0, 2.0, 0.0])
+        base_mw = np.array([7.0, 22.0, 3.0, 0.0])
+        out = pd.DataFrame(
+            {
+                "IntervalStartDT": timestamps,
+                "HE": [11, 13, 15, 23],
+                "Actual_MW": actual_mw,
+                "Forecast_MW": forecast_mw,
+                "BaseForecast_MW": base_mw,
+                "Actual_kWh": actual_mw * 1000.0,
+                "Forecast_kWh": forecast_mw * 1000.0,
+                "BaseForecast_kWh": base_mw * 1000.0,
+                "WeatherGHI_Wm2": [500.0, 800.0, 300.0, 0.0],
+                "GHI_kWh_per_m2": [0.5, 0.8, 0.3, 0.0],
+                "ClearSkyGHI_Wm2": [700.0, 900.0, 500.0, 0.0],
+                "ClearSkyIndex": [0.71, 0.89, 0.60, 0.0],
+                "CloudCoverPct": [25.0, 10.0, 90.0, 100.0],
+                "CloudCoverLowPct": [10.0, 5.0, 80.0, 100.0],
+                "CloudCoverMidPct": [20.0, 5.0, 10.0, 50.0],
+                "CloudCoverHighPct": [5.0, 0.0, 20.0, 100.0],
+                "PerformanceRatio": [0.5, 0.6, 0.4, 0.0],
+                "ResidualCalibrationFactor": [1.0, 1.0, 1.0, 1.0],
+                "SeasonalCalibrationFactor": [1.0, 1.0, 1.0, 1.0],
+                "TotalCalibrationFactor": [1.0, 1.0, 1.0, 1.0],
+                "ForecastSource": ["test"] * 4,
+            }
+        )
+        out["Error_MW"] = out["Forecast_MW"] - out["Actual_MW"]
+        out["AbsError_MW"] = out["Error_MW"].abs()
+        return out
+
+    def test_solar_backtest_diagnostics_include_operational_slices(self):
+        diagnostics = solar_forecaster.calculate_solar_backtest_diagnostic_metrics(
+            self._sample_backtest(),
+            daylight_threshold_mw=0.1,
+        )
+
+        slices = set(diagnostics["Slice"])
+        self.assertIn("Overall", slices)
+        self.assertIn("DaylightActual", slices)
+        self.assertIn("PeakSolarHours11to15", slices)
+        self.assertIn("Hour:12", slices)
+        self.assertIn("CloudCover:80-100", slices)
+
+        overall = diagnostics.loc[diagnostics["Slice"] == "Overall"].iloc[0]
+        self.assertAlmostEqual(float(overall["Actual_MWh"]), 35.0)
+        self.assertAlmostEqual(float(overall["WMAPE_PCT"]), (2.0 + 4.0 + 3.0) / 35.0 * 100.0)
+
+    def test_solar_backtest_top_errors_ranks_under_and_over_forecasts(self):
+        top_errors = solar_forecaster.build_solar_backtest_top_errors(
+            self._sample_backtest(),
+            top_n=1,
+            daylight_threshold_mw=0.1,
+        )
+
+        self.assertEqual(set(top_errors["ErrorType"]), {"Underforecast", "Overforecast"})
+        under = top_errors.loc[top_errors["ErrorType"] == "Underforecast"].iloc[0]
+        over = top_errors.loc[top_errors["ErrorType"] == "Overforecast"].iloc[0]
+        self.assertAlmostEqual(float(under["Underforecast_MW"]), 3.0)
+        self.assertAlmostEqual(float(over["Overforecast_MW"]), 4.0)
+
+    def test_solar_temporal_holdout_returns_status_when_disabled(self):
+        scorecard, hourly = solar_forecaster.build_solar_temporal_holdout_backtest(
+            rec_interval_df=pd.DataFrame(),
+            weather_df=pd.DataFrame(),
+            capacity_kw=1000.0,
+            fallback_ratio=0.75,
+            latitude=solar_forecaster.ROSEVILLE_LATITUDE,
+            longitude=solar_forecaster.ROSEVILLE_LONGITUDE,
+            timezone_name="America/Los_Angeles",
+            min_solar_elevation=0.0,
+            daily_active_capacity=None,
+            max_performance_ratio=1.1,
+            use_performance_model_energy_weighting=True,
+            intrahour_shape_method="median",
+            shape_quantile=0.75,
+            peak_hourly_kwh_quantile=0.90,
+            holdout_days=0,
+            residual_calibration_enabled=True,
+            residual_lower_bound=0.25,
+            residual_upper_bound=1.75,
+            residual_min_forecast_kwh=25.0,
+            residual_min_training_rows=96,
+            residual_energy_weighting=True,
+            seasonal_calibration_enabled=True,
+            seasonal_prior_mwh=500.0,
+            seasonal_lower_bound=0.85,
+            seasonal_upper_bound=1.15,
+        )
+
+        self.assertEqual(scorecard.loc[0, "Status"], "skipped")
+        self.assertTrue(hourly.empty)
+
+
+class SolarForecasterPerformanceModelTests(unittest.TestCase):
+    class _FakeGradientBoostingRegressor:
+        last_sample_weight = "not-called"
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def fit(self, X, _y, sample_weight=None):
+            type(self).last_sample_weight = sample_weight
+            self._rows = len(X)
+            return self
+
+        def predict(self, X):
+            return np.full(len(X), 0.50)
+
+    @staticmethod
+    def _performance_training_frames():
+        timestamps = pd.date_range("2026-06-01 10:00", periods=4, freq="h")
+        rec = pd.DataFrame(
+            {
+                "IntervalStartDT": timestamps,
+                "Export_kWh": [100.0, 400.0, 800.0, 300.0],
+            }
+        )
+        weather = pd.DataFrame(
+            {
+                "IntervalStartDT": timestamps,
+                "GHI_kWh_per_m2": [0.4, 0.8, 1.0, 0.5],
+                "WeatherGHI_Wm2": [400.0, 800.0, 1000.0, 500.0],
+                "DirectRadiation_Wm2": [300.0, 650.0, 800.0, 350.0],
+                "DiffuseRadiation_Wm2": [80.0, 120.0, 150.0, 90.0],
+                "Temperature_C": [28.0, 32.0, 35.0, 30.0],
+                "WindSpeed_ms": [2.0, 2.5, 3.0, 2.2],
+                "CloudCoverPct": [10.0, 15.0, 5.0, 20.0],
+                "CloudCoverLowPct": [2.0, 3.0, 1.0, 4.0],
+                "CloudCoverMidPct": [3.0, 4.0, 2.0, 5.0],
+                "CloudCoverHighPct": [5.0, 8.0, 2.0, 10.0],
+            }
+        )
+        return rec, weather
+
+    def test_performance_model_energy_weighting_passes_sample_weight(self):
+        rec, weather = self._performance_training_frames()
+        fake = self._FakeGradientBoostingRegressor
+        fake.last_sample_weight = "not-called"
+
+        with patch.object(solar_forecaster, "GradientBoostingRegressor", fake):
+            solar_forecaster.train_performance_model(
+                rec_intervals=rec,
+                weather_df=weather,
+                capacity_kw=1000.0,
+                fallback_ratio=0.75,
+                latitude=solar_forecaster.ROSEVILLE_LATITUDE,
+                longitude=solar_forecaster.ROSEVILLE_LONGITUDE,
+                timezone_name="America/Los_Angeles",
+                min_training_available_kwh=1.0,
+                min_training_rows=2,
+                use_energy_weighting=True,
+            )
+
+        self.assertIsNotNone(fake.last_sample_weight)
+        self.assertEqual(len(fake.last_sample_weight), 4)
+        self.assertAlmostEqual(float(fake.last_sample_weight.iloc[2]), 800.0)
+
+    def test_performance_model_energy_weighting_can_be_disabled(self):
+        rec, weather = self._performance_training_frames()
+        fake = self._FakeGradientBoostingRegressor
+        fake.last_sample_weight = "not-called"
+
+        with patch.object(solar_forecaster, "GradientBoostingRegressor", fake):
+            solar_forecaster.train_performance_model(
+                rec_intervals=rec,
+                weather_df=weather,
+                capacity_kw=1000.0,
+                fallback_ratio=0.75,
+                latitude=solar_forecaster.ROSEVILLE_LATITUDE,
+                longitude=solar_forecaster.ROSEVILLE_LONGITUDE,
+                timezone_name="America/Los_Angeles",
+                min_training_available_kwh=1.0,
+                min_training_rows=2,
+                use_energy_weighting=False,
+            )
+
+        self.assertIsNone(fake.last_sample_weight)
 
 
 if __name__ == "__main__":

@@ -276,6 +276,7 @@ def _run_solar_forecast(
     *,
     skip_refresh: bool = False,
     allow_stale_on_failure: bool = False,
+    require_backtest_outputs: bool = False,
 ) -> None:
     hourly_path = output_dir / "roseville_solar_forecast_hourly.csv"
     if skip_refresh:
@@ -286,8 +287,14 @@ def _run_solar_forecast(
         return
 
     print("Running solar forecast...")
+    started_at = datetime.now().timestamp()
+    solar_cmd = [
+        sys.executable,
+        "forecasting/solar/solar_forecaster.py",
+        "--backtest",
+    ]
     try:
-        subprocess.run([sys.executable, "forecasting/solar/solar_forecaster.py"], check=True)
+        subprocess.run(solar_cmd, check=True, cwd=PROJECT_ROOT)
     except subprocess.CalledProcessError:
         if allow_stale_on_failure and hourly_path.exists():
             stat = hourly_path.stat()
@@ -299,6 +306,30 @@ def _run_solar_forecast(
             )
             return
         raise
+    if require_backtest_outputs:
+        required_outputs = [
+            hourly_path,
+            output_dir / "roseville_solar_backtest_hourly.csv",
+            output_dir / "roseville_solar_backtest_summary.csv",
+            output_dir / "roseville_solar_backtest_diagnostics.csv",
+            output_dir / "roseville_solar_backtest_top_errors.csv",
+            output_dir / "roseville_solar_backtest_holdout_scorecard.csv",
+        ]
+        missing = [path for path in required_outputs if not path.exists()]
+        stale_or_empty = [
+            path for path in required_outputs
+            if path.exists() and (path.stat().st_size <= 0 or path.stat().st_mtime < started_at - 1.0)
+        ]
+        if missing or stale_or_empty:
+            details = []
+            if missing:
+                details.append("missing: " + ", ".join(str(path) for path in missing))
+            if stale_or_empty:
+                details.append("stale/empty: " + ", ".join(str(path) for path in stale_or_empty))
+            raise RuntimeError(
+                "Solar forecast refresh completed, but required solar backtest outputs were not refreshed; "
+                + "; ".join(details)
+            )
 
 
 def main(argv: list[str] | None = None):
@@ -312,7 +343,7 @@ def main(argv: list[str] | None = None):
     parser.add_argument("--skip-diagnostics", action="store_true", help="Skip detailed tuning diagnostics export")
     parser.add_argument("--skip-solar-forecast", action="store_true", help="Skip solar forecast refresh and use existing solar forecast CSV if present")
     parser.add_argument("--allow-stale-solar-forecast", action="store_true", help="Continue with existing solar forecast CSV if solar refresh fails")
-    parser.add_argument("--strict-solar-forecast", action="store_true", help="Fail if solar refresh fails, even during rolling-origin replay")
+    parser.add_argument("--strict-solar-forecast", action="store_true", help="Require fresh solar refresh outputs; this is the default for rolling-origin replay")
     parser.add_argument("--disable-prophet", action="store_true", help="Skip Prophet benchmark training/prediction even if enabled in config.yaml")
     parser.add_argument("--disable-catboost", action="store_true", help="Skip CatBoost benchmark training/prediction even if enabled in config.yaml")
     parser.add_argument("--disable-five-min-load", action="store_true", help="Disable PowerSupply 5-minute load features for A/B replay testing")
@@ -431,13 +462,13 @@ def main(argv: list[str] | None = None):
             _, lock_path = lock
             print(f"Acquired rolling-origin replay lock: {lock_path}", flush=True)
 
-    allow_stale_solar = bool(args.allow_stale_solar_forecast)
-    if bool(replay_cfg.get("enabled", False)) and not bool(args.strict_solar_forecast):
-        allow_stale_solar = True
+    replay_enabled = bool(replay_cfg.get("enabled", False))
+    allow_stale_solar = bool(args.allow_stale_solar_forecast) and not bool(args.strict_solar_forecast)
     _run_solar_forecast(
         output_dir,
         skip_refresh=bool(args.skip_solar_forecast),
         allow_stale_on_failure=allow_stale_solar,
+        require_backtest_outputs=replay_enabled and not bool(args.skip_solar_forecast),
     )
 
     # Apply thread env before importing NumPy / XGBoost / LightGBM-heavy modules.

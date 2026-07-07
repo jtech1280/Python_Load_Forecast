@@ -105,6 +105,35 @@ class MainLauncherTests(unittest.TestCase):
                 with self.assertRaises(subprocess.CalledProcessError):
                     forecast_main._run_solar_forecast(output_dir, allow_stale_on_failure=True)
 
+    def test_solar_forecast_replay_validation_requires_backtest_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+
+            with patch.object(forecast_main.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
+                with self.assertRaisesRegex(RuntimeError, "required solar backtest outputs"):
+                    forecast_main._run_solar_forecast(output_dir, require_backtest_outputs=True)
+
+    def test_solar_forecast_replay_validation_accepts_fresh_backtest_outputs(self):
+        required_names = [
+            "roseville_solar_forecast_hourly.csv",
+            "roseville_solar_backtest_hourly.csv",
+            "roseville_solar_backtest_summary.csv",
+            "roseville_solar_backtest_diagnostics.csv",
+            "roseville_solar_backtest_top_errors.csv",
+            "roseville_solar_backtest_holdout_scorecard.csv",
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+
+            def fake_run(*_args, **_kwargs):
+                for name in required_names:
+                    (output_dir / name).write_text("ok\n", encoding="utf-8")
+                return subprocess.CompletedProcess([], 0)
+
+            with patch.object(forecast_main.subprocess, "run", side_effect=fake_run):
+                forecast_main._run_solar_forecast(output_dir, require_backtest_outputs=True)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -84,6 +84,17 @@ DEFAULT_INTRAHOUR_SHAPE_METHOD = "median"
 DEFAULT_SHAPE_QUANTILE = 0.75
 DEFAULT_MAX_PERFORMANCE_RATIO = 1.10
 DEFAULT_PEAK_HOURLY_KWH_QUANTILE = 0.90
+DEFAULT_SOLAR_BACKTEST_DAYLIGHT_THRESHOLD_MW = 0.10
+DEFAULT_SOLAR_BACKTEST_TOP_ERROR_COUNT = 100
+DEFAULT_SOLAR_BACKTEST_HOLDOUT_DAYS = 30
+DEFAULT_ACTUAL_QUALITY_MIN_EXPECTED_KWH = 2500.0
+DEFAULT_ACTUAL_QUALITY_MIN_GHI_KWH_M2 = 0.35
+DEFAULT_ACTUAL_QUALITY_MIN_CLEAR_SKY_INDEX = 0.55
+DEFAULT_ACTUAL_QUALITY_MIN_BAD_HOURS_PER_DAY = 2
+DEFAULT_ACTUAL_QUALITY_FORECAST_RATIO_THRESHOLD = 0.15
+DEFAULT_ACTUAL_QUALITY_AVAILABLE_RATIO_THRESHOLD = 0.08
+ACTUAL_QUALITY_OK = "OK"
+ACTUAL_QUALITY_AMI_SUPPRESSED = "AMI_SUPPRESSED_ACTUAL"
 # Fallback air temperature (deg C) used when weather is missing. Roughly the
 # 25 deg C PV reference so the temperature feature stays derating-neutral.
 DEFAULT_TEMPERATURE_C = 25.0
@@ -1594,8 +1605,17 @@ def aggregate_capacity_weighted_weather(weather_df: pd.DataFrame, sites: pd.Data
         return weather_df
 
     if "WeatherCluster" in sites.columns:
-        weather_for_merge = weather_df.rename(columns={"SolarSiteKey": "WeatherCluster"})
-        site_weather = sites.merge(weather_for_merge, on="WeatherCluster", how="left")
+        weight_lookup = (
+            sites.dropna(subset=["WeatherCluster"])
+            .assign(SolarCECkW=lambda frame: pd.to_numeric(frame["SolarCECkW"], errors="coerce"))
+            .groupby("WeatherCluster", as_index=False)["SolarCECkW"]
+            .sum()
+        )
+        site_weather = weather_df.rename(columns={"SolarSiteKey": "WeatherCluster"}).merge(
+            weight_lookup,
+            on="WeatherCluster",
+            how="left",
+        )
     else:
         site_weather = weather_df.merge(
             sites[["SolarSiteKey", "SolarCECkW"]],
@@ -1603,11 +1623,44 @@ def aggregate_capacity_weighted_weather(weather_df: pd.DataFrame, sites: pd.Data
             how="left",
         )
 
-    return (
-        site_weather.groupby("IntervalStartDT")
-        .apply(lambda group: weighted_weather_average(group, WEATHER_OUTPUT_COLUMNS))
-        .reset_index()
+    keep_columns = ["IntervalStartDT", "SolarCECkW", *[col for col in WEATHER_OUTPUT_COLUMNS if col in site_weather.columns]]
+    site_weather = site_weather[keep_columns].dropna(subset=["IntervalStartDT"]).copy()
+    if site_weather.empty:
+        return pd.DataFrame(columns=["IntervalStartDT", *WEATHER_OUTPUT_COLUMNS])
+
+    site_weather["IntervalStartDT"] = pd.to_datetime(site_weather["IntervalStartDT"], errors="coerce")
+    site_weather = site_weather.dropna(subset=["IntervalStartDT"])
+    if site_weather.empty:
+        return pd.DataFrame(columns=["IntervalStartDT", *WEATHER_OUTPUT_COLUMNS])
+
+    weights = pd.to_numeric(site_weather.get("SolarCECkW"), errors="coerce").clip(lower=0.0)
+    site_weather["_WeatherWeight"] = weights.fillna(0.0)
+    out = (
+        site_weather[["IntervalStartDT"]]
+        .drop_duplicates()
+        .sort_values("IntervalStartDT")
+        .reset_index(drop=True)
     )
+
+    for column in WEATHER_OUTPUT_COLUMNS:
+        if column not in site_weather.columns:
+            out[column] = np.nan
+            continue
+
+        values = pd.to_numeric(site_weather[column], errors="coerce")
+        valid = values.notna() & site_weather["_WeatherWeight"].gt(0.0)
+        weighted = site_weather.loc[valid, ["IntervalStartDT", "_WeatherWeight"]].copy()
+        weighted["_WeightedValue"] = values.loc[valid] * weighted["_WeatherWeight"]
+        numerator = weighted.groupby("IntervalStartDT", sort=False)["_WeightedValue"].sum()
+        denominator = weighted.groupby("IntervalStartDT", sort=False)["_WeatherWeight"].sum()
+        averaged = (numerator / denominator).replace([np.inf, -np.inf], np.nan)
+        out = out.merge(
+            averaged.rename(column).reset_index(),
+            on="IntervalStartDT",
+            how="left",
+        )
+
+    return out
 
 
 def aggregate_weather_to_hourly(weather_df: pd.DataFrame) -> pd.DataFrame:
@@ -1682,6 +1735,100 @@ def add_performance_features(
     return out
 
 
+def _boolean_column(df: pd.DataFrame, column: str, default: bool = False) -> pd.Series:
+    """
+    Return a nullable-safe boolean view of a dataframe column.
+    """
+    if column not in df.columns:
+        return pd.Series(default, index=df.index, dtype="bool")
+    series = df[column]
+    if pd.api.types.is_bool_dtype(series):
+        return series.fillna(default).astype(bool)
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce").fillna(int(default)).astype(bool)
+    return (
+        series.astype(str)
+        .str.strip()
+        .str.lower()
+        .isin({"1", "true", "t", "yes", "y"})
+    )
+
+
+def _actual_quality_exclusion_mask(df: pd.DataFrame) -> pd.Series:
+    """
+    Identify rows excluded from model scoring/training by actual-data quality flags.
+    """
+    return _boolean_column(df, "SolarBacktestExcluded", default=False)
+
+
+def add_solar_actual_quality_flags(
+    df: pd.DataFrame,
+    actual_kwh_col: str,
+    expected_kwh_col: str,
+    actual_to_expected_ratio_threshold: float,
+    min_expected_kwh: float = DEFAULT_ACTUAL_QUALITY_MIN_EXPECTED_KWH,
+    min_ghi_kwh_m2: float = DEFAULT_ACTUAL_QUALITY_MIN_GHI_KWH_M2,
+    min_clear_sky_index: float = DEFAULT_ACTUAL_QUALITY_MIN_CLEAR_SKY_INDEX,
+    min_bad_hours_per_day: int = DEFAULT_ACTUAL_QUALITY_MIN_BAD_HOURS_PER_DAY,
+) -> pd.DataFrame:
+    """
+    Flag AMI-suppressed actuals that are physically inconsistent with clear-sky solar.
+
+    The rule is intentionally narrow: only high-expected, high-irradiance rows
+    with actuals near zero are flagged, and repeated bad hours mark the full
+    operating day so partial AMI outages do not leak into calibration.
+    """
+    out = df.copy()
+    if out.empty:
+        out["ActualQualityFlag"] = pd.Series(dtype="object")
+        out["SolarBacktestExcluded"] = pd.Series(dtype="bool")
+        out["ActualToExpectedRatio"] = pd.Series(dtype="float64")
+        out["ActualQualityExpected_kWh"] = pd.Series(dtype="float64")
+        out["ActualQualitySuspiciousHour"] = pd.Series(dtype="bool")
+        return out
+
+    out["IntervalStartDT"] = pd.to_datetime(out["IntervalStartDT"])
+    def numeric_series(column: str, default: float = np.nan) -> pd.Series:
+        if column not in out.columns:
+            return pd.Series(default, index=out.index, dtype="float64")
+        return pd.to_numeric(out[column], errors="coerce")
+
+    actual_kwh = numeric_series(actual_kwh_col, default=0.0).fillna(0.0)
+    expected_kwh = numeric_series(expected_kwh_col)
+    ghi = numeric_series("GHI_kWh_per_m2")
+    clear_sky_index = numeric_series("ClearSkyIndex")
+
+    expected_denom = expected_kwh.where(expected_kwh > 0)
+    ratio = (actual_kwh / expected_denom).replace([np.inf, -np.inf], np.nan)
+    high_expected = expected_kwh >= min_expected_kwh
+    high_irradiance = ghi >= min_ghi_kwh_m2
+    clear_sky = clear_sky_index >= min_clear_sky_index
+    suspicious_hour = (
+        high_expected
+        & high_irradiance
+        & clear_sky
+        & ratio.notna()
+        & (ratio <= actual_to_expected_ratio_threshold)
+    )
+
+    dates = out["IntervalStartDT"].dt.date
+    bad_hour_counts = suspicious_hour.groupby(dates).sum()
+    bad_dates = set(bad_hour_counts[bad_hour_counts >= max(1, int(min_bad_hours_per_day))].index)
+    suppressed_day = dates.isin(bad_dates)
+    quality_excluded = suspicious_hour | suppressed_day
+
+    existing_excluded = _actual_quality_exclusion_mask(out)
+    out["SolarBacktestExcluded"] = existing_excluded | quality_excluded
+    if "ActualQualityFlag" not in out.columns:
+        out["ActualQualityFlag"] = ACTUAL_QUALITY_OK
+    out["ActualQualityFlag"] = out["ActualQualityFlag"].fillna(ACTUAL_QUALITY_OK).astype(str)
+    out.loc[quality_excluded, "ActualQualityFlag"] = ACTUAL_QUALITY_AMI_SUPPRESSED
+    out["ActualToExpectedRatio"] = ratio
+    out["ActualQualityExpected_kWh"] = expected_kwh
+    out["ActualQualitySuspiciousHour"] = suspicious_hour.fillna(False).astype(bool)
+    return out
+
+
 def calibrate_performance_ratio(
     rec_intervals: pd.DataFrame,
     weather_df: pd.DataFrame,
@@ -1741,6 +1888,8 @@ def train_performance_model(
     max_performance_ratio: float = DEFAULT_MAX_PERFORMANCE_RATIO,
     min_training_available_kwh: float = 25.0,
     min_training_rows: int = 24,
+    use_energy_weighting: bool = True,
+    exclude_suppressed_actuals: bool = True,
 ) -> PerformanceModel:
     """
     Train a bounded model that predicts export performance ratio from weather and seasonality.
@@ -1778,6 +1927,25 @@ def train_performance_model(
         (training_data["ModeledAvailable_kWh"] >= min_training_available_kwh)
         & training_data["Export_kWh"].notna()
     ].copy()
+    if exclude_suppressed_actuals and not training_data.empty:
+        training_data = add_solar_actual_quality_flags(
+            training_data,
+            actual_kwh_col="Export_kWh",
+            expected_kwh_col="ModeledAvailable_kWh",
+            actual_to_expected_ratio_threshold=DEFAULT_ACTUAL_QUALITY_AVAILABLE_RATIO_THRESHOLD,
+        )
+        excluded_rows = int(_actual_quality_exclusion_mask(training_data).sum())
+        if excluded_rows:
+            excluded_days = training_data.loc[
+                _actual_quality_exclusion_mask(training_data),
+                "IntervalStartDT",
+            ].dt.date.nunique()
+            logging.info(
+                "Excluded %s AMI-suppressed daylight rows across %s days from performance-ratio training.",
+                excluded_rows,
+                excluded_days,
+            )
+            training_data = training_data[~_actual_quality_exclusion_mask(training_data)].copy()
 
     if training_data.empty:
         logging.warning(
@@ -1811,7 +1979,10 @@ def train_performance_model(
     )
     X = training_data[PERFORMANCE_FEATURE_COLUMNS].fillna(0.0)
     y = training_data["PerformanceRatio"]
-    model.fit(X, y)
+    sample_weight = None
+    if use_energy_weighting:
+        sample_weight = training_data["Export_kWh"].clip(lower=min_training_available_kwh)
+    model.fit(X, y, sample_weight=sample_weight)
 
     fitted = pd.Series(model.predict(X), index=training_data.index).clip(0.0, max_performance_ratio)
     fitted_kwh = training_data["ModeledAvailable_kWh"] * fitted
@@ -1822,9 +1993,11 @@ def train_performance_model(
         else np.nan
     )
     logging.info(
-        "Trained performance model on %s hourly daylight rows; median ratio %.3f, in-sample daylight WMAPE %.2f%%",
+        "Trained performance model on %s hourly daylight rows; median ratio %.3f, "
+        "energy weighting %s, in-sample daylight WMAPE %.2f%%",
         len(training_data),
         learned_fallback,
+        "enabled" if use_energy_weighting else "disabled",
         wmape * 100 if pd.notna(wmape) else float("nan"),
     )
     return PerformanceModel(model, learned_fallback, PERFORMANCE_FEATURE_COLUMNS, max_performance_ratio)
@@ -1957,6 +2130,13 @@ def build_seasonal_calibration_factors(
         (calibration_data["Actual_kWh"] >= 0)
         & (calibration_data["ResidualForecast_kWh"] > 0)
     ].copy()
+    excluded_mask = _actual_quality_exclusion_mask(calibration_data)
+    if bool(excluded_mask.any()):
+        logging.info(
+            "Excluded %s AMI-suppressed daylight rows from seasonal calibration factors.",
+            int(excluded_mask.sum()),
+        )
+        calibration_data = calibration_data[~excluded_mask].copy()
     if calibration_data.empty:
         logging.info("Seasonal calibration skipped; no positive residual forecast rows are available.")
         return {}, 1.0
@@ -2018,6 +2198,13 @@ def train_residual_calibration_model(
         (training_data["Actual_kWh"] >= 0)
         & (training_data["Forecast_kWh"] >= min_training_forecast_kwh)
     ].copy()
+    excluded_mask = _actual_quality_exclusion_mask(training_data)
+    if bool(excluded_mask.any()):
+        logging.info(
+            "Excluded %s AMI-suppressed daylight rows from residual calibration training.",
+            int(excluded_mask.sum()),
+        )
+        training_data = training_data[~excluded_mask].copy()
     if training_data.empty:
         logging.info("Residual calibration skipped; no daylight forecast rows met the training threshold.")
         return model
@@ -2550,6 +2737,7 @@ def build_hourly_backtest(
     rec_interval_df: pd.DataFrame,
     interval_backtest_forecast: pd.DataFrame,
     total_capacity_kw: float,
+    apply_actual_quality_filter: bool = True,
 ) -> pd.DataFrame:
     """
     Compare hourly model forecast against REC/NET-derived actual export.
@@ -2606,6 +2794,23 @@ def build_hourly_backtest(
     backtest["BaseError_kWh"] = backtest["BaseForecast_kWh"] - backtest["Actual_kWh"]
     backtest["BaseAbsError_MW"] = backtest["BaseError_MW"].abs()
     backtest["BaseAbsError_kWh"] = backtest["BaseError_kWh"].abs()
+    backtest["ActualQualityExpected_kWh"] = backtest[["Forecast_kWh", "BaseForecast_kWh"]].max(axis=1)
+    if apply_actual_quality_filter:
+        backtest = add_solar_actual_quality_flags(
+            backtest,
+            actual_kwh_col="Actual_kWh",
+            expected_kwh_col="ActualQualityExpected_kWh",
+            actual_to_expected_ratio_threshold=DEFAULT_ACTUAL_QUALITY_FORECAST_RATIO_THRESHOLD,
+        )
+    else:
+        backtest["ActualQualityFlag"] = ACTUAL_QUALITY_OK
+        backtest["SolarBacktestExcluded"] = False
+        backtest["ActualToExpectedRatio"] = (
+            backtest["Actual_kWh"] / backtest["ActualQualityExpected_kWh"].where(
+                backtest["ActualQualityExpected_kWh"] > 0
+            )
+        ).replace([np.inf, -np.inf], np.nan)
+        backtest["ActualQualitySuspiciousHour"] = False
     backtest["APE"] = pd.NA
     backtest["BaseAPE"] = pd.NA
     positive_actual_mask = backtest["Actual_kWh"] > 0
@@ -2650,6 +2855,71 @@ def calculate_backtest_summary(backtest_df: pd.DataFrame) -> pd.DataFrame:
                 "ActualPeak_MW": pd.NA,
                 "ForecastPeak_MW": pd.NA,
                 "BaseForecastPeak_MW": pd.NA,
+                "RawIntervals": 0,
+                "ExcludedIntervals": 0,
+                "ExcludedActual_MWh": 0.0,
+                "ExcludedForecast_MWh": 0.0,
+                "RawActual_MWh": 0.0,
+                "RawForecast_MWh": 0.0,
+                "RawBaseForecast_MWh": 0.0,
+                "RawWMAPE": pd.NA,
+                "RawBaseWMAPE": pd.NA,
+            }]
+        )
+
+    raw_backtest_df = backtest_df.copy()
+    excluded_mask = _actual_quality_exclusion_mask(raw_backtest_df)
+    excluded_df = raw_backtest_df[excluded_mask].copy()
+    backtest_df = raw_backtest_df[~excluded_mask].copy()
+
+    def wmape_for(data: pd.DataFrame, forecast_col: str, actual_col: str = "Actual_kWh") -> object:
+        actual_sum = data[actual_col].sum()
+        if actual_sum <= 0:
+            return pd.NA
+        return (data[forecast_col] - data[actual_col]).abs().sum() / actual_sum
+
+    raw_actual_mwh = raw_backtest_df["Actual_kWh"].sum() / 1000.0
+    raw_forecast_mwh = raw_backtest_df["Forecast_kWh"].sum() / 1000.0
+    raw_base_forecast_mwh = raw_backtest_df["BaseForecast_kWh"].sum() / 1000.0
+    excluded_actual_mwh = excluded_df["Actual_kWh"].sum() / 1000.0 if not excluded_df.empty else 0.0
+    excluded_forecast_mwh = excluded_df["Forecast_kWh"].sum() / 1000.0 if not excluded_df.empty else 0.0
+    raw_wmape = wmape_for(raw_backtest_df, "Forecast_kWh")
+    raw_base_wmape = wmape_for(raw_backtest_df, "BaseForecast_kWh")
+
+    if backtest_df.empty:
+        return pd.DataFrame(
+            [{
+                "Start": raw_backtest_df["IntervalStartDT"].min(),
+                "End": raw_backtest_df["IntervalStartDT"].max(),
+                "Intervals": 0,
+                "Actual_MWh": 0.0,
+                "Forecast_MWh": 0.0,
+                "BaseForecast_MWh": 0.0,
+                "Bias_MWh": 0.0,
+                "BaseBias_MWh": 0.0,
+                "BiasPct": pd.NA,
+                "BaseBiasPct": pd.NA,
+                "MAE_MW": pd.NA,
+                "BaseMAE_MW": pd.NA,
+                "RMSE_MW": pd.NA,
+                "BaseRMSE_MW": pd.NA,
+                "WMAPE": pd.NA,
+                "BaseWMAPE": pd.NA,
+                "WMAPEImprovementPct": pd.NA,
+                "MAPE": pd.NA,
+                "BaseMAPE": pd.NA,
+                "ActualPeak_MW": pd.NA,
+                "ForecastPeak_MW": pd.NA,
+                "BaseForecastPeak_MW": pd.NA,
+                "RawIntervals": len(raw_backtest_df),
+                "ExcludedIntervals": int(excluded_mask.sum()),
+                "ExcludedActual_MWh": excluded_actual_mwh,
+                "ExcludedForecast_MWh": excluded_forecast_mwh,
+                "RawActual_MWh": raw_actual_mwh,
+                "RawForecast_MWh": raw_forecast_mwh,
+                "RawBaseForecast_MWh": raw_base_forecast_mwh,
+                "RawWMAPE": raw_wmape,
+                "RawBaseWMAPE": raw_base_wmape,
             }]
         )
 
@@ -2699,8 +2969,489 @@ def calculate_backtest_summary(backtest_df: pd.DataFrame) -> pd.DataFrame:
             "ActualPeak_MW": backtest_df["Actual_MW"].max(),
             "ForecastPeak_MW": backtest_df["Forecast_MW"].max(),
             "BaseForecastPeak_MW": backtest_df["BaseForecast_MW"].max(),
+            "RawIntervals": len(raw_backtest_df),
+            "ExcludedIntervals": int(excluded_mask.sum()),
+            "ExcludedActual_MWh": excluded_actual_mwh,
+            "ExcludedForecast_MWh": excluded_forecast_mwh,
+            "RawActual_MWh": raw_actual_mwh,
+            "RawForecast_MWh": raw_forecast_mwh,
+            "RawBaseForecast_MWh": raw_base_forecast_mwh,
+            "RawWMAPE": raw_wmape,
+            "RawBaseWMAPE": raw_base_wmape,
         }]
     )
+
+
+def _solar_metric_row(
+    data: pd.DataFrame,
+    slice_name: str,
+    slice_group: str,
+    slice_value: object,
+) -> dict:
+    """
+    Build one solar backtest metrics row for a supplied slice.
+    """
+    row = {
+        "Slice": slice_name,
+        "SliceGroup": slice_group,
+        "SliceValue": slice_value,
+        "N": int(len(data)),
+        "Actual_MWh": np.nan,
+        "Forecast_MWh": np.nan,
+        "BaseForecast_MWh": np.nan,
+        "Bias_MWh": np.nan,
+        "BaseBias_MWh": np.nan,
+        "BiasPct": np.nan,
+        "BaseBiasPct": np.nan,
+        "MAE_MW": np.nan,
+        "BaseMAE_MW": np.nan,
+        "RMSE_MW": np.nan,
+        "BaseRMSE_MW": np.nan,
+        "WMAPE_PCT": np.nan,
+        "BaseWMAPE_PCT": np.nan,
+        "WMAPEImprovementPct": np.nan,
+        "MAPE_PCT": np.nan,
+        "BaseMAPE_PCT": np.nan,
+        "Underforecast_Rate_PCT": np.nan,
+        "P90_AbsError_MW": np.nan,
+        "Max_Underforecast_MW": np.nan,
+        "Max_Overforecast_MW": np.nan,
+        "ActualPeak_MW": np.nan,
+        "ForecastPeak_MW": np.nan,
+        "BaseForecastPeak_MW": np.nan,
+        "ForecastAtActualPeak_MW": np.nan,
+        "UnderforecastAtActualPeak_MW": np.nan,
+    }
+    if data.empty:
+        return row
+
+    def numeric_column(column: str) -> pd.Series:
+        if column not in data.columns:
+            return pd.Series(0.0, index=data.index, dtype="float64")
+        return pd.to_numeric(data[column], errors="coerce").fillna(0.0)
+
+    actual_kwh = numeric_column("Actual_kWh")
+    forecast_kwh = numeric_column("Forecast_kWh")
+    base_forecast_kwh = numeric_column("BaseForecast_kWh")
+    actual_mw = numeric_column("Actual_MW")
+    forecast_mw = numeric_column("Forecast_MW")
+    base_forecast_mw = numeric_column("BaseForecast_MW")
+    error_mw = forecast_mw - actual_mw
+    base_error_mw = base_forecast_mw - actual_mw
+    error_kwh = forecast_kwh - actual_kwh
+    base_error_kwh = base_forecast_kwh - actual_kwh
+    abs_error_mw = error_mw.abs()
+    base_abs_error_mw = base_error_mw.abs()
+    actual_kwh_sum = float(actual_kwh.sum())
+    forecast_kwh_sum = float(forecast_kwh.sum())
+    base_forecast_kwh_sum = float(base_forecast_kwh.sum())
+    bias_kwh = forecast_kwh_sum - actual_kwh_sum
+    base_bias_kwh = base_forecast_kwh_sum - actual_kwh_sum
+    wmape = abs(error_kwh).sum() / actual_kwh_sum if actual_kwh_sum > 0 else np.nan
+    base_wmape = abs(base_error_kwh).sum() / actual_kwh_sum if actual_kwh_sum > 0 else np.nan
+    wmape_improvement = (
+        (base_wmape - wmape) / base_wmape
+        if pd.notna(base_wmape) and base_wmape > 0 and pd.notna(wmape)
+        else np.nan
+    )
+    positive_actual = actual_kwh > 0
+    mape = (abs(error_kwh[positive_actual]) / actual_kwh[positive_actual]).mean() if positive_actual.any() else np.nan
+    base_mape = (
+        (abs(base_error_kwh[positive_actual]) / actual_kwh[positive_actual]).mean()
+        if positive_actual.any()
+        else np.nan
+    )
+    actual_peak = float(actual_mw.max()) if len(actual_mw) else np.nan
+    if pd.notna(actual_peak) and len(actual_mw):
+        actual_peak_index = actual_mw.idxmax()
+        forecast_at_actual_peak = float(forecast_mw.loc[actual_peak_index])
+        under_at_actual_peak = actual_peak - forecast_at_actual_peak
+    else:
+        forecast_at_actual_peak = np.nan
+        under_at_actual_peak = np.nan
+
+    row.update(
+        {
+            "Actual_MWh": actual_kwh_sum / 1000.0,
+            "Forecast_MWh": forecast_kwh_sum / 1000.0,
+            "BaseForecast_MWh": base_forecast_kwh_sum / 1000.0,
+            "Bias_MWh": bias_kwh / 1000.0,
+            "BaseBias_MWh": base_bias_kwh / 1000.0,
+            "BiasPct": bias_kwh / actual_kwh_sum if actual_kwh_sum > 0 else np.nan,
+            "BaseBiasPct": base_bias_kwh / actual_kwh_sum if actual_kwh_sum > 0 else np.nan,
+            "MAE_MW": float(abs_error_mw.mean()),
+            "BaseMAE_MW": float(base_abs_error_mw.mean()),
+            "RMSE_MW": math.sqrt(float((error_mw ** 2).mean())),
+            "BaseRMSE_MW": math.sqrt(float((base_error_mw ** 2).mean())),
+            "WMAPE_PCT": wmape * 100.0 if pd.notna(wmape) else np.nan,
+            "BaseWMAPE_PCT": base_wmape * 100.0 if pd.notna(base_wmape) else np.nan,
+            "WMAPEImprovementPct": wmape_improvement * 100.0 if pd.notna(wmape_improvement) else np.nan,
+            "MAPE_PCT": mape * 100.0 if pd.notna(mape) else np.nan,
+            "BaseMAPE_PCT": base_mape * 100.0 if pd.notna(base_mape) else np.nan,
+            "Underforecast_Rate_PCT": float((error_mw < 0).mean() * 100.0),
+            "P90_AbsError_MW": float(abs_error_mw.quantile(0.90)),
+            "Max_Underforecast_MW": float((actual_mw - forecast_mw).max()),
+            "Max_Overforecast_MW": float((forecast_mw - actual_mw).max()),
+            "ActualPeak_MW": actual_peak,
+            "ForecastPeak_MW": float(forecast_mw.max()),
+            "BaseForecastPeak_MW": float(base_forecast_mw.max()),
+            "ForecastAtActualPeak_MW": forecast_at_actual_peak,
+            "UnderforecastAtActualPeak_MW": under_at_actual_peak,
+        }
+    )
+    return row
+
+
+def _append_grouped_solar_metrics(
+    rows: list[dict],
+    data: pd.DataFrame,
+    slice_name: str,
+    group_col: str,
+    mask: Optional[pd.Series] = None,
+) -> None:
+    """
+    Append solar metrics for every value of a grouping column.
+    """
+    if group_col not in data.columns:
+        return
+    grouped_data = data if mask is None else data[mask].copy()
+    if grouped_data.empty:
+        return
+    for value, group in grouped_data.groupby(group_col, dropna=False, observed=False):
+        rows.append(_solar_metric_row(group, f"{slice_name}:{value}", group_col, value))
+
+
+def calculate_solar_backtest_diagnostic_metrics(
+    backtest_df: pd.DataFrame,
+    daylight_threshold_mw: float = DEFAULT_SOLAR_BACKTEST_DAYLIGHT_THRESHOLD_MW,
+) -> pd.DataFrame:
+    """
+    Build slice-level diagnostics for the solar hourly backtest.
+    """
+    rows: list[dict] = []
+    if backtest_df.empty:
+        return pd.DataFrame([_solar_metric_row(backtest_df, "Overall", "all", "all")])
+
+    work = backtest_df.copy()
+    work["IntervalStartDT"] = pd.to_datetime(work["IntervalStartDT"])
+    for column in [
+        "Actual_MW",
+        "Forecast_MW",
+        "BaseForecast_MW",
+        "Actual_kWh",
+        "Forecast_kWh",
+        "BaseForecast_kWh",
+        "CloudCoverPct",
+        "ClearSkyIndex",
+        "GHI_kWh_per_m2",
+    ]:
+        if column not in work.columns:
+            work[column] = np.nan
+        work[column] = pd.to_numeric(work[column], errors="coerce")
+
+    excluded_mask = _actual_quality_exclusion_mask(work)
+    raw_work = work.copy()
+    if bool(excluded_mask.any()):
+        rows.append(_solar_metric_row(raw_work, "RawOverall", "all", "all"))
+        rows.append(
+            _solar_metric_row(
+                raw_work[excluded_mask],
+                "ActualQualityExcluded",
+                "ActualQualityFlag",
+                ACTUAL_QUALITY_AMI_SUPPRESSED,
+            )
+        )
+        work = raw_work[~excluded_mask].copy()
+    if work.empty:
+        rows.append(_solar_metric_row(work, "Overall", "all", "all"))
+        return pd.DataFrame(rows)
+
+    work["Hour"] = work["IntervalStartDT"].dt.hour
+    work["Month"] = work["IntervalStartDT"].dt.to_period("M").astype(str)
+    daylight_mask = work["Actual_MW"].fillna(0.0) > daylight_threshold_mw
+    active_mask = daylight_mask | (work["Forecast_MW"].fillna(0.0) > daylight_threshold_mw)
+    peak_hour_mask = daylight_mask & work["Hour"].between(11, 15, inclusive="both")
+    actual_peak = work.loc[daylight_mask, "Actual_MW"].max() if daylight_mask.any() else np.nan
+    if pd.notna(actual_peak) and actual_peak > 0:
+        high_output_mask = daylight_mask & (work["Actual_MW"] >= actual_peak * 0.75)
+    else:
+        high_output_mask = pd.Series(False, index=work.index)
+
+    rows.append(_solar_metric_row(work, "Overall", "all", "all"))
+    rows.append(_solar_metric_row(work[daylight_mask], "DaylightActual", "Actual_MW", f">{daylight_threshold_mw:g}"))
+    rows.append(_solar_metric_row(work[active_mask], "ActiveSolar", "ActualOrForecast_MW", f">{daylight_threshold_mw:g}"))
+    rows.append(_solar_metric_row(work[peak_hour_mask], "PeakSolarHours11to15", "Hour", "11-15"))
+    rows.append(_solar_metric_row(work[high_output_mask], "HighOutputActualGE75PctPeak", "ActualPeakShare", ">=0.75"))
+
+    if "CloudCoverPct" in work.columns:
+        work["CloudCoverBucket"] = pd.cut(
+            work["CloudCoverPct"],
+            bins=[-np.inf, 20.0, 50.0, 80.0, np.inf],
+            labels=["0-20", "20-50", "50-80", "80-100"],
+        )
+    if "ClearSkyIndex" in work.columns:
+        work["ClearSkyIndexBucket"] = pd.cut(
+            work["ClearSkyIndex"],
+            bins=[-np.inf, 0.25, 0.50, 0.75, 1.00, np.inf],
+            labels=["0-0.25", "0.25-0.50", "0.50-0.75", "0.75-1.00", ">1.00"],
+        )
+    if "GHI_kWh_per_m2" in work.columns:
+        work["GHIBucket"] = pd.cut(
+            work["GHI_kWh_per_m2"],
+            bins=[-np.inf, 0.10, 0.30, 0.50, 0.70, np.inf],
+            labels=["0-0.10", "0.10-0.30", "0.30-0.50", "0.50-0.70", ">0.70"],
+        )
+
+    _append_grouped_solar_metrics(rows, work, "Month", "Month")
+    _append_grouped_solar_metrics(rows, work, "Hour", "Hour", daylight_mask)
+    _append_grouped_solar_metrics(rows, work, "CloudCover", "CloudCoverBucket", active_mask)
+    _append_grouped_solar_metrics(rows, work, "ClearSkyIndex", "ClearSkyIndexBucket", active_mask)
+    _append_grouped_solar_metrics(rows, work, "GHI", "GHIBucket", active_mask)
+    return pd.DataFrame(rows)
+
+
+def build_solar_backtest_top_errors(
+    backtest_df: pd.DataFrame,
+    top_n: int = DEFAULT_SOLAR_BACKTEST_TOP_ERROR_COUNT,
+    daylight_threshold_mw: float = DEFAULT_SOLAR_BACKTEST_DAYLIGHT_THRESHOLD_MW,
+) -> pd.DataFrame:
+    """
+    Return ranked underforecast and overforecast hours for solar backtest review.
+    """
+    if backtest_df.empty or top_n <= 0:
+        return pd.DataFrame()
+
+    work = backtest_df.copy()
+    work["IntervalStartDT"] = pd.to_datetime(work["IntervalStartDT"])
+    for column in ["Actual_MW", "Forecast_MW", "BaseForecast_MW", "Error_MW", "AbsError_MW"]:
+        if column not in work.columns:
+            work[column] = np.nan
+        work[column] = pd.to_numeric(work[column], errors="coerce")
+    work["Error_MW"] = work["Error_MW"].fillna(work["Forecast_MW"] - work["Actual_MW"])
+    work["AbsError_MW"] = work["AbsError_MW"].fillna(work["Error_MW"].abs())
+    work["Underforecast_MW"] = work["Actual_MW"] - work["Forecast_MW"]
+    work["Overforecast_MW"] = work["Forecast_MW"] - work["Actual_MW"]
+    active_mask = (
+        (work["Actual_MW"].fillna(0.0) > daylight_threshold_mw)
+        | (work["Forecast_MW"].fillna(0.0) > daylight_threshold_mw)
+    )
+    work = work[active_mask].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    review_columns = [
+        "IntervalStartDT",
+        "HE",
+        "Actual_MW",
+        "Forecast_MW",
+        "BaseForecast_MW",
+        "Error_MW",
+        "AbsError_MW",
+        "Underforecast_MW",
+        "Overforecast_MW",
+        "WeatherGHI_Wm2",
+        "GHI_kWh_per_m2",
+        "ClearSkyGHI_Wm2",
+        "ClearSkyIndex",
+        "CloudCoverPct",
+        "CloudCoverLowPct",
+        "CloudCoverMidPct",
+        "CloudCoverHighPct",
+        "PerformanceRatio",
+        "ResidualCalibrationFactor",
+        "SeasonalCalibrationFactor",
+        "TotalCalibrationFactor",
+        "ActualQualityFlag",
+        "SolarBacktestExcluded",
+        "ActualToExpectedRatio",
+        "ActualQualityExpected_kWh",
+        "ActualQualitySuspiciousHour",
+        "ForecastSource",
+    ]
+    for column in review_columns:
+        if column not in work.columns:
+            work[column] = np.nan
+
+    under = work.sort_values("Underforecast_MW", ascending=False).head(top_n).copy()
+    under.insert(0, "ErrorType", "Underforecast")
+    under.insert(1, "Rank", range(1, len(under) + 1))
+    over = work.sort_values("Overforecast_MW", ascending=False).head(top_n).copy()
+    over.insert(0, "ErrorType", "Overforecast")
+    over.insert(1, "Rank", range(1, len(over) + 1))
+    return pd.concat([under, over], ignore_index=True)[["ErrorType", "Rank", *review_columns]]
+
+
+def build_solar_temporal_holdout_backtest(
+    rec_interval_df: pd.DataFrame,
+    weather_df: pd.DataFrame,
+    capacity_kw: float,
+    fallback_ratio: float,
+    latitude: float,
+    longitude: float,
+    timezone_name: str,
+    min_solar_elevation: float,
+    daily_active_capacity: Optional[pd.DataFrame],
+    max_performance_ratio: float,
+    use_performance_model_energy_weighting: bool,
+    intrahour_shape_method: str,
+    shape_quantile: float,
+    peak_hourly_kwh_quantile: float,
+    holdout_days: int,
+    residual_calibration_enabled: bool,
+    residual_lower_bound: float,
+    residual_upper_bound: float,
+    residual_min_forecast_kwh: float,
+    residual_min_training_rows: int,
+    residual_energy_weighting: bool,
+    seasonal_calibration_enabled: bool,
+    seasonal_prior_mwh: float,
+    seasonal_lower_bound: float,
+    seasonal_upper_bound: float,
+    actual_quality_filter_enabled: bool = True,
+    daylight_threshold_mw: float = DEFAULT_SOLAR_BACKTEST_DAYLIGHT_THRESHOLD_MW,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Train solar models before the holdout window and score the final period.
+    """
+    status_columns = ["Evaluation", "Status", "Reason", "HoldoutDays", "HoldoutStart", "TrainRows", "HoldoutRows"]
+
+    def status_frame(status: str, reason: str, holdout_start: object = pd.NaT) -> pd.DataFrame:
+        return pd.DataFrame(
+            [{
+                "Evaluation": "temporal_holdout",
+                "Status": status,
+                "Reason": reason,
+                "HoldoutDays": holdout_days,
+                "HoldoutStart": holdout_start,
+                "TrainRows": 0,
+                "HoldoutRows": 0,
+            }],
+            columns=status_columns,
+        )
+
+    if holdout_days <= 0:
+        return status_frame("skipped", "holdout_days <= 0"), pd.DataFrame()
+    if rec_interval_df.empty or weather_df.empty:
+        return status_frame("skipped", "missing REC intervals or weather rows"), pd.DataFrame()
+
+    rec = rec_interval_df.copy()
+    weather = weather_df.copy()
+    rec["IntervalStartDT"] = pd.to_datetime(rec["IntervalStartDT"])
+    weather["IntervalStartDT"] = pd.to_datetime(weather["IntervalStartDT"])
+    max_timestamp = rec["IntervalStartDT"].max()
+    if pd.isna(max_timestamp):
+        return status_frame("skipped", "REC intervals have no valid timestamps"), pd.DataFrame()
+
+    holdout_start = max_timestamp.normalize() - pd.Timedelta(days=holdout_days - 1)
+    train_rec = rec[rec["IntervalStartDT"] < holdout_start].copy()
+    holdout_rec = rec[rec["IntervalStartDT"] >= holdout_start].copy()
+    train_weather = weather[weather["IntervalStartDT"] < holdout_start].copy()
+    holdout_weather = weather[weather["IntervalStartDT"] >= holdout_start].copy()
+    if train_rec.empty or holdout_rec.empty or train_weather.empty or holdout_weather.empty:
+        return status_frame("skipped", "insufficient train or holdout rows", holdout_start), pd.DataFrame()
+
+    holdout_intrahour_shape = build_intrahour_production_shape(
+        train_rec,
+        "Export_kWh",
+        method=intrahour_shape_method,
+        quantile=shape_quantile,
+    )
+    holdout_model = train_performance_model(
+        rec_intervals=train_rec,
+        weather_df=train_weather,
+        capacity_kw=capacity_kw,
+        fallback_ratio=fallback_ratio,
+        latitude=latitude,
+        longitude=longitude,
+        timezone_name=timezone_name,
+        daily_active_capacity=daily_active_capacity,
+        max_performance_ratio=max_performance_ratio,
+        use_energy_weighting=use_performance_model_energy_weighting,
+        exclude_suppressed_actuals=actual_quality_filter_enabled,
+    )
+    train_interval_forecast = build_interval_forecast(
+        weather_df=train_weather,
+        intrahour_shape=holdout_intrahour_shape,
+        capacity_kw=capacity_kw,
+        model=holdout_model,
+        latitude=latitude,
+        longitude=longitude,
+        timezone_name=timezone_name,
+        min_solar_elevation=min_solar_elevation,
+        forecast_source="holdout_train",
+        daily_active_capacity=daily_active_capacity,
+        peak_hourly_kwh_quantile=peak_hourly_kwh_quantile,
+    )
+    train_backtest = build_hourly_backtest(
+        rec_interval_df=train_rec,
+        interval_backtest_forecast=train_interval_forecast,
+        total_capacity_kw=capacity_kw,
+        apply_actual_quality_filter=actual_quality_filter_enabled,
+    )
+    residual_model = identity_residual_calibration_model(
+        lower_bound=residual_lower_bound,
+        upper_bound=residual_upper_bound,
+    )
+    if residual_calibration_enabled:
+        residual_model = train_residual_calibration_model(
+            backtest_df=train_backtest,
+            total_capacity_kw=capacity_kw,
+            latitude=latitude,
+            longitude=longitude,
+            timezone_name=timezone_name,
+            lower_bound=residual_lower_bound,
+            upper_bound=residual_upper_bound,
+            min_training_forecast_kwh=residual_min_forecast_kwh,
+            min_training_rows=residual_min_training_rows,
+            use_energy_weighting=residual_energy_weighting,
+            use_seasonal_calibration=seasonal_calibration_enabled,
+            seasonal_prior_mwh=seasonal_prior_mwh,
+            seasonal_lower_bound=seasonal_lower_bound,
+            seasonal_upper_bound=seasonal_upper_bound,
+        )
+
+    holdout_interval_forecast = build_interval_forecast(
+        weather_df=holdout_weather,
+        intrahour_shape=holdout_intrahour_shape,
+        capacity_kw=capacity_kw,
+        model=holdout_model,
+        latitude=latitude,
+        longitude=longitude,
+        timezone_name=timezone_name,
+        min_solar_elevation=min_solar_elevation,
+        forecast_source="holdout",
+        daily_active_capacity=daily_active_capacity,
+        peak_hourly_kwh_quantile=peak_hourly_kwh_quantile,
+    )
+    if residual_calibration_enabled:
+        holdout_interval_forecast = apply_residual_calibration(
+            interval_forecast=holdout_interval_forecast,
+            calibration_model=residual_model,
+            total_capacity_kw=capacity_kw,
+            latitude=latitude,
+            longitude=longitude,
+            timezone_name=timezone_name,
+        )
+        holdout_interval_forecast["ForecastSource"] = "holdout_calibrated"
+
+    holdout_hourly = build_hourly_backtest(
+        rec_interval_df=holdout_rec,
+        interval_backtest_forecast=holdout_interval_forecast,
+        total_capacity_kw=capacity_kw,
+        apply_actual_quality_filter=actual_quality_filter_enabled,
+    )
+    scorecard = calculate_solar_backtest_diagnostic_metrics(
+        holdout_hourly,
+        daylight_threshold_mw=daylight_threshold_mw,
+    )
+    scorecard.insert(0, "Evaluation", "temporal_holdout")
+    scorecard.insert(1, "Status", "completed")
+    scorecard.insert(2, "Reason", "")
+    scorecard.insert(3, "HoldoutDays", holdout_days)
+    scorecard.insert(4, "HoldoutStart", holdout_start)
+    scorecard.insert(5, "TrainRows", len(train_rec))
+    scorecard.insert(6, "HoldoutRows", len(holdout_rec))
+    return scorecard, holdout_hourly
 
 
 # =============================================================================
@@ -2755,6 +3506,12 @@ def run_forecaster(args: argparse.Namespace) -> None:
         raise ValueError("--residual-calibration-min-rows must be greater than 0.")
     if args.residual_calibration_min_forecast_kwh < 0:
         raise ValueError("--residual-calibration-min-forecast-kwh must be greater than or equal to 0.")
+    if args.solar_backtest_daylight_threshold_mw < 0:
+        raise ValueError("--solar-backtest-daylight-threshold-mw must be greater than or equal to 0.")
+    if args.solar_backtest_top_error_count < 0:
+        raise ValueError("--solar-backtest-top-error-count must be greater than or equal to 0.")
+    if args.solar_backtest_holdout_days < 0:
+        raise ValueError("--solar-backtest-holdout-days must be greater than or equal to 0.")
     if not (0 < args.residual_calibration_lower_bound <= args.residual_calibration_upper_bound):
         raise ValueError(
             "--residual-calibration-lower-bound must be greater than 0 and less than or equal to "
@@ -2905,6 +3662,8 @@ def run_forecaster(args: argparse.Namespace) -> None:
                 timezone_name=args.timezone,
                 daily_active_capacity=daily_active_capacity,
                 max_performance_ratio=args.performance_ratio_upper_bound,
+                use_energy_weighting=args.performance_model_energy_weighting,
+                exclude_suppressed_actuals=args.actual_quality_filter,
             )
             calibration_interval_forecast = pd.DataFrame()
             calibration_backtest_hourly = pd.DataFrame()
@@ -2928,6 +3687,7 @@ def run_forecaster(args: argparse.Namespace) -> None:
                     rec_interval_df=rec_interval_df,
                     interval_backtest_forecast=calibration_interval_forecast,
                     total_capacity_kw=total_capacity_kw,
+                    apply_actual_quality_filter=args.actual_quality_filter,
                 )
 
             if args.residual_calibration:
@@ -2969,6 +3729,7 @@ def run_forecaster(args: argparse.Namespace) -> None:
                     rec_interval_df=rec_interval_df,
                     interval_backtest_forecast=interval_backtest_forecast,
                     total_capacity_kw=total_capacity_kw,
+                    apply_actual_quality_filter=args.actual_quality_filter,
                 )
                 backtest_summary = calculate_backtest_summary(backtest_hourly)
                 backtest_hourly[
@@ -3010,16 +3771,74 @@ def run_forecaster(args: argparse.Namespace) -> None:
                         "SeasonalCalibrationFactor",
                         "TotalCalibrationFactor",
                         "SameDayCorrectionFactor",
+                        "ActualQualityFlag",
+                        "SolarBacktestExcluded",
+                        "ActualToExpectedRatio",
+                        "ActualQualityExpected_kWh",
+                        "ActualQualitySuspiciousHour",
                         "BacktestForecast",
                         "ForecastSource",
                     ]
                 ].to_csv(args.backtest_hourly_output, index=False)
                 backtest_summary.to_csv(args.backtest_summary_output, index=False)
+                diagnostics = calculate_solar_backtest_diagnostic_metrics(
+                    backtest_hourly,
+                    daylight_threshold_mw=args.solar_backtest_daylight_threshold_mw,
+                )
+                Path(args.solar_backtest_diagnostics_output).parent.mkdir(parents=True, exist_ok=True)
+                diagnostics.to_csv(args.solar_backtest_diagnostics_output, index=False)
+                top_errors = build_solar_backtest_top_errors(
+                    backtest_hourly,
+                    top_n=args.solar_backtest_top_error_count,
+                    daylight_threshold_mw=args.solar_backtest_daylight_threshold_mw,
+                )
+                Path(args.solar_backtest_top_errors_output).parent.mkdir(parents=True, exist_ok=True)
+                top_errors.to_csv(args.solar_backtest_top_errors_output, index=False)
+                if args.solar_backtest_holdout_days > 0:
+                    logging.info(
+                        "Running %s-day temporal solar holdout backtest",
+                        args.solar_backtest_holdout_days,
+                    )
+                    holdout_scorecard, holdout_hourly = build_solar_temporal_holdout_backtest(
+                        rec_interval_df=rec_interval_df,
+                        weather_df=calibration_weather,
+                        capacity_kw=total_capacity_kw,
+                        fallback_ratio=args.performance_ratio,
+                        latitude=args.latitude,
+                        longitude=args.longitude,
+                        timezone_name=args.timezone,
+                        min_solar_elevation=args.min_solar_elevation,
+                        daily_active_capacity=daily_active_capacity,
+                        max_performance_ratio=args.performance_ratio_upper_bound,
+                        use_performance_model_energy_weighting=args.performance_model_energy_weighting,
+                        intrahour_shape_method=args.intrahour_shape_method,
+                        shape_quantile=args.shape_quantile,
+                        peak_hourly_kwh_quantile=args.peak_hourly_kwh_quantile,
+                        holdout_days=args.solar_backtest_holdout_days,
+                        residual_calibration_enabled=args.residual_calibration,
+                        residual_lower_bound=args.residual_calibration_lower_bound,
+                        residual_upper_bound=args.residual_calibration_upper_bound,
+                        residual_min_forecast_kwh=args.residual_calibration_min_forecast_kwh,
+                        residual_min_training_rows=args.residual_calibration_min_rows,
+                        residual_energy_weighting=args.residual_calibration_energy_weighting,
+                        seasonal_calibration_enabled=args.seasonal_calibration,
+                        seasonal_prior_mwh=args.seasonal_calibration_prior_mwh,
+                        seasonal_lower_bound=args.seasonal_calibration_lower_bound,
+                        seasonal_upper_bound=args.seasonal_calibration_upper_bound,
+                        actual_quality_filter_enabled=args.actual_quality_filter,
+                        daylight_threshold_mw=args.solar_backtest_daylight_threshold_mw,
+                    )
+                    Path(args.solar_backtest_holdout_output).parent.mkdir(parents=True, exist_ok=True)
+                    holdout_scorecard.to_csv(args.solar_backtest_holdout_output, index=False)
+                    if not holdout_hourly.empty:
+                        Path(args.solar_backtest_holdout_hourly_output).parent.mkdir(parents=True, exist_ok=True)
+                        holdout_hourly.to_csv(args.solar_backtest_holdout_hourly_output, index=False)
                 summary_row = backtest_summary.iloc[0]
                 logging.info(
-                    "Backtest saved to %s; base WMAPE %.2f%% -> calibrated WMAPE %.2f%%, "
-                    "bias %.2f MWh, RMSE %.2f MW",
+                    "Backtest saved to %s; diagnostics saved to %s; base WMAPE %.2f%% -> "
+                    "calibrated WMAPE %.2f%%, bias %.2f MWh, RMSE %.2f MW",
                     args.backtest_hourly_output,
+                    args.solar_backtest_diagnostics_output,
                     summary_row["BaseWMAPE"] * 100 if pd.notna(summary_row["BaseWMAPE"]) else float("nan"),
                     summary_row["WMAPE"] * 100 if pd.notna(summary_row["WMAPE"]) else float("nan"),
                     summary_row["Bias_MWh"],
@@ -3435,6 +4254,35 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--performance-model-energy-weighting",
+        dest="performance_model_energy_weighting",
+        action="store_true",
+        default=True,
+        help="Weight performance-ratio training toward higher actual-export daylight hours.",
+    )
+    parser.add_argument(
+        "--no-performance-model-energy-weighting",
+        dest="performance_model_energy_weighting",
+        action="store_false",
+        help="Fit the performance-ratio model without actual-export energy weights.",
+    )
+    parser.add_argument(
+        "--actual-quality-filter",
+        dest="actual_quality_filter",
+        action="store_true",
+        default=True,
+        help=(
+            "Exclude AMI-suppressed clear-sky actual rows from solar model training and "
+            "headline backtest scoring."
+        ),
+    )
+    parser.add_argument(
+        "--no-actual-quality-filter",
+        dest="actual_quality_filter",
+        action="store_false",
+        help="Keep AMI-suppressed actual rows in model training and headline backtest scoring.",
+    )
+    parser.add_argument(
         "--daily-shape-method",
         choices=["mean", "median", "upper-quantile"],
         default=DEFAULT_DAILY_SHAPE_METHOD,
@@ -3616,6 +4464,44 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "--backtest-summary-output",
         default="forecast_outputs/roseville_solar_backtest_summary.csv",
         help="Historical actual-vs-forecast backtest summary CSV path.",
+    )
+    parser.add_argument(
+        "--solar-backtest-diagnostics-output",
+        default="forecast_outputs/roseville_solar_backtest_diagnostics.csv",
+        help="Slice-level solar backtest diagnostics CSV path.",
+    )
+    parser.add_argument(
+        "--solar-backtest-top-errors-output",
+        default="forecast_outputs/roseville_solar_backtest_top_errors.csv",
+        help="Ranked top solar backtest underforecast/overforecast hours CSV path.",
+    )
+    parser.add_argument(
+        "--solar-backtest-holdout-output",
+        default="forecast_outputs/roseville_solar_backtest_holdout_scorecard.csv",
+        help="Temporal holdout solar backtest scorecard CSV path.",
+    )
+    parser.add_argument(
+        "--solar-backtest-holdout-hourly-output",
+        default="forecast_outputs/roseville_solar_backtest_holdout_hourly.csv",
+        help="Hourly temporal holdout solar backtest CSV path.",
+    )
+    parser.add_argument(
+        "--solar-backtest-holdout-days",
+        type=int,
+        default=DEFAULT_SOLAR_BACKTEST_HOLDOUT_DAYS,
+        help="Number of final historical days held out for out-of-sample solar scoring; use 0 to disable.",
+    )
+    parser.add_argument(
+        "--solar-backtest-daylight-threshold-mw",
+        type=float,
+        default=DEFAULT_SOLAR_BACKTEST_DAYLIGHT_THRESHOLD_MW,
+        help="Actual or forecast MW threshold used for daylight/active solar diagnostics.",
+    )
+    parser.add_argument(
+        "--solar-backtest-top-error-count",
+        type=int,
+        default=DEFAULT_SOLAR_BACKTEST_TOP_ERROR_COUNT,
+        help="Number of underforecast and overforecast hours to write to the top-error diagnostics.",
     )
     parser.add_argument(
         "--rec-actual-15min-output",
