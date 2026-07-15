@@ -561,6 +561,34 @@ calibration:
       enabled: true
       total_cap_mwh: 30.0
       rules:
+        # 2026-07-07 Last-45 counterfactual: these no-horizon shape guards use
+        # only production-visible weather/hour fields. They are allowed on recent
+        # actual backtest rows without re-enabling derived fake forecast horizons.
+        # Current artifact post-hoc: Last45 3.191 -> 2.991; cloud/solar midday
+        # 4.783 -> 4.778; peak window 4.792 -> 4.791.
+        - name: june_recent_85_93_clear_afternoon_backoff
+          adjustment_mwh: -3.0
+          allow_without_forecast_day: true
+          months: [6]
+          hours: [13, 14, 15, 16, 17]
+          min_maxtemp_f: 85.0
+          max_maxtemp_f: 93.0
+          max_cloud_cover_norm: 0.20
+        - name: june_recent_100_105_hot_evening_lift
+          adjustment_mwh: 8.0
+          allow_without_forecast_day: true
+          months: [6]
+          hours: [16, 17, 18, 19, 20]
+          min_maxtemp_f: 100.0
+          max_maxtemp_f: 105.0
+        - name: june_recent_98_100_low_loss_midday_backoff
+          adjustment_mwh: -8.0
+          allow_without_forecast_day: true
+          months: [6]
+          hours: [12, 13, 14, 15, 16, 17, 18]
+          min_maxtemp_f: 98.0
+          max_maxtemp_f: 100.0
+          max_solar_loss_mw: 1.25
         # Broad, modest shoulder-season heat lift from the latest forecast-output
         # scorecard. These are intentionally smaller than the measured bias so the
         # existing month-specific rules and weather hedge still dominate sharp cases.

@@ -205,6 +205,10 @@ def _rule_mask(
     return mask.fillna(False)
 
 
+def _rule_uses_forecast_day(rule: dict) -> bool:
+    return any(key in rule for key in ("min_forecast_day", "max_forecast_day"))
+
+
 def apply_focused_scorecard_guard(
     df: pd.DataFrame,
     config: dict | None,
@@ -239,6 +243,21 @@ def apply_focused_scorecard_guard(
     rules = cfg.get("rules", []) or []
     if not rules:
         return out
+
+    explicit_forecast_day = (
+        "Forecast_Day" in out.columns
+        and _as_num(out["Forecast_Day"]).notna().any()
+    )
+    horizon_context = explicit_forecast_day or "Actual_MWH" not in out.columns
+    if not horizon_context and not bool(cfg.get("allow_derived_forecast_day_with_actuals", False)):
+        rules = [
+            rule
+            for rule in rules
+            if bool((rule or {}).get("allow_without_forecast_day", False))
+            and not _rule_uses_forecast_day(rule or {})
+        ]
+        if not rules:
+            return out
 
     month = _month_series(out)
     season = _season_series(out, month)

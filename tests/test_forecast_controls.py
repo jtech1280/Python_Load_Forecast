@@ -246,6 +246,99 @@ class ForecastControlTests(unittest.TestCase):
         self.assertEqual(out.loc[0, "Post_Focused_Guard_Forecast_MWH"], 290.0)
         self.assertEqual(out.loc[0, "Focused_Guard_Applied_Flag"], 1)
 
+    def test_focused_guard_does_not_infer_horizon_for_actual_backtest_rows(self):
+        df = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2026-06-26 12:00")],
+                "Actual_MWH": [286.0],
+                "Final_Backtest_Forecast_MWH": [280.0],
+                "Stage_Selected_Forecast_MWH": [280.0],
+                "Temperature_DailyMax": [115.0],
+                "IsHoliday": [0],
+            }
+        )
+        config = {
+            "calibration": {
+                "stage_selector": {
+                    "focused_scorecard_guard": {
+                        "enabled": True,
+                        "total_cap_mwh": 18.0,
+                        "rules": [
+                            {
+                                "name": "june_extreme_heat_midday_ramp_up",
+                                "adjustment_mwh": 10.0,
+                                "months": [6],
+                                "hours": [10, 11, 12, 13, 14, 15],
+                                "min_forecast_day": 1,
+                                "max_forecast_day": 16,
+                                "min_maxtemp_f": 105.0,
+                            }
+                        ],
+                    }
+                }
+            }
+        }
+
+        out = apply_focused_scorecard_guard(df, config, forecast_col="Final_Backtest_Forecast_MWH")
+
+        self.assertEqual(out.loc[0, "Focused_Scorecard_Guard_MWH"], 0.0)
+        self.assertEqual(out.loc[0, "Final_Backtest_Forecast_MWH"], 280.0)
+        self.assertEqual(out.loc[0, "Stage_Selected_Forecast_MWH"], 280.0)
+        self.assertEqual(out.loc[0, "Focused_Guard_Applied_Flag"], 0)
+
+    def test_focused_guard_allows_explicit_no_horizon_backtest_rules(self):
+        df = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2026-06-16 14:00")],
+                "Actual_MWH": [210.0],
+                "Final_Backtest_Forecast_MWH": [220.0],
+                "Stage_Selected_Forecast_MWH": [220.0],
+                "Temperature_DailyMax": [91.0],
+                "CloudCover_Norm": [0.10],
+                "IsHoliday": [0],
+            }
+        )
+        config = {
+            "calibration": {
+                "stage_selector": {
+                    "focused_scorecard_guard": {
+                        "enabled": True,
+                        "total_cap_mwh": 18.0,
+                        "rules": [
+                            {
+                                "name": "safe_no_horizon_shape_rule",
+                                "adjustment_mwh": -3.0,
+                                "allow_without_forecast_day": True,
+                                "months": [6],
+                                "hours": [14],
+                                "min_maxtemp_f": 85.0,
+                                "max_maxtemp_f": 93.0,
+                                "max_cloud_cover_norm": 0.20,
+                            },
+                            {
+                                "name": "blocked_horizon_rule",
+                                "adjustment_mwh": 10.0,
+                                "allow_without_forecast_day": True,
+                                "months": [6],
+                                "hours": [14],
+                                "min_forecast_day": 1,
+                                "max_forecast_day": 16,
+                                "min_maxtemp_f": 85.0,
+                            },
+                        ],
+                    }
+                }
+            }
+        }
+
+        out = apply_focused_scorecard_guard(df, config, forecast_col="Final_Backtest_Forecast_MWH")
+
+        self.assertEqual(out.loc[0, "Focused_Scorecard_Guard_MWH"], -3.0)
+        self.assertEqual(out.loc[0, "Final_Backtest_Forecast_MWH"], 217.0)
+        self.assertEqual(out.loc[0, "Stage_Selected_Forecast_MWH"], 217.0)
+        self.assertEqual(out.loc[0, "Focused_Scorecard_Guard_Source"], "safe_no_horizon_shape_rule")
+        self.assertEqual(out.loc[0, "Focused_Guard_Applied_Flag"], 1)
+
     def test_focused_guard_applies_june_100_to_105_long_hot_ramp_rule(self):
         df = pd.DataFrame(
             {
