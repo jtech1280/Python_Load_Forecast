@@ -15,6 +15,11 @@ from forecasting.diagnostics.forecast_diagnostics import _diagnostic_band_for_ro
 from forecasting.forecast.forecast_pipeline import apply_operational_stage_selector
 from forecasting.forecast.peak_risk_correction import apply_peak_risk_correction
 from forecasting.forecast.recursive_engine import recursive_forecast
+from forecasting.forecast.recent_residual_correction import (
+    apply_recent_residual_correction,
+    build_recent_residual_profile,
+    simulate_recent_residual_correction_backtest,
+)
 from forecasting.forecast.uncertainty_bands import _band_risk_multiplier, _prep, apply_bands
 from forecasting.forecast.weather_robustness_hedge import apply_weather_robustness_hedge
 from forecasting.model.ensemble import blend_predictions
@@ -878,6 +883,331 @@ class ForecastControlTests(unittest.TestCase):
 
         self.assertTrue(np.allclose(blended[0], 11.4))
         self.assertTrue(np.allclose(blended[1:], [20.75, 30.75]))
+
+    def test_recent_residual_profile_estimates_shrunk_ar_phi(self):
+        residuals = np.arange(1.0, 49.0)
+        df = pd.DataFrame(
+            {
+                "DT": pd.date_range("2026-07-01 00:00", periods=len(residuals), freq="h"),
+                "Actual_MWH": 100.0 + residuals,
+                "Raw_Forecast_MWH": 100.0,
+            }
+        )
+        config = {
+            "calibration": {
+                "recent_residual": {
+                    "enabled": True,
+                    "cap_mwh": 10.0,
+                    "ar_residual": {
+                        "enabled": True,
+                        "lookback_hours": 72,
+                        "min_pairs": 10,
+                        "phi_shrink_k": 24.0,
+                        "phi_cap": 0.40,
+                    },
+                }
+            }
+        }
+
+        profile = build_recent_residual_profile(df, config)
+
+        ar = profile["ar_residual"]
+        self.assertEqual(ar["n_pairs"], 47)
+        self.assertAlmostEqual(ar["phi"], 0.40, places=6)
+        self.assertEqual(ar["latest_residual"], 48.0)
+
+    def test_ar_recent_residual_correction_caps_and_decays_by_lead(self):
+        future = pd.DataFrame(
+            {
+                "DT": pd.date_range("2026-07-03 00:00", periods=2, freq="h"),
+                "Calibrated_Forecast_MWH": [100.0, 100.0],
+            }
+        )
+        profile = {
+            "enabled": True,
+            "ar_residual": {
+                "enabled": True,
+                "phi": 0.50,
+                "latest_residual": 8.0,
+                "same_hour_mean": {},
+            },
+        }
+        config = {
+            "calibration": {
+                "recent_residual": {
+                    "enabled": True,
+                    "cap_mwh": 10.0,
+                    "weights": {
+                        "recent_mean": 0.0,
+                        "last24_mean": 0.0,
+                        "same_hour": 0.0,
+                        "hourgroup": 0.0,
+                        "global": 0.0,
+                    },
+                    "ar_residual": {
+                        "enabled": True,
+                        "blend": 1.0,
+                        "same_hour_blend": 0.0,
+                        "cap_mwh": 3.0,
+                        "decay_hours": 1.0,
+                        "min_decay": 0.0,
+                        "forecast_day_scales": {"day1": 1.0, "days2to3": 1.0, "days4to7": 1.0, "days8plus": 1.0},
+                    },
+                }
+            }
+        }
+
+        out = apply_recent_residual_correction(future, profile, config)
+
+        self.assertAlmostEqual(out.loc[0, "AR_Residual_Correction_MWH"], 3.0, places=6)
+        self.assertAlmostEqual(out.loc[1, "AR_Residual_Correction_MWH"], 4.0 * np.exp(-1.0), places=6)
+        self.assertAlmostEqual(out.loc[0, "Recent_Level_Correction_MWH"], 3.0, places=6)
+        self.assertIn("ar1_latest_residual", out.loc[0, "Recent_Correction_Source"])
+
+    def test_ar_recent_residual_correction_blends_same_hour_residual(self):
+        future = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2026-07-03 00:00")],
+                "Calibrated_Forecast_MWH": [100.0],
+            }
+        )
+        profile = {
+            "enabled": True,
+            "ar_residual": {
+                "enabled": True,
+                "phi": 0.50,
+                "latest_residual": 8.0,
+                "same_hour_mean": {0: 2.0},
+            },
+        }
+        config = {
+            "calibration": {
+                "recent_residual": {
+                    "enabled": True,
+                    "cap_mwh": 10.0,
+                    "weights": {"recent_mean": 0.0, "last24_mean": 0.0, "same_hour": 0.0, "hourgroup": 0.0, "global": 0.0},
+                    "ar_residual": {
+                        "enabled": True,
+                        "blend": 1.0,
+                        "same_hour_blend": 0.50,
+                        "cap_mwh": 10.0,
+                        "decay_hours": 24.0,
+                        "min_decay": 0.0,
+                        "forecast_day_scales": {"day1": 1.0},
+                    },
+                }
+            }
+        }
+
+        out = apply_recent_residual_correction(future, profile, config)
+
+        self.assertAlmostEqual(out.loc[0, "AR_Residual_Correction_MWH"], 3.0, places=6)
+        self.assertEqual(out.loc[0, "AR_Residual_Source"], "ar1_latest_residual+same_hour")
+
+    def test_recent_residual_backtest_ar_uses_only_prior_rows(self):
+        residuals = np.arange(1.0, 8.0)
+        df = pd.DataFrame(
+            {
+                "DT": pd.date_range("2026-07-01 00:00", periods=len(residuals), freq="h"),
+                "Actual_MWH": 100.0 + residuals,
+                "Raw_Forecast_MWH": 100.0,
+            }
+        )
+        config = {
+            "calibration": {
+                "recent_residual": {
+                    "enabled": True,
+                    "cap_mwh": 10.0,
+                    "weights": {"recent_mean": 0.0, "last24_mean": 0.0, "same_hour": 0.0, "hourgroup": 0.0, "global": 0.0},
+                    "ar_residual": {
+                        "enabled": True,
+                        "lookback_hours": 24,
+                        "min_pairs": 2,
+                        "phi_shrink_k": 0.0,
+                        "phi_cap": 1.0,
+                        "blend": 1.0,
+                        "same_hour_blend": 0.0,
+                        "cap_mwh": 10.0,
+                        "decay_hours": 24.0,
+                        "forecast_day_scales": {"day1": 1.0},
+                    },
+                }
+            }
+        }
+
+        out = simulate_recent_residual_correction_backtest(df, config)
+
+        self.assertEqual(out.loc[0, "AR_Residual_Correction_MWH"], 0.0)
+        self.assertEqual(out.loc[1, "AR_Residual_Correction_MWH"], 0.0)
+        self.assertAlmostEqual(out.loc[3, "AR_Residual_Correction_MWH"], 3.0, places=6)
+        self.assertEqual(out.loc[3, "AR_Residual_Latest_MWH"], 3.0)
+
+    def test_origin_day_state_profile_estimates_shrunk_day_level_state(self):
+        residuals = [1.0] * 24 + [3.0] * 24 + [5.0] * 24
+        df = pd.DataFrame(
+            {
+                "DT": pd.date_range("2026-07-01 00:00", periods=len(residuals), freq="h"),
+                "Actual_MWH": 100.0 + np.array(residuals),
+                "Raw_Forecast_MWH": 100.0,
+            }
+        )
+        config = {
+            "calibration": {
+                "recent_residual": {
+                    "enabled": True,
+                    "cap_mwh": 10.0,
+                    "origin_day_state": {
+                        "enabled": True,
+                        "lookback_days": 7,
+                        "min_day_hours": 12,
+                        "min_days": 2,
+                        "min_total_hours": 24,
+                        "latest_day_weight": 0.50,
+                        "shrink_days": 0.0,
+                        "shrink_hours": 0.0,
+                        "state_cap_mwh": 10.0,
+                    },
+                }
+            }
+        }
+
+        profile = build_recent_residual_profile(df, config)
+
+        state = profile["origin_day_state"]
+        self.assertEqual(state["n_days"], 3)
+        self.assertEqual(state["n_hours"], 72)
+        self.assertAlmostEqual(state["latest_day_mean"], 5.0, places=6)
+        self.assertAlmostEqual(state["recent_day_mean"], 3.0, places=6)
+        self.assertAlmostEqual(state["state_mwh"], 4.0, places=6)
+
+    def test_origin_day_state_correction_caps_and_decays_by_forecast_day(self):
+        future = pd.DataFrame(
+            {
+                "DT": pd.date_range("2026-07-04 00:00", periods=2, freq="24h"),
+                "Forecast_Day": [1, 2],
+                "Calibrated_Forecast_MWH": [100.0, 100.0],
+            }
+        )
+        profile = {
+            "enabled": True,
+            "origin_day_state": {
+                "enabled": True,
+                "state_mwh": 8.0,
+                "latest_day_mean": 8.0,
+                "same_sign_run_hours": 24,
+                "same_hour_mean": {},
+                "hourgroup_mean": {},
+            },
+        }
+        config = {
+            "calibration": {
+                "recent_residual": {
+                    "enabled": True,
+                    "cap_mwh": 10.0,
+                    "weights": {"recent_mean": 0.0, "last24_mean": 0.0, "same_hour": 0.0, "hourgroup": 0.0, "global": 0.0},
+                    "origin_day_state": {
+                        "enabled": True,
+                        "blend": 1.0,
+                        "hourgroup_blend": 0.0,
+                        "same_hour_blend": 0.0,
+                        "cap_mwh": 3.0,
+                        "decay_days": 1.0,
+                        "forecast_day_scales": {"day1": 1.0, "days2to3": 1.0, "days4to7": 1.0, "days8plus": 1.0},
+                        "cap_by_forecast_day": {"day1": 2.0, "days2to3": 3.0},
+                    },
+                }
+            }
+        }
+
+        out = apply_recent_residual_correction(future, profile, config)
+
+        self.assertAlmostEqual(out.loc[0, "OriginDay_State_Correction_MWH"], 2.0, places=6)
+        self.assertAlmostEqual(out.loc[1, "OriginDay_State_Correction_MWH"], 8.0 * np.exp(-1.0), places=6)
+        self.assertIn("origin_day_state", out.loc[0, "Recent_Correction_Source"])
+
+    def test_origin_day_state_ignores_opposite_signed_hour_component(self):
+        future = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2026-07-04 10:00")],
+                "Hour": [10],
+                "HourGroup": ["Midday"],
+                "Calibrated_Forecast_MWH": [100.0],
+            }
+        )
+        profile = {
+            "enabled": True,
+            "origin_day_state": {
+                "enabled": True,
+                "state_mwh": 4.0,
+                "latest_day_mean": 4.0,
+                "same_sign_run_hours": 24,
+                "same_hour_mean": {10: -10.0},
+                "hourgroup_mean": {"Midday": 2.0},
+            },
+        }
+        config = {
+            "calibration": {
+                "recent_residual": {
+                    "enabled": True,
+                    "cap_mwh": 10.0,
+                    "weights": {"recent_mean": 0.0, "last24_mean": 0.0, "same_hour": 0.0, "hourgroup": 0.0, "global": 0.0},
+                    "origin_day_state": {
+                        "enabled": True,
+                        "blend": 1.0,
+                        "hourgroup_blend": 0.25,
+                        "same_hour_blend": 0.50,
+                        "require_component_same_sign": True,
+                        "cap_mwh": 10.0,
+                        "forecast_day_scales": {"day1": 1.0},
+                    },
+                }
+            }
+        }
+
+        out = apply_recent_residual_correction(future, profile, config)
+
+        self.assertAlmostEqual(out.loc[0, "OriginDay_State_Correction_MWH"], 3.5, places=6)
+        self.assertEqual(out.loc[0, "OriginDay_State_Source"], "origin_day_state+hourgroup")
+
+    def test_recent_residual_backtest_origin_day_state_uses_only_prior_rows(self):
+        residuals = [5.0] * 24 + [1.0]
+        df = pd.DataFrame(
+            {
+                "DT": pd.date_range("2026-07-01 00:00", periods=len(residuals), freq="h"),
+                "Actual_MWH": 100.0 + np.array(residuals),
+                "Raw_Forecast_MWH": 100.0,
+            }
+        )
+        config = {
+            "calibration": {
+                "recent_residual": {
+                    "enabled": True,
+                    "cap_mwh": 10.0,
+                    "weights": {"recent_mean": 0.0, "last24_mean": 0.0, "same_hour": 0.0, "hourgroup": 0.0, "global": 0.0},
+                    "origin_day_state": {
+                        "enabled": True,
+                        "lookback_days": 7,
+                        "min_day_hours": 12,
+                        "min_days": 1,
+                        "min_total_hours": 12,
+                        "latest_day_weight": 1.0,
+                        "shrink_days": 0.0,
+                        "shrink_hours": 0.0,
+                        "blend": 1.0,
+                        "hourgroup_blend": 0.0,
+                        "same_hour_blend": 0.0,
+                        "cap_mwh": 10.0,
+                        "forecast_day_scales": {"day1": 1.0},
+                    },
+                }
+            }
+        }
+
+        out = simulate_recent_residual_correction_backtest(df, config)
+
+        self.assertEqual(out.loc[0, "OriginDay_State_Correction_MWH"], 0.0)
+        self.assertAlmostEqual(out.loc[24, "OriginDay_State_Correction_MWH"], 5.0, places=6)
+        self.assertAlmostEqual(out.loc[24, "OriginDay_Latest_Day_MWH"], 5.0, places=6)
 
     def test_apply_dynamic_temperature_calibration_adjusts_temperatures_with_decay(self):
         hist_wx = pd.DataFrame(

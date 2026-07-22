@@ -22,6 +22,7 @@ from forecasting.forecast.forecast_pipeline import (
     build_correction_artifacts,
 )
 from forecasting.forecast.focused_scorecard_guard import apply_focused_scorecard_guard
+from forecasting.forecast.anomaly_exclusions import excluded_interval_mask
 from forecasting.forecast.weather_scenarios import (
     add_scenario_summary_columns,
     apply_weather_scenario_delta_caps,
@@ -1577,6 +1578,13 @@ def build_rolling_origin_replay_bundle(replay_df: pd.DataFrame, config: dict) ->
     replay_work = replay_df.copy(deep=False)
     replay_work.attrs = {}
     bt = _add_weather_input_sensitivity_columns(_ensure_origin_context(prep_backtest(replay_work)))
+    # Pure exclusion: configured anomalous intervals (e.g. DER dispatch hours) are not valid
+    # scoring targets, so drop them from every replay scorecard (peak window, hot peak, daily
+    # peak miss, etc.) to avoid spurious "misses".
+    _excluded_mask = excluded_interval_mask(bt, config)
+    excluded_interval_rows = int(_excluded_mask.sum())
+    if excluded_interval_rows:
+        bt = bt.loc[~_excluded_mask].copy()
     coverage = _origin_coverage(bt)
     event_slices = _event_slices(bt)
     peak_window = event_slices["PeakWindowHours14to18"]
@@ -1615,6 +1623,7 @@ def build_rolling_origin_replay_bundle(replay_df: pd.DataFrame, config: dict) ->
             int(((config.get("forecast", {}) or {}).get("horizons", {}) or {}).get("full_days", 16)),
         ),
         "recent_residual_basis": "pre-origin correction window only",
+        "excluded_interval_rows": excluded_interval_rows,
     })
     summary.update(_scorecard_summary(bt, coverage, config))
     bundle = {

@@ -49,6 +49,7 @@ from forecasting.forecast.event_shape_corrections import build_cloud_solar_shape
 from forecasting.forecast.peak_risk_correction import apply_peak_risk_correction
 from forecasting.forecast.weather_robustness_hedge import apply_weather_robustness_hedge
 from forecasting.forecast.focused_scorecard_guard import apply_focused_scorecard_guard
+from forecasting.forecast.anomaly_exclusions import drop_excluded_intervals
 from forecasting.forecast.targeted_residual_meta import (
     apply_targeted_residual_meta_correction,
     build_targeted_residual_meta_model,
@@ -161,6 +162,14 @@ def build_correction_artifacts(raw_backtest_df: pd.DataFrame, config: dict) -> d
         "recent_profile": None,
         "pre_recent_frame": pd.DataFrame(),
     }
+    if raw_backtest_df is None or raw_backtest_df.empty:
+        return artifacts
+
+    # Pure exclusion: drop configured anomalous intervals (e.g. DER dispatch hours) so they
+    # never enter the targeted-meta model, the learned calibration lookups, or the
+    # recent-residual profile. This runs for both production and rolling-origin replay,
+    # which are the only two callers of build_correction_artifacts.
+    raw_backtest_df = drop_excluded_intervals(raw_backtest_df, config)
     if raw_backtest_df is None or raw_backtest_df.empty:
         return artifacts
 
@@ -798,6 +807,15 @@ def _apply_future_correction_chain(
         )
     else:
         cal_future["Recent_Level_Correction_MWH"] = 0.0
+        cal_future["Recent_Correction_Source"] = "disabled_or_empty"
+        cal_future["AR_Residual_Correction_MWH"] = 0.0
+        cal_future["AR_Residual_Phi"] = np.nan
+        cal_future["AR_Residual_Latest_MWH"] = np.nan
+        cal_future["AR_Residual_Source"] = "ar_disabled_or_empty"
+        cal_future["OriginDay_State_Correction_MWH"] = 0.0
+        cal_future["OriginDay_State_MWH"] = np.nan
+        cal_future["OriginDay_Latest_Day_MWH"] = np.nan
+        cal_future["OriginDay_State_Source"] = "origin_day_disabled_or_empty"
         cal_future["Recent_Corrected_Forecast_MWH"] = cal_future["Calibrated_Forecast_MWH"]
         cal_future["Final_Forecast_MWH"] = cal_future["Calibrated_Forecast_MWH"]
     cal_future = apply_operational_stage_selector(cal_future, config=config, forecast_col="Final_Forecast_MWH")
@@ -1056,6 +1074,15 @@ def run_pipeline(
         )
     else:
         cal_future["Recent_Level_Correction_MWH"] = 0.0
+        cal_future["Recent_Correction_Source"] = "disabled_or_empty"
+        cal_future["AR_Residual_Correction_MWH"] = 0.0
+        cal_future["AR_Residual_Phi"] = np.nan
+        cal_future["AR_Residual_Latest_MWH"] = np.nan
+        cal_future["AR_Residual_Source"] = "ar_disabled_or_empty"
+        cal_future["OriginDay_State_Correction_MWH"] = 0.0
+        cal_future["OriginDay_State_MWH"] = np.nan
+        cal_future["OriginDay_Latest_Day_MWH"] = np.nan
+        cal_future["OriginDay_State_Source"] = "origin_day_disabled_or_empty"
         cal_future["Recent_Corrected_Forecast_MWH"] = cal_future["Calibrated_Forecast_MWH"]
         cal_future["Final_Forecast_MWH"] = cal_future["Calibrated_Forecast_MWH"]
     cal_future = apply_operational_stage_selector(cal_future, config=config, forecast_col="Final_Forecast_MWH")
@@ -1335,6 +1362,15 @@ def _apply_v126_correction_chain_to_frame(
         out = simulate_recent_residual_correction_backtest(out, config=config, base_col="Calibrated_Forecast_MWH")
     else:
         out["Recent_Level_Correction_MWH"] = 0.0
+        out["Recent_Correction_Source"] = "disabled_or_empty"
+        out["AR_Residual_Correction_MWH"] = 0.0
+        out["AR_Residual_Phi"] = np.nan
+        out["AR_Residual_Latest_MWH"] = np.nan
+        out["AR_Residual_Source"] = "ar_disabled_or_empty"
+        out["OriginDay_State_Correction_MWH"] = 0.0
+        out["OriginDay_State_MWH"] = np.nan
+        out["OriginDay_Latest_Day_MWH"] = np.nan
+        out["OriginDay_State_Source"] = "origin_day_disabled_or_empty"
         out["Pre_Recent_Forecast_MWH"] = out["Calibrated_Forecast_MWH"]
         out["Recent_Corrected_Forecast_MWH"] = out["Calibrated_Forecast_MWH"]
         out["Final_Backtest_Forecast_MWH"] = out["Calibrated_Forecast_MWH"]
@@ -1391,6 +1427,8 @@ def build_display_df(train_df: pd.DataFrame, future_df: pd.DataFrame) -> pd.Data
         "Warm_Ramp_Adjusted_Forecast_MWH", "Cloud_Solar_Adjusted_Forecast_MWH", "Peak_Risk_Adjusted_Forecast_MWH", "Recent_Corrected_Forecast_MWH", "Raw_Forecast_MWH",
         "XGB_Pred_MWH", "LGB_Pred_MWH", "CatBoost_Pred_MWH", "Prophet_Pred_MWH", "Prophet_Lower_MWH", "Prophet_Upper_MWH",
         "Targeted_Meta_Bias_Cal_MWH", "Targeted_Meta_SolarCloud_Cal_MWH", "Targeted_Meta_Cal_MWH", "Residual_Cal_MWH", "Heat_Peak_Cal_MWH", "Warm_Ramp_Cal_MWH", "Cloud_Solar_Shape_Cal_MWH", "Cloud_Solar_Shape_Raw_Cal_MWH", "Peak_Risk_Cal_MWH", "Recent_Level_Correction_MWH",
+        "AR_Residual_Correction_MWH", "AR_Residual_Phi", "AR_Residual_Latest_MWH",
+        "OriginDay_State_Correction_MWH", "OriginDay_State_MWH", "OriginDay_Latest_Day_MWH",
         "Band", "Upper_Band", "Lower_Band", "P10_Forecast_MWH", "P50_Forecast_MWH", "P90_Forecast_MWH",
         "Forecast_Low_MWH", "Forecast_Expected_MWH", "Forecast_High_MWH",
         "Band_Method", "Quantile_Method", "Operational_Horizon_Label", "Weather_Input_Risk_Multiplier",
@@ -1406,7 +1444,7 @@ def build_display_df(train_df: pd.DataFrame, future_df: pd.DataFrame) -> pd.Data
         "Pre_Focused_Guard_Forecast_MWH", "Post_Focused_Guard_Forecast_MWH",
         "Focused_Guard_Applied_Flag",
         "Focused_Scorecard_Guard_MWH", "Focused_Scorecard_Guard_Source",
-        "Calibration_Level", "Calibration_Matched_Levels", "Targeted_Meta_Source", "Warm_Ramp_Correction_Source", "Cloud_Solar_Correction_Source", "Peak_Risk_Source", "Recent_Correction_Source",
+        "Calibration_Level", "Calibration_Matched_Levels", "Targeted_Meta_Source", "Warm_Ramp_Correction_Source", "Cloud_Solar_Correction_Source", "Peak_Risk_Source", "Recent_Correction_Source", "AR_Residual_Source", "OriginDay_State_Source",
         "Long_Horizon_Peak_Month_Correction_MWH", "Long_Horizon_Hot_Month_Correction_MWH",
         "Stage_Selected_Forecast_MWH", "Stage_Selector_Source", "Stage_Selector_Reason",
         "Temperature", "Temperature_DailyMax", "Humidity_Norm", "CloudCover_Norm", "WindSpeed_Mph", "PrecipIn",

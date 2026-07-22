@@ -785,6 +785,14 @@ def build_recent_profile_debug_table(profile: dict | None) -> pd.DataFrame:
     for level in lookup_keys:
         for k, v in (profile.get(level, {}) or {}).items():
             rows.append({"Level": level, "Key": k, "Correction_MWH": v})
+    for state_key in ["ar_residual", "origin_day_state"]:
+        state = profile.get(state_key, {}) or {}
+        if not isinstance(state, dict):
+            continue
+        for k, v in state.items():
+            if isinstance(v, dict):
+                continue
+            rows.append({"Level": state_key, "Key": k, "Correction_MWH": v})
     if profile.get("metadata"):
         for k, v in profile.get("metadata", {}).items():
             rows.append({"Level": "metadata", "Key": k, "Correction_MWH": v})

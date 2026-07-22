@@ -458,6 +458,20 @@ bands:
     min_global_rows: 50
     min_fraction_of_multiplier_band: 0.0
 
+# Pure exclusion of anomalous load intervals (DER dispatch, telemetry gaps, etc.).
+# The listed date + hour-ending (HE) ranges are DROPPED - not repaired - from residual
+# learning, the calibration lookups, the recent-residual profile, and the replay
+# scorecards, so they cannot bias corrections or register as spurious peak misses.
+# HE h maps to the hour-beginning Hour value h-1 (HE 17 == the 16:00-17:00 interval,
+# Hour 16). Omit he_start/he_end to exclude a whole day.
+anomaly_exclusions:
+  enabled: true
+  events:
+    - name: "2026-07-15 DER dispatch"
+      date: "2026-07-15"
+      he_start: 17
+      he_end: 19
+
 calibration:
   seasonal_enabled: true
   stage_selector:
@@ -534,11 +548,11 @@ calibration:
       peak_exclude_holidays: true
       hot_exclude_holidays: true
       peak_month_offsets_mwh:
-        "1": -2.95
+        "1": 0.0
         "2": 0.80
-        "3": -2.31
+        "3": 0.0
         "4": -1.54
-        "5": -1.12
+        "5": 0.0
         "6": -2.12
         "7": 7.76
         "8": -1.39
@@ -548,10 +562,10 @@ calibration:
         "12": -1.16
       hot_month_offsets_mwh:
         "5": -14.76
-        "6": -3.71
+        "6": 0.0
         "7": 9.07
         "8": 0.11
-        "9": -3.44
+        "9": 0.0
     focused_scorecard_guard:
       # 2026-06-14 full rolling-origin counterfactual: retune the overactive June
       # clear-hot, May hot downshift, July holiday, and August day-4..7 rules, then
@@ -575,20 +589,99 @@ calibration:
           max_maxtemp_f: 93.0
           max_cloud_cover_norm: 0.20
         - name: june_recent_100_105_hot_evening_lift
-          adjustment_mwh: 8.0
+          # Audit 20260722_151616: +8 MWh fixed the largest underforecast cases
+          # but overcorrected most 100-105F evening rows. A 3 MWh lift was the
+          # best conservative replay counterfactual across the active rows.
+          adjustment_mwh: 3.0
           allow_without_forecast_day: true
           months: [6]
           hours: [16, 17, 18, 19, 20]
           min_maxtemp_f: 100.0
           max_maxtemp_f: 105.0
         - name: june_recent_98_100_low_loss_midday_backoff
+          # Audit 20260721_211955: the broad standalone version increased MAE,
+          # while the high-state/cloudy overlap was strongly helpful. Keep only
+          # the observable high-state/cloudy midday case and drop late peak hours.
           adjustment_mwh: -8.0
           allow_without_forecast_day: true
           months: [6]
-          hours: [12, 13, 14, 15, 16, 17, 18]
+          hours: [12, 13, 14, 15]
           min_maxtemp_f: 98.0
           max_maxtemp_f: 100.0
+          min_cloud_cover_norm: 0.25
           max_solar_loss_mw: 1.25
+          min_raw_minus_samehour_7day_mean_mwh: 15.0
+          holiday: false
+        - name: july_recent_100_plus_clear_peak_ramp_up
+          # Disabled by correction audit 20260721_211955: N=6, Delta MAE +5.12.
+          enabled: false
+          adjustment_mwh: 7.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [14, 15, 16]
+          min_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.25
+        - name: july_recent_100_plus_clear_hot_evening_lift
+          # Disabled by correction audit 20260721_211955: N=5, Delta MAE +5.41.
+          enabled: false
+          adjustment_mwh: 8.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [17, 18, 19, 20]
+          min_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.25
+          holiday: false
+        - name: july_recent_cloudy_98_100_high_state_hot_evening_backoff
+          # 2026-07-21 counterfactual: July 13-style cloudy 98-100F hot/evening
+          # rows overforecast when raw was far above recent same-hour state. Keep
+          # this separate from the 100F-plus clear heat-wave lift above.
+          adjustment_mwh: -14.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [16, 17, 18, 19, 20, 21]
+          min_maxtemp_f: 98.0
+          max_maxtemp_f: 100.0
+          min_cloud_cover_norm: 0.60
+          min_raw_minus_samehour_7day_mean_mwh: 15.0
+          holiday: false
+        - name: july_warm_partly_cloudy_overnight_lift
+          # Latest 45-day backtest still ran low on warm July overnight hours
+          # with partial cloud cover. Small lift; excludes clear/calm and fully
+          # overcast nights where the signal was weaker.
+          adjustment_mwh: 4.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [0, 1, 2, 3, 4]
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 100.0
+          min_cloud_cover_norm: 0.25
+          max_cloud_cover_norm: 0.85
+          holiday: false
+        - name: july_clear_warm_late_evening_lift
+          # Warm July HE23-24 rows were low in both recent backtest and rolling
+          # replay. Gate to lower-cloud rows to avoid the July 13 cloudy
+          # overforecast tail.
+          adjustment_mwh: 3.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [22, 23]
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.50
+          holiday: false
+        - name: june_98_100_mixed_high_state_morning_midday_backoff
+          # Mixed-cloud 98-100F June morning/midday rows were overstacked after
+          # the low-loss backoff. Require raw above same-hour state so the rule
+          # does not create a 2025-06-07-style replay underforecast.
+          adjustment_mwh: -8.0
+          allow_without_forecast_day: true
+          months: [6]
+          hours: [10, 11, 12, 13, 14, 15]
+          min_maxtemp_f: 98.0
+          max_maxtemp_f: 100.0
+          min_cloud_cover_norm: 0.25
+          min_raw_minus_samehour_7day_mean_mwh: 15.0
+          holiday: false
         # Broad, modest shoulder-season heat lift from the latest forecast-output
         # scorecard. These are intentionally smaller than the measured bias so the
         # existing month-specific rules and weather hedge still dominate sharp cases.
@@ -615,7 +708,9 @@ calibration:
         # days are not pushed high. Counterfactual peak HE14-18 MAE: 5.88 -> 5.07.
         # Keep these separate from the >=105F rules and only score days 8-16.
         - name: june_long_hot_100_105_morning_ramp_up
-          adjustment_mwh: 5.0
+          # Audit 20260721_211955: +5 MWh morning lift increased MAE on the active
+          # rows, so keep only a small residual nudge until replay proves more.
+          adjustment_mwh: 2.0
           months: [6]
           hours: [8, 9]
           min_forecast_day: 8
@@ -649,6 +744,9 @@ calibration:
           min_maxtemp_f: 100.0
           max_maxtemp_f: 105.0
         - name: june_long_100_plus_evening_finish_up
+          # Disabled by correction audit 20260722_151616: stacked with the recent
+          # 100-105F evening lift and increased MAE by 5.36 MWh on active rows.
+          enabled: false
           adjustment_mwh: 5.0
           months: [6]
           hours: [19, 20]
@@ -743,6 +841,9 @@ calibration:
           max_maxtemp_f: 92.5
           holiday: false
         - name: june_days4to7_hot_peak_recovery_up
+          # Disabled by correction audit 20260722_151616: HE14-15 were already
+          # accurate before this +14 MWh lift, so it created large overforecasts.
+          enabled: false
           adjustment_mwh: 14.0
           months: [6]
           hours: [14, 15, 16, 17, 18]
@@ -761,12 +862,12 @@ calibration:
           max_maxtemp_f: 100.0
           holiday: false
         - name: june_days4to7_clear_98_100_hot_recovery_trim_down
-          # 2026-07-02 full replay: June day-4..7 clear 98-100F HE16-20
-          # overstacked the hot recovery by 15-20 MWh. Trim only this clear
-          # narrow band instead of weakening the broader day-4..7 recovery.
+          # Audit 20260722_151616: keep the helpful HE20-21 net trim with the
+          # evening finish rule, but do not expose a standalone HE17-19 downshift
+          # after disabling june_days4to7_hot_peak_recovery_up.
           adjustment_mwh: -14.0
           months: [6]
-          hours: [16, 17, 18, 19, 20]
+          hours: [19, 20]
           min_forecast_day: 4
           max_forecast_day: 7
           min_maxtemp_f: 98.0
@@ -774,6 +875,8 @@ calibration:
           max_cloud_cover_norm: 0.20
           holiday: false
         - name: june_long_95_100_evening_recovery_up
+          # Disabled by correction audit 20260721_211955: N=10, Delta MAE +4.02.
+          enabled: false
           adjustment_mwh: 12.0
           months: [6]
           # Full replay with focused-guard application showed HE20 overcorrecting
@@ -906,13 +1009,16 @@ calibration:
           max_maxtemp_f: 93.0
           holiday: false
         - name: may_long_85_93_hot_peak_recovery_up
+          # Audit 20260721_211955: the broad day-8..16 clear/hot version hurt,
+          # but the cloudy day-13..16 overlap helped. Keep only that narrower case.
           adjustment_mwh: 8.0
           months: [5]
-          hours: [16, 17, 18, 19, 20]
-          min_forecast_day: 8
+          hours: [16, 17, 18, 19]
+          min_forecast_day: 13
           max_forecast_day: 16
           min_maxtemp_f: 85.0
           max_maxtemp_f: 93.0
+          min_cloud_cover_norm: 0.25
           holiday: false
         - name: may_days4to7_100plus_peak_recovery_up
           adjustment_mwh: 8.0
@@ -931,9 +1037,9 @@ calibration:
           min_maxtemp_f: 93.0
           max_maxtemp_f: 97.0
         - name: may_long_92_95_clear_high_state_hot_recovery_up
-          # 2026-07-05 narrow hot-peak diagnostics: May 9-style clear
-          # 92.5-95F day-8..16 rows were pulled too low by the 93-97F backoff,
-          # but neighboring 95-97F May rows still need the backoff.
+          # Disabled by correction audit 20260722_151616: the 93-97F backoff was
+          # correct on the active May 9 rows; this add-back increased MAE.
+          enabled: false
           adjustment_mwh: 8.0
           months: [5]
           hours: [16, 17, 18, 19]
@@ -981,10 +1087,10 @@ calibration:
           max_maxtemp_f: 98.0
           holiday: false
         - name: july_long_95_98_low_state_peak_backoff
-          # 2026-07-02 hot-peak replay: July 95-98F long-horizon rows with raw
-          # near/below the same-hour 7-day state were overforecast after the
-          # recovery uplift. Do not touch high-state July rows that still need it.
-          adjustment_mwh: -10.0
+          # Audit 20260722_151616: the full -10 MWh low-state backoff left the
+          # July 6-7 clear 95-98F rows underforecast. Keep a smaller hedge rather
+          # than cancelling the peak recovery.
+          adjustment_mwh: -4.0
           months: [7]
           hours: [16, 17, 18, 19, 20]
           min_forecast_day: 8
@@ -994,9 +1100,9 @@ calibration:
           max_raw_minus_samehour_7day_mean_mwh: 12.0
           holiday: false
         - name: july_long_95_98_clear_low_mid_state_extra_backoff
-          # 2026-07-05 narrow hot-peak diagnostics: July 6-7 style clear
-          # 95-98F long-horizon rows still overforecast after the existing low
-          # state backoff when raw is no more than 12 MWh above recent state.
+          # Disabled by correction audit 20260722_151616: this extra backoff
+          # stacked with the low-state hedge and increased MAE by 3.57 MWh.
+          enabled: false
           adjustment_mwh: -7.0
           months: [7]
           hours: [16, 17, 18, 19, 20]
@@ -1211,16 +1317,20 @@ calibration:
           max_raw_minus_samehour_7day_mean_mwh: -15.0
           holiday: false
         - name: march_long_65_85_clear_peak_recovery_up
+          # Audit 20260721_211955: broad 65-85F March clear peaks added error;
+          # keep the warmer shoulder-heat subset only.
           adjustment_mwh: 6.0
           months: [3]
           hours: [14, 15, 16, 17, 18]
           min_forecast_day: 8
           max_forecast_day: 16
-          min_maxtemp_f: 65.0
+          min_maxtemp_f: 75.0
           max_maxtemp_f: 85.0
           max_cloud_cover_norm: 0.20
           holiday: false
         - name: november_long_cloudy_mild_peak_recovery_up
+          # Disabled by correction audit 20260721_211955: N=47, Delta MAE +0.94.
+          enabled: false
           adjustment_mwh: 3.0
           months: [11]
           hours: [14, 15, 16, 17, 18]
@@ -1511,6 +1621,59 @@ calibration:
       default_scale: 1.0
       season_scales:
         Summer: 0.90
+    ar_residual:
+      # Conservative AR(1) carryover: residual_t = actual_t - pre_recent_forecast_t.
+      enabled: false
+      lookback_hours: 168
+      min_pairs: 24
+      max_lag_gap_hours: 1.5
+      phi_shrink_k: 72.0
+      phi_cap: 0.40
+      blend: 0.35
+      same_hour_blend: 0.20
+      same_hour_days: 7
+      cap_mwh: 4.0
+      decay_hours: 36.0
+      min_decay: 0.0
+      forecast_day_scales:
+        day1: 1.0
+        days2to3: 0.45
+        days4to7: 0.15
+        days8plus: 0.0
+    origin_day_state:
+      # Conservative block-state carryover for same-sign residual episodes.
+      # Uses only pre-origin residuals and applies a heavily shrunk day-level state.
+      enabled: false
+      lookback_days: 7
+      min_day_hours: 12
+      min_days: 2
+      min_total_hours: 36
+      latest_day_weight: 0.65
+      require_latest_recent_same_sign: true
+      shrink_days: 6.0
+      shrink_hours: 96.0
+      state_cap_mwh: 5.0
+      min_abs_state_mwh: 0.50
+      blend: 0.45
+      hourgroup_blend: 0.15
+      same_hour_blend: 0.10
+      require_component_same_sign: true
+      same_sign_threshold_mwh: 0.25
+      min_same_sign_run_hours: 4
+      short_run_scale: 0.50
+      cap_mwh: 2.0
+      decay_days: 5.0
+      min_decay: 0.0
+      forecast_day_scales:
+        day1: 0.35
+        days2to3: 0.45
+        days4to7: 0.25
+        days8plus: 0.08
+      cap_by_forecast_day:
+        day1: 1.00
+        days2to3: 1.50
+        days4to7: 1.00
+        days8plus: 0.50
     weights:
       recent_mean: 0.35
       last24_mean: 0.20
