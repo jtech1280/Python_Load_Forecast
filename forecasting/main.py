@@ -7,28 +7,21 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-import yaml
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if __package__ in {None, ""} and str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from forecasting.config_utils import load_forecast_config, normalize_config_paths
+
 
 def load_config():
-    here = Path(__file__).resolve().parent
-    cfg_path = here / "config.yaml"
-    with open(cfg_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    return load_forecast_config()
 
 
 def _normalize_project_paths(config: dict) -> dict:
-    project_cfg = config.setdefault("project", {})
-    output_dir = Path(project_cfg.get("output_dir", "forecast_outputs"))
-    if not output_dir.is_absolute():
-        output_dir = PROJECT_ROOT / output_dir
-    project_cfg["output_dir"] = str(output_dir)
-    return config
+    return normalize_config_paths(config)
 
 
 def _disable_windows_platform_wmi_probe() -> None:
@@ -271,9 +264,57 @@ def _archive_replay_diagnostic_snapshots(
     return snapshots
 
 
+def _add_optional_solar_arg(cmd: list[str], arg_name: str, value: object) -> None:
+    if value in {None, ""}:
+        return
+    cmd.extend([arg_name, str(value)])
+
+
+def _build_solar_command(output_dir: Path, config: dict | None = None) -> list[str]:
+    solar_cfg = ((config or {}).get("solar", {}) or {})
+    cmd = [
+        sys.executable,
+        "forecasting/solar/solar_forecaster.py",
+        "--backtest",
+    ]
+
+    _add_optional_solar_arg(cmd, "--driver", solar_cfg.get("driver"))
+    _add_optional_solar_arg(cmd, "--dest-server", solar_cfg.get("dest_server"))
+    _add_optional_solar_arg(cmd, "--dest-db", solar_cfg.get("dest_db"))
+    _add_optional_solar_arg(cmd, "--production-source", solar_cfg.get("production_source"))
+    _add_optional_solar_arg(cmd, "--parquet-root", solar_cfg.get("parquet_root"))
+    _add_optional_solar_arg(cmd, "--weather-cache-dir", solar_cfg.get("weather_cache_dir"))
+
+    solar_outputs = {
+        "--output-15min": "roseville_solar_forecast.csv",
+        "--output-hourly": "roseville_solar_forecast_hourly.csv",
+        "--segment-output-15min": "roseville_solar_forecast_by_segment.csv",
+        "--segment-output-hourly": "roseville_solar_forecast_hourly_by_segment.csv",
+        "--backtest-hourly-output": "roseville_solar_backtest_hourly.csv",
+        "--backtest-summary-output": "roseville_solar_backtest_summary.csv",
+        "--solar-backtest-diagnostics-output": "roseville_solar_backtest_diagnostics.csv",
+        "--solar-backtest-top-errors-output": "roseville_solar_backtest_top_errors.csv",
+        "--solar-backtest-holdout-output": "roseville_solar_backtest_holdout_scorecard.csv",
+        "--solar-backtest-holdout-hourly-output": "roseville_solar_backtest_holdout_hourly.csv",
+        "--segment-backtest-hourly-output": "roseville_solar_backtest_hourly_by_segment.csv",
+        "--segment-backtest-summary-output": "roseville_solar_backtest_summary_by_segment.csv",
+        "--rec-actual-15min-output": "roseville_solar_rec_actual_15min.csv",
+        "--rec-actual-hourly-output": "roseville_solar_rec_actual_hourly.csv",
+        "--segment-rec-actual-15min-output": "roseville_solar_rec_actual_15min_by_segment.csv",
+        "--segment-rec-actual-hourly-output": "roseville_solar_rec_actual_hourly_by_segment.csv",
+        "--load-shape-output": "roseville_solar_load_shape.csv",
+        "--segment-load-shape-output": "roseville_solar_load_shape_by_segment.csv",
+    }
+    for arg_name, filename in solar_outputs.items():
+        cmd.extend([arg_name, str(output_dir / filename)])
+
+    return cmd
+
+
 def _run_solar_forecast(
     output_dir: Path,
     *,
+    config: dict | None = None,
     skip_refresh: bool = False,
     allow_stale_on_failure: bool = False,
     require_backtest_outputs: bool = False,
@@ -288,11 +329,7 @@ def _run_solar_forecast(
 
     print("Running solar forecast...")
     started_at = datetime.now().timestamp()
-    solar_cmd = [
-        sys.executable,
-        "forecasting/solar/solar_forecaster.py",
-        "--backtest",
-    ]
+    solar_cmd = _build_solar_command(output_dir, config=config)
     try:
         subprocess.run(solar_cmd, check=True, cwd=PROJECT_ROOT)
     except subprocess.CalledProcessError:
@@ -466,6 +503,7 @@ def main(argv: list[str] | None = None):
     allow_stale_solar = bool(args.allow_stale_solar_forecast) and not bool(args.strict_solar_forecast)
     _run_solar_forecast(
         output_dir,
+        config=config,
         skip_refresh=bool(args.skip_solar_forecast),
         allow_stale_on_failure=allow_stale_solar,
         require_backtest_outputs=replay_enabled and not bool(args.skip_solar_forecast),

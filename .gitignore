@@ -12,6 +12,9 @@ htmlcov/
 .venv/
 venv/
 env/
+.env
+.env.local
+forecasting/config.local.yaml
 
 # IDE/project-local metadata
 .idea/

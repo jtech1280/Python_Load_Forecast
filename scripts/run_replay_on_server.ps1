@@ -5,6 +5,8 @@ param(
     [ValidateSet("safe", "gpu-priority", "cpu-only")]
     [string]$BackendMode = "safe",
     [string]$PythonExe = "",
+    [switch]$UpdateEnvironment,
+    [switch]$SkipBootstrap,
     [switch]$DisableProphet,
     [switch]$DisableCatBoost,
     [switch]$SkipDiagnostics
@@ -13,16 +15,24 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
+& (Join-Path $PSScriptRoot "import_forecast_env.ps1") -RepoRoot $RepoRoot
 
 if ([string]::IsNullOrWhiteSpace($RunLabel)) {
     $RunLabel = "server_replay_" + (Get-Date -Format "yyyyMMdd_HHmmss")
 }
 
-if ([string]::IsNullOrWhiteSpace($PythonExe)) {
+$usingDefaultPython = [string]::IsNullOrWhiteSpace($PythonExe)
+if ($usingDefaultPython) {
     $PythonExe = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 }
+if (($usingDefaultPython -and !$SkipBootstrap) -and ((!(Test-Path $PythonExe)) -or $UpdateEnvironment)) {
+    & (Join-Path $PSScriptRoot "setup_forecast_environment.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Environment bootstrap failed."
+    }
+}
 if (!(Test-Path $PythonExe)) {
-    throw "Python executable not found at $PythonExe. Recreate .venv on this server or pass -PythonExe C:\path\to\python.exe."
+    throw "Python executable not found at $PythonExe. Run scripts\setup_forecast_environment.ps1 or pass -PythonExe C:\path\to\python.exe."
 }
 
 $pythonProbe = & $PythonExe -c "import sys; print(sys.executable)" 2>&1
@@ -36,6 +46,12 @@ if (![string]::IsNullOrWhiteSpace($FixedOriginsFile) -and !(Test-Path $FixedOrig
 }
 
 $OutputDir = Join-Path $RepoRoot "forecast_outputs"
+if (![string]::IsNullOrWhiteSpace($env:FORECAST_OUTPUT_DIR)) {
+    $OutputDir = $env:FORECAST_OUTPUT_DIR
+    if (![System.IO.Path]::IsPathRooted($OutputDir)) {
+        $OutputDir = Join-Path $RepoRoot $OutputDir
+    }
+}
 $LogDir = Join-Path $OutputDir "run_logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 

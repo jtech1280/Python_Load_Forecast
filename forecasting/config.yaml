@@ -3,7 +3,12 @@
 project:
   name: "V12.9 Weather-Realism Peak-Risk Hardening"
   timezone: "America/Los_Angeles"
-  output_dir: "forecast_outputs"
+  output_dir: "${FORECAST_OUTPUT_DIR:-forecast_outputs}"
+
+paths:
+  # Optional machine-specific data root. Set FORECAST_DATA_ROOT in .env/.env.local
+  # or in the server environment; config.local.yaml can also override any path.
+  data_root: "${FORECAST_DATA_ROOT}"
 
 sql:
   dsn_name: "Informatica LRS"
@@ -143,7 +148,7 @@ openmeteo:
   historical_start: "2020-01-01"     # training start date
   historical_end: null                # null => yesterday local
   forecast_days: 16
-  cache_dir: "weather_cache"
+  cache_dir: "${FORECAST_WEATHER_CACHE_DIR:-weather_cache}"
   # TLS certificate verification for weather API calls. Keep true so responses are
   # authenticated. On Windows, ssl_use_os_truststore lets requests honor the machine
   # certificate store via truststore, which fixes managed/self-signed proxy chains
@@ -161,6 +166,21 @@ btm:
   extend_future_months: 36
   current_nameplate_mw: 63.5
   max_observed_impact_mw: 23.0
+
+solar:
+  # Machine-specific parquet roots are discovered in this order. Prefer setting
+  # FORECAST_SOLAR_PARQUET_ROOT or FORECAST_DATA_ROOT on each server; the drive
+  # candidates preserve today's C:/PY_LRS and D:/PY_LRS layouts without code edits.
+  parquet_root: "${FORECAST_SOLAR_PARQUET_ROOT}"
+  parquet_root_candidates:
+    - "${FORECAST_DATA_ROOT}"
+    - "D:/PY_LRS"
+    - "C:/PY_LRS"
+  weather_cache_dir: "${FORECAST_SOLAR_WEATHER_CACHE_DIR:-weather_cache/solar_weather}"
+  driver: "${FORECAST_SOLAR_DRIVER:-ODBC Driver 17 for SQL Server}"
+  dest_server: "${FORECAST_SOLAR_DEST_SERVER:-re-lrs-db-1}"
+  dest_db: "${FORECAST_SOLAR_DEST_DB:-Forecast}"
+  production_source: "${FORECAST_SOLAR_PRODUCTION_SOURCE:-rec-parquet}"
 
 training:
   train_start_date: "2020-01-01"
@@ -560,6 +580,16 @@ calibration:
         "10": 2.21
         "11": 5.75
         "12": -1.16
+      peak_month_forecast_day_scales:
+        # Audit 20260722_213503: September's -6.44 MWh peak offset is helpful
+        # overall, but it overcorrected forecast days 8, 9, 10, and 13.
+        # Disable only those day/month cells while preserving the helpful
+        # September long-horizon rows on days 11, 12, and 14-16.
+        "9":
+          "8": 0.0
+          "9": 0.0
+          "10": 0.0
+          "13": 0.0
       hot_month_offsets_mwh:
         "5": -14.76
         "6": 0.0
@@ -648,7 +678,9 @@ calibration:
           # Latest 45-day backtest still ran low on warm July overnight hours
           # with partial cloud cover. Small lift; excludes clear/calm and fully
           # overcast nights where the signal was weaker.
-          adjustment_mwh: 4.0
+          # Audit 20260722_213503: +4 MWh improved tail error but slightly hurt
+          # MAE on active rows, so keep only a half-strength nudge.
+          adjustment_mwh: 2.0
           allow_without_forecast_day: true
           months: [7]
           hours: [0, 1, 2, 3, 4]
@@ -682,11 +714,111 @@ calibration:
           min_cloud_cover_norm: 0.25
           min_raw_minus_samehour_7day_mean_mwh: 15.0
           holiday: false
+        # 2026-07-23 recent-45 audit: the failing recent gate was concentrated
+        # in a few production-visible June/July weather-state shapes. Keep these
+        # no-horizon guards narrow so the seasonal replay remains the primary
+        # robustness check.
+        - name: july_recent_103_106_clear_morning_backoff
+          adjustment_mwh: -6.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [6, 7, 8, 9, 10]
+          min_maxtemp_f: 103.0
+          max_maxtemp_f: 106.0
+          max_cloud_cover_norm: 0.25
+          holiday: false
+        - name: july_recent_103_106_hot_peak_lift
+          adjustment_mwh: 10.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [14, 15, 16, 17, 18, 19, 20, 21]
+          min_maxtemp_f: 103.0
+          max_maxtemp_f: 106.0
+          max_cloud_cover_norm: 0.40
+          holiday: false
+        - name: july_recent_90_93_post_heatwave_morning_lift
+          adjustment_mwh: 2.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [6, 7, 8, 9]
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 93.0
+          max_cloud_cover_norm: 0.25
+          max_raw_minus_samehour_yesterday_mwh: -3.0
+          holiday: false
+        - name: july_recent_90_93_post_heatwave_midday_lift
+          adjustment_mwh: 8.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [10, 11, 12, 13, 14, 15, 16]
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 93.0
+          max_cloud_cover_norm: 0.15
+          max_raw_minus_samehour_yesterday_mwh: -20.0
+          holiday: false
+        - name: july_recent_weekend_95_97_overcast_evening_backoff
+          adjustment_mwh: -8.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [20, 21]
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 97.0
+          min_cloud_cover_norm: 0.90
+          weekend: true
+        - name: june_recent_clear_98_100_peak_backoff
+          adjustment_mwh: -4.0
+          allow_without_forecast_day: true
+          months: [6]
+          hours: [16, 17, 18]
+          min_maxtemp_f: 98.0
+          max_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.10
+          holiday: false
+        - name: june_recent_95_98_clear_post_heatwave_midday_backoff
+          adjustment_mwh: -8.0
+          allow_without_forecast_day: true
+          months: [6]
+          hours: [10, 11, 12, 13, 14, 15, 16]
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 98.0
+          max_cloud_cover_norm: 0.10
+          max_raw_minus_samehour_yesterday_mwh: -15.0
+          holiday: false
+        - name: july_recent_95_98_partly_cloudy_peak_lift
+          adjustment_mwh: 6.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [16, 17, 18]
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 98.0
+          min_cloud_cover_norm: 0.30
+          max_cloud_cover_norm: 0.60
+          holiday: false
+        - name: july_recent_98_100_cloudy_midday_lift
+          adjustment_mwh: 4.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [10, 11, 12, 13]
+          min_maxtemp_f: 98.0
+          max_maxtemp_f: 100.0
+          min_cloud_cover_norm: 0.60
+          holiday: false
+        - name: july_recent_98_100_post_heatwave_midday_backoff
+          adjustment_mwh: -8.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [10, 11, 12, 13]
+          min_maxtemp_f: 98.0
+          max_maxtemp_f: 100.0
+          max_raw_minus_samehour_yesterday_mwh: -15.0
+          holiday: false
         # Broad, modest shoulder-season heat lift from the latest forecast-output
         # scorecard. These are intentionally smaller than the measured bias so the
         # existing month-specific rules and weather hedge still dominate sharp cases.
         - name: shoulder_heat_days2to7_bias_up
-          adjustment_mwh: 2.0
+          # Audit 20260723_140742: +2 MWh slightly overcorrected the broad
+          # day-2..7 shoulder heat slice, so keep a half-strength lift.
+          adjustment_mwh: 1.0
           seasons: [Spring, Fall]
           hours: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
           min_forecast_day: 2
@@ -708,8 +840,9 @@ calibration:
         # days are not pushed high. Counterfactual peak HE14-18 MAE: 5.88 -> 5.07.
         # Keep these separate from the >=105F rules and only score days 8-16.
         - name: june_long_hot_100_105_morning_ramp_up
-          # Audit 20260721_211955: +5 MWh morning lift increased MAE on the active
-          # rows, so keep only a small residual nudge until replay proves more.
+          # Disabled by audit 20260722_213503: the reduced +2 MWh version still
+          # increased MAE and pushed the active rows from near-neutral to high.
+          enabled: false
           adjustment_mwh: 2.0
           months: [6]
           hours: [8, 9]
@@ -767,6 +900,10 @@ calibration:
           weekend: false
           holiday: false
         - name: june_long_cloudy_mild_peak_window_extra_up
+          # Disabled by audit 20260723_140742: this broad extra +8 MWh lift
+          # overcorrected day-8..16 cloudy/mild June peak rows. Keep the
+          # narrower HE14-15 base rule, which remained helpful when active.
+          enabled: false
           adjustment_mwh: 8.0
           months: [6]
           hours: [14, 15, 16, 17, 18]
@@ -938,7 +1075,9 @@ calibration:
           max_solar_loss_mw: 0.50
           holiday: false
         - name: june_long_90_95_cloudy_peak_extra_up
-          adjustment_mwh: 6.0
+          # Audit 20260722_213503: +6 MWh slightly increased MAE but improved
+          # P90 tail error; keep a smaller tail hedge.
+          adjustment_mwh: 3.0
           months: [6]
           hours: [14, 15, 16, 17, 18]
           min_forecast_day: 8
@@ -1145,9 +1284,9 @@ calibration:
           max_raw_minus_samehour_7day_mean_mwh: -25.0
           holiday: false
         - name: july_long_92_95_clear_high_state_hot_recovery_up
-          # 2026-07-05 narrow hot-peak diagnostics: July day-8..16 clear
-          # 92.5-95F rows with raw 10-25 MWh above same-hour 7-day state were
-          # still structurally underforecast after the mild-hot soft down.
+          # Disabled by audit 20260722_213503: this recovery stacked with the
+          # mild-hot soft-down and turned near-neutral residuals into overforecast.
+          enabled: false
           adjustment_mwh: 6.0
           months: [7]
           hours: [16, 17, 18, 19, 20]

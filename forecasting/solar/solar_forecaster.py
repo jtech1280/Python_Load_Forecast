@@ -44,6 +44,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -76,8 +77,24 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 LOG_FORMAT = "%(asctime)s | %(levelname)-8s | %(message)s"
 INTERVAL_HOURS = 0.25
 DEFAULT_PERFORMANCE_RATIO = 0.75
-DEFAULT_PARQUET_ROOT = Path(r"C:\PY_LRS")
-DEFAULT_SOLAR_WEATHER_CACHE_DIR = Path("weather_cache") / "solar_weather"
+DEFAULT_PARQUET_ROOT = Path(
+    os.environ.get("FORECAST_SOLAR_PARQUET_ROOT")
+    or os.environ.get("FORECAST_DATA_ROOT")
+    or r"C:\PY_LRS"
+)
+
+
+def _default_solar_weather_cache_dir() -> Path:
+    explicit = os.environ.get("FORECAST_SOLAR_WEATHER_CACHE_DIR")
+    if explicit:
+        return Path(explicit)
+    base_cache = os.environ.get("FORECAST_WEATHER_CACHE_DIR")
+    if base_cache:
+        return Path(base_cache) / "solar_weather"
+    return Path("weather_cache") / "solar_weather"
+
+
+DEFAULT_SOLAR_WEATHER_CACHE_DIR = _default_solar_weather_cache_dir()
 DEFAULT_FORECAST_WEATHER_CACHE_MAX_AGE_HOURS = 6.0
 INDEX_CACHE_ROOT = Path("_shape_analysis_cache") / "spid_file_index"
 CATALOG_COLUMNS = [
@@ -2370,6 +2387,7 @@ def fetch_hourly_weather_for_date_range(
     array_tilt_degrees: float = DEFAULT_ARRAY_TILT_DEGREES,
     array_azimuth_degrees: float = DEFAULT_ARRAY_AZIMUTH_DEGREES,
     weather_locations_per_request: int = DEFAULT_WEATHER_LOCATIONS_PER_REQUEST,
+    cache_dir: str | Path | None = DEFAULT_SOLAR_WEATHER_CACHE_DIR,
     reusable_weather_frames: Optional[list[pd.DataFrame]] = None,
 ) -> pd.DataFrame:
     """
@@ -2420,6 +2438,7 @@ def fetch_hourly_weather_for_date_range(
                     array_tilt_degrees=array_tilt_degrees,
                     array_azimuth_degrees=array_azimuth_degrees,
                     weather_locations_per_request=weather_locations_per_request,
+                    cache_dir=cache_dir,
                 )
             )
 
@@ -2442,6 +2461,7 @@ def fetch_hourly_weather_for_date_range(
                 array_tilt_degrees=array_tilt_degrees,
                 array_azimuth_degrees=array_azimuth_degrees,
                 weather_locations_per_request=weather_locations_per_request,
+                cache_dir=cache_dir,
             )
         )
 
@@ -5680,6 +5700,7 @@ def run_forecaster(args: argparse.Namespace) -> None:
                 array_tilt_degrees=args.array_tilt_degrees,
                 array_azimuth_degrees=args.array_azimuth_degrees,
                 weather_locations_per_request=args.weather_locations_per_request,
+                cache_dir=args.weather_cache_dir,
             )
             calibration_weather = weather_for_sites(
                 calibration_weather_source,
@@ -5992,6 +6013,7 @@ def run_forecaster(args: argparse.Namespace) -> None:
                     array_tilt_degrees=args.array_tilt_degrees,
                     array_azimuth_degrees=args.array_azimuth_degrees,
                     weather_locations_per_request=args.weather_locations_per_request,
+                    cache_dir=args.weather_cache_dir,
                     reusable_weather_frames=[calibration_weather_source],
                 )
                 inferred_weather_df = weather_for_sites(
@@ -6040,6 +6062,7 @@ def run_forecaster(args: argparse.Namespace) -> None:
             array_tilt_degrees=args.array_tilt_degrees,
             array_azimuth_degrees=args.array_azimuth_degrees,
             weather_locations_per_request=args.weather_locations_per_request,
+            cache_dir=args.weather_cache_dir,
             reusable_weather_frames=[calibration_weather_source, inferred_weather_source],
         )
         weather_df = weather_for_sites(weather_source, sites, args.use_capacity_weighted_weather)
@@ -6672,6 +6695,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "--parquet-root",
         default=str(DEFAULT_PARQUET_ROOT),
         help="Root folder containing COM and RES interval parquet files and the parquet index cache.",
+    )
+    parser.add_argument(
+        "--weather-cache-dir",
+        default=str(DEFAULT_SOLAR_WEATHER_CACHE_DIR),
+        help="Solar Open-Meteo cache directory.",
     )
     parser.add_argument(
         "--rec-history-months",

@@ -3,18 +3,42 @@ param(
     [switch]$DisableFiveMinLoad,
     [switch]$UseLocalWeatherCalibration,
     [string]$FixedOriginsFile = "",
-    [int]$ReplayMaxOrigins = 0
+    [int]$ReplayMaxOrigins = 0,
+    [string]$PythonExe = "",
+    [switch]$UpdateEnvironment,
+    [switch]$SkipBootstrap
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
+& (Join-Path $PSScriptRoot "import_forecast_env.ps1") -RepoRoot $RepoRoot
 
 if ([string]::IsNullOrWhiteSpace($RunLabel)) {
     $RunLabel = "overnight_" + (Get-Date -Format "yyyyMMdd_HHmmss")
 }
 
+$usingDefaultPython = [string]::IsNullOrWhiteSpace($PythonExe)
+if ($usingDefaultPython) {
+    $PythonExe = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+}
+if (($usingDefaultPython -and !$SkipBootstrap) -and ((!(Test-Path $PythonExe)) -or $UpdateEnvironment)) {
+    & (Join-Path $PSScriptRoot "setup_forecast_environment.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Environment bootstrap failed."
+    }
+}
+if (!(Test-Path $PythonExe)) {
+    throw "Python executable not found at $PythonExe. Run scripts\setup_forecast_environment.ps1 or pass -PythonExe C:\path\to\python.exe."
+}
+
 $OutputDir = Join-Path $RepoRoot "forecast_outputs"
+if (![string]::IsNullOrWhiteSpace($env:FORECAST_OUTPUT_DIR)) {
+    $OutputDir = $env:FORECAST_OUTPUT_DIR
+    if (![System.IO.Path]::IsPathRooted($OutputDir)) {
+        $OutputDir = Join-Path $RepoRoot $OutputDir
+    }
+}
 $LogDir = Join-Path $OutputDir "run_logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -24,7 +48,7 @@ $FiveMinArg = $(if ($DisableFiveMinLoad) { " --disable-five-min-load" } else { "
 $LocalWeatherArg = $(if ($UseLocalWeatherCalibration) { " --use-local-weather-calibration" } else { "" })
 $FixedOriginsArg = $(if ([string]::IsNullOrWhiteSpace($FixedOriginsFile)) { "" } else { " --replay-fixed-origins-file `"$FixedOriginsFile`"" })
 $ReplayMaxOriginsArg = $(if ($ReplayMaxOrigins -gt 0) { " --replay-max-origins $ReplayMaxOrigins" } else { "" })
-$MainCommand = ".\.venv\Scripts\python.exe -u -m forecasting.main --save-csv --rolling-origin-replay --safe-performance$FiveMinArg$LocalWeatherArg$FixedOriginsArg$ReplayMaxOriginsArg"
+$MainCommand = "`"$PythonExe`" -u -m forecasting.main --save-csv --rolling-origin-replay --safe-performance$FiveMinArg$LocalWeatherArg$FixedOriginsArg$ReplayMaxOriginsArg"
 
 $startedAt = Get-Date
 @{
@@ -32,7 +56,7 @@ $startedAt = Get-Date
     status = "running"
     started_at = $startedAt.ToString("o")
     command = $MainCommand
-    validation_command = ".\.venv\Scripts\python.exe -u scripts\validate_weather_interval_coverage.py --replay-path forecast_outputs\rolling_origin_replay_results.csv --output-label $RunLabel"
+    validation_command = "`"$PythonExe`" -u scripts\validate_weather_interval_coverage.py --replay-path forecast_outputs\rolling_origin_replay_results.csv --output-label $RunLabel"
     log_path = $LogPath
     five_min_load_enabled = !$DisableFiveMinLoad
     local_weather_calibration_enabled = [bool]$UseLocalWeatherCalibration
@@ -79,7 +103,7 @@ try {
         }
 
         "`nRunning weather scenario/conformal interval validation for $RunLabel..." | Add-Content -Path $LogPath -Encoding UTF8
-        & .\.venv\Scripts\python.exe -u scripts\validate_weather_interval_coverage.py `
+        & $PythonExe -u scripts\validate_weather_interval_coverage.py `
             --replay-path (Join-Path $OutputDir "rolling_origin_replay_results.csv") `
             --output-label $RunLabel >> $LogPath 2>&1
         $validationExitCode = $LASTEXITCODE

@@ -11,6 +11,7 @@ from io import StringIO
 from unittest.mock import patch
 
 from forecasting import main as forecast_main
+from forecasting.config_utils import load_forecast_config
 
 
 class MainLauncherTests(unittest.TestCase):
@@ -76,6 +77,75 @@ class MainLauncherTests(unittest.TestCase):
             Path(out["project"]["output_dir"]),
             forecast_main.PROJECT_ROOT / "forecast_outputs",
         )
+
+    def test_config_env_override_expands_and_normalizes_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            temp_root = Path(tmp)
+            parquet_root = temp_root / "PY_LRS"
+            parquet_root.mkdir()
+            config_path = temp_root / "config.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "project:",
+                        "  output_dir: ${FORECAST_OUTPUT_DIR:-forecast_outputs}",
+                        "openmeteo:",
+                        "  cache_dir: ${FORECAST_WEATHER_CACHE_DIR:-weather_cache}",
+                        "solar:",
+                        "  parquet_root: ${FORECAST_SOLAR_PARQUET_ROOT}",
+                        "  parquet_root_candidates:",
+                        "    - ${FORECAST_DATA_ROOT}",
+                        "    - D:/PY_LRS",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "FORECAST_CONFIG": "",
+                    "FORECAST_OUTPUT_DIR": "server_outputs",
+                    "FORECAST_WEATHER_CACHE_DIR": "server_weather_cache",
+                    "FORECAST_SOLAR_PARQUET_ROOT": str(parquet_root),
+                    "FORECAST_CONFIG_LOCAL": str(temp_root / "missing.local.yaml"),
+                },
+            ):
+                config = load_forecast_config(config_path)
+
+            self.assertEqual(
+                Path(config["project"]["output_dir"]),
+                forecast_main.PROJECT_ROOT / "server_outputs",
+            )
+            self.assertEqual(
+                Path(config["openmeteo"]["cache_dir"]),
+                forecast_main.PROJECT_ROOT / "server_weather_cache",
+            )
+            self.assertEqual(Path(config["solar"]["parquet_root"]), parquet_root)
+
+    def test_solar_command_uses_configured_paths_and_connection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            config = {
+                "solar": {
+                    "driver": "ODBC Driver 18 for SQL Server",
+                    "dest_server": "server-b",
+                    "dest_db": "ForecastB",
+                    "production_source": "rec-parquet",
+                    "parquet_root": "D:/PY_LRS",
+                    "weather_cache_dir": str(output_dir / "solar_weather"),
+                }
+            }
+
+            cmd = forecast_main._build_solar_command(output_dir, config=config)
+            arg_map = {cmd[i]: cmd[i + 1] for i in range(len(cmd) - 1) if cmd[i].startswith("--")}
+
+            self.assertEqual(arg_map["--driver"], "ODBC Driver 18 for SQL Server")
+            self.assertEqual(arg_map["--dest-server"], "server-b")
+            self.assertEqual(arg_map["--dest-db"], "ForecastB")
+            self.assertEqual(arg_map["--parquet-root"], "D:/PY_LRS")
+            self.assertEqual(arg_map["--weather-cache-dir"], str(output_dir / "solar_weather"))
+            self.assertEqual(arg_map["--output-hourly"], str(output_dir / "roseville_solar_forecast_hourly.csv"))
 
     def test_solar_forecast_refresh_failure_can_use_existing_file(self):
         with tempfile.TemporaryDirectory() as tmp:

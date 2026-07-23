@@ -15,9 +15,9 @@ from forecasting.main import _disable_windows_platform_wmi_probe
 _disable_windows_platform_wmi_probe()
 
 import pandas as pd
-import yaml
 
 from forecasting.dashboard.dashboard_app import create_dashboard_app
+from forecasting.config_utils import load_forecast_config
 from forecasting.utils.output_archive import load_latest_distinct_snapshot
 
 
@@ -96,7 +96,7 @@ def _load_previous_sql_weather_snapshot(cfg: dict, current_weather: pd.DataFrame
 
 def main():
     here = Path(__file__).resolve().parents[1]  # forecasting/
-    cfg = yaml.safe_load((here / "config.yaml").read_text(encoding="utf-8"))
+    cfg = load_forecast_config()
 
     out_dir = Path(cfg.get("project", {}).get("output_dir", "forecast_outputs"))
     if not out_dir.is_absolute():

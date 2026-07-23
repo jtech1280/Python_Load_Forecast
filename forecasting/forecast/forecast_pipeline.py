@@ -346,6 +346,36 @@ def _configured_numeric_lookup(
     return numeric.map(lambda x: lookup.get(str(int(x)), default) if pd.notna(x) else default).astype(float)
 
 
+def _configured_pair_numeric_lookup(
+    primary_values: pd.Series,
+    secondary_values: pd.Series,
+    lookup_cfg: dict | None,
+    default: float = 1.0,
+) -> pd.Series:
+    out = pd.Series(default, index=primary_values.index, dtype=float)
+    if not lookup_cfg:
+        return out
+
+    primary_num = pd.to_numeric(primary_values, errors="coerce").round()
+    secondary_num = pd.to_numeric(secondary_values, errors="coerce").round()
+    for primary_key, nested_lookup in lookup_cfg.items():
+        if not isinstance(nested_lookup, dict):
+            continue
+        try:
+            primary_match = int(float(primary_key))
+        except (TypeError, ValueError):
+            continue
+        primary_mask = primary_num.eq(primary_match)
+        for secondary_key, value in nested_lookup.items():
+            try:
+                secondary_match = int(float(secondary_key))
+                scale = float(value)
+            except (TypeError, ValueError):
+                continue
+            out.loc[primary_mask & secondary_num.eq(secondary_match)] = scale
+    return out
+
+
 def apply_operational_stage_selector(df: pd.DataFrame, config: dict, forecast_col: str) -> pd.DataFrame:
     selector_cfg = ((config.get("calibration", {}) or {}).get("stage_selector", {}) or {})
     out = df.copy()
@@ -595,6 +625,20 @@ def apply_operational_stage_selector(df: pd.DataFrame, config: dict, forecast_co
         hot_cap = abs(float(long_horizon_cfg.get("hot_cap_mwh", 15.0)))
         peak_corr = peak_corr.clip(lower=-peak_cap, upper=peak_cap)
         hot_corr = hot_corr.clip(lower=-hot_cap, upper=hot_cap)
+        peak_day_scale = _configured_pair_numeric_lookup(
+            numeric_month,
+            day,
+            long_horizon_cfg.get("peak_month_forecast_day_scales", {}),
+            default=1.0,
+        )
+        hot_day_scale = _configured_pair_numeric_lookup(
+            numeric_month,
+            day,
+            long_horizon_cfg.get("hot_month_forecast_day_scales", {}),
+            default=1.0,
+        )
+        peak_corr = peak_corr * peak_day_scale
+        hot_corr = hot_corr * hot_day_scale
         if "IsHoliday" in out.columns:
             is_holiday = pd.to_numeric(out["IsHoliday"], errors="coerce").fillna(0).ne(0)
         else:

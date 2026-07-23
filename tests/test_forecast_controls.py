@@ -873,6 +873,43 @@ class ForecastControlTests(unittest.TestCase):
         self.assertEqual(out.loc[1, "Stage_Selector_Source"], "Final_Forecast_MWH")
         self.assertNotIn("conditional_stage_override", out.loc[1, "Stage_Selector_Reason"])
 
+    def test_long_horizon_peak_month_correction_can_scale_specific_month_days(self):
+        df = pd.DataFrame(
+            {
+                "DT": [
+                    pd.Timestamp("2026-09-08 14:00"),
+                    pd.Timestamp("2026-09-11 14:00"),
+                    pd.Timestamp("2026-07-08 14:00"),
+                ],
+                "Forecast_Day": [8, 11, 8],
+                "Month": [9, 9, 7],
+                "Hour": [14, 14, 14],
+                "Temperature_DailyMax": [82.0, 82.0, 100.0],
+                "Final_Forecast_MWH": [100.0, 100.0, 100.0],
+            }
+        )
+        config = {
+            "calibration": {
+                "stage_selector": {
+                    "enabled": True,
+                    "long_horizon_peak_hot_month_correction": {
+                        "enabled": True,
+                        "min_forecast_day": 8,
+                        "max_forecast_day": 16,
+                        "peak_hours": [14],
+                        "hot_hours": [16],
+                        "peak_month_offsets_mwh": {"7": 7.76, "9": -6.44},
+                        "peak_month_forecast_day_scales": {"9": {"8": 0.0}},
+                    },
+                }
+            }
+        }
+
+        out = apply_operational_stage_selector(df, config, forecast_col="Final_Forecast_MWH")
+
+        self.assertEqual(out["Long_Horizon_Peak_Month_Correction_MWH"].tolist(), [0.0, -6.44, 7.76])
+        self.assertEqual(out["Stage_Selected_Forecast_MWH"].tolist(), [100.0, 93.56, 107.76])
+
     def test_blend_predictions_pads_short_optional_components(self):
         blended = blend_predictions(
             [10.0, 20.0, 30.0],
