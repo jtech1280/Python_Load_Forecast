@@ -54,6 +54,12 @@ from forecasting.forecast.targeted_residual_meta import (
     apply_targeted_residual_meta_correction,
     build_targeted_residual_meta_model,
 )
+from forecasting.forecast.operational_residual_learner import (
+    apply_operational_residual_learner,
+    build_operational_residual_learner,
+    operational_residual_learner_summary,
+    simulate_operational_residual_learner_backtest,
+)
 from forecasting.forecast.weather_scenarios import (
     add_scenario_summary_columns,
     apply_weather_scenario_delta_caps,
@@ -160,6 +166,7 @@ def build_correction_artifacts(raw_backtest_df: pd.DataFrame, config: dict) -> d
         "warm_lookup": None,
         "cloud_solar_lookup": None,
         "recent_profile": None,
+        "operational_residual_artifact": None,
         "pre_recent_frame": pd.DataFrame(),
     }
     if raw_backtest_df is None or raw_backtest_df.empty:
@@ -247,6 +254,7 @@ def build_correction_artifacts(raw_backtest_df: pd.DataFrame, config: dict) -> d
         warm_lookup=artifacts["warm_lookup"],
         cloud_solar_lookup=artifacts["cloud_solar_lookup"],
         simulate_recent=False,
+        apply_auto_residual=False,
     )
     artifacts["pre_recent_frame"] = pre_recent_frame
     if bool((cal_cfg.get("recent_residual", {}) or {}).get("enabled", True)):
@@ -262,6 +270,23 @@ def build_correction_artifacts(raw_backtest_df: pd.DataFrame, config: dict) -> d
                 - pd.to_numeric(recent_profile_frame[recent_basis_col], errors="coerce")
             )
         artifacts["recent_profile"] = build_recent_residual_profile(recent_profile_frame, config=config)
+    if bool((cal_cfg.get("operational_residual_learner", {}) or {}).get("enabled", False)):
+        auto_residual_basis = _apply_v126_correction_chain_to_frame(
+            raw_df=raw_backtest_df,
+            config=config,
+            targeted_meta_artifact=artifacts["targeted_meta_artifact"],
+            lookup_bundle=artifacts["lookup_bundle"],
+            heat_lookup=artifacts["heat_lookup"],
+            warm_lookup=artifacts["warm_lookup"],
+            cloud_solar_lookup=artifacts["cloud_solar_lookup"],
+            simulate_recent=True,
+            apply_auto_residual=False,
+        )
+        artifacts["operational_residual_artifact"] = build_operational_residual_learner(
+            auto_residual_basis,
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+        )
     return artifacts
 
 
@@ -277,6 +302,7 @@ def apply_origin_available_correction_chain(raw_df: pd.DataFrame, config: dict, 
         warm_lookup=artifacts.get("warm_lookup"),
         cloud_solar_lookup=artifacts.get("cloud_solar_lookup"),
         simulate_recent=False,
+        apply_auto_residual=False,
     )
     cal_cfg = config.get("calibration", {})
     if bool((cal_cfg.get("recent_residual", {}) or {}).get("enabled", True)):
@@ -975,6 +1001,7 @@ def run_pipeline(
     warm_lookup = correction_artifacts["warm_lookup"]
     cloud_solar_lookup = correction_artifacts["cloud_solar_lookup"]
     recent_profile = correction_artifacts["recent_profile"]
+    operational_residual_artifact = correction_artifacts.get("operational_residual_artifact")
     _progress(progress_callback, "Built correction artifacts", advance=1)
 
     _progress(progress_callback, "Applying backtest correction chain")
@@ -1185,6 +1212,14 @@ def run_pipeline(
         forecast_col="Final_Forecast_MWH",
         also_update_cols=("Stage_Selected_Forecast_MWH",),
     )
+    cal_future = apply_operational_residual_learner(
+        cal_future,
+        operational_residual_artifact,
+        config,
+        forecast_col="Final_Forecast_MWH",
+        also_update_cols=("Stage_Selected_Forecast_MWH", "Calibrated_Forecast_MWH"),
+        evaluation_mode="future_shadow",
+    )
     _progress(progress_callback, "Applied production forecast guards", advance=1)
 
     _progress(progress_callback, "Building forecast bands")
@@ -1234,6 +1269,11 @@ def run_pipeline(
         recent_residual_profile=recent_profile,
         residual_band_lookup=residual_band_lookup,
         config=config,
+    )
+    diagnostics["operational_residual_learner_summary"] = operational_residual_learner_summary(
+        backtest_df,
+        operational_residual_artifact,
+        config,
     )
     diagnostics["local_weather_temperature_bias_summary"] = local_temperature_bias_summary(local_temp_matched, local_temp_lookup)
     diagnostics["local_weather_temperature_bias_lookup"] = local_temp_lookup
@@ -1341,6 +1381,7 @@ def _apply_v126_correction_chain_to_frame(
     warm_lookup: dict | None,
     cloud_solar_lookup: dict | None,
     simulate_recent: bool = True,
+    apply_auto_residual: bool = True,
 ) -> pd.DataFrame:
     """Apply the same V12.8 correction chain to a backtest-like frame.
 
@@ -1435,6 +1476,13 @@ def _apply_v126_correction_chain_to_frame(
         out["Final_AbsError_MWH"] / pd.to_numeric(out["Actual_MWH"], errors="coerce").abs() * 100.0,
         np.nan,
     )
+    if apply_auto_residual:
+        out = simulate_operational_residual_learner_backtest(
+            out,
+            config,
+            forecast_col=final_col,
+            force_shadow=None,
+        )
     return out
 
 def build_display_df(train_df: pd.DataFrame, future_df: pd.DataFrame) -> pd.DataFrame:
@@ -1488,6 +1536,20 @@ def build_display_df(train_df: pd.DataFrame, future_df: pd.DataFrame) -> pd.Data
         "Pre_Focused_Guard_Forecast_MWH", "Post_Focused_Guard_Forecast_MWH",
         "Focused_Guard_Applied_Flag",
         "Focused_Scorecard_Guard_MWH", "Focused_Scorecard_Guard_Source",
+        "Auto_Residual_Model_Version", "Auto_Residual_Shadow_Mode",
+        "Auto_Residual_Production_Scope",
+        "Auto_Residual_Base_Forecast_MWH", "Auto_Residual_Correction_MWH",
+        "Auto_Residual_Adjusted_Forecast_MWH", "Auto_Residual_Correction_Applied_Flag",
+        "Auto_Residual_Source", "Auto_Residual_Evaluation_Mode",
+        "Auto_Residual_Residual_MWH", "Auto_Residual_AbsError_MWH",
+        "Auto_Residual_Delta_AbsError_MWH",
+        "Auto_Residual_Full_Shadow_Correction_MWH",
+        "Auto_Residual_Full_Shadow_Adjusted_Forecast_MWH",
+        "Auto_Residual_Full_Shadow_Correction_Applied_Flag",
+        "Auto_Residual_Full_Shadow_Source",
+        "Auto_Residual_Full_Shadow_Residual_MWH",
+        "Auto_Residual_Full_Shadow_AbsError_MWH",
+        "Auto_Residual_Full_Shadow_Delta_AbsError_MWH",
         "Calibration_Level", "Calibration_Matched_Levels", "Targeted_Meta_Source", "Warm_Ramp_Correction_Source", "Cloud_Solar_Correction_Source", "Peak_Risk_Source", "Recent_Correction_Source", "AR_Residual_Source", "OriginDay_State_Source",
         "Long_Horizon_Peak_Month_Correction_MWH", "Long_Horizon_Hot_Month_Correction_MWH",
         "Stage_Selected_Forecast_MWH", "Stage_Selector_Source", "Stage_Selector_Reason",

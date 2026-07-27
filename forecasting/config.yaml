@@ -197,7 +197,7 @@ training:
     calibration_days: 45
     origin_selection: "fixed" # Fixed set keeps tuning passes apples-to-apples; remove fixed_origins to rebalance.
     origin_step_days: 28
-    max_origins: 20
+    max_origins: 24
     fixed_origins:
       - "2024-10-13"
       - "2024-11-09 23:00:00-08:00"
@@ -221,6 +221,13 @@ training:
       # 99F load ramp inside the production horizon once recent actuals exist.
       - "2026-05-28"
       - "2026-05-29"
+      # July 21 hot clear peak miss coverage. July 6/7 score the event as long-lead
+      # rows once July actuals exist; July 20/21 score day-ahead/intraday behavior
+      # once the full 16-day replay horizon has actuals.
+      - "2026-07-06"
+      - "2026-07-07"
+      - "2026-07-20"
+      - "2026-07-21"
     origins_per_season: 4
     scorecard_min_origins_per_season: 3
     min_train_days: 365
@@ -488,9 +495,13 @@ anomaly_exclusions:
   enabled: true
   events:
     - name: "2026-07-15 DER dispatch"
+      # EnergyHub DER event telemetry:
+      # - dispatch shed: 17:00-18:45 local, avg 3.76 MW, max 4.90 MW, 7.52 MWh shifted
+      # - post-event rebound: material through 20:45 local
+      # Drop affected hourly actuals only: HE18-HE19 shed + HE20-HE21 rebound.
       date: "2026-07-15"
-      he_start: 17
-      he_end: 19
+      he_start: 18
+      he_end: 21
 
 calibration:
   seasonal_enabled: true
@@ -1728,6 +1739,48 @@ calibration:
       14: 4.00
       15: 4.00
       16: 4.00
+
+  operational_residual_learner:
+    # Scoped second-pass learner for residuals left after the production correction
+    # chain. Promotion is deliberately narrow: only gated hot-peak corrections move
+    # Final_Forecast_MWH. The broad/global residual learner stays available in
+    # Auto_Residual_Full_Shadow_* diagnostics for continued monitoring.
+    enabled: true
+    shadow_mode: false
+    production_scope: "hot_peak_only"
+    model_version: "operational_residual_hot_peak_only_v1"
+    min_rows: 336
+    backtest_min_train_rows: 336
+    target_clip_mwh: 30.0
+    learning_rate: 0.05
+    max_iter: 80
+    max_leaf_nodes: 12
+    min_samples_leaf: 24
+    l2_regularization: 4.0
+    blend: 0.35
+    cap_mwh: 6.0
+    total_cap_mwh: 8.0
+    hot_peak:
+      enabled: true
+      min_rows: 48
+      min_samples_leaf: 12
+      min_maxtemp_f: 90.0
+      hours: [16, 17, 18, 19, 20]
+      blend: 0.45
+      cap_mwh: 6.0
+      positive_gate:
+        # Only let the hot-peak residual learner lift rows where the raw forecast
+        # is signaling a clear, bounded heat-ramp state versus recent same-hour
+        # load. This keeps July 21-style support while blocking broad hot rows
+        # where the final forecast was already plausible or high.
+        enabled: true
+        min_raw_minus_samehour_7day_mean_mwh: 20.0
+        max_raw_minus_samehour_7day_mean_mwh: 35.0
+        min_raw_minus_samehour_yesterday_mwh: 20.0
+        max_final_minus_raw_forecast_mwh: 14.0
+        max_cloud_cover_norm: 0.20
+        allow_negative_correction: false
+        blocked_source: "hot_peak_low_forecast_gate_blocked"
 
   recent_residual:
     enabled: true

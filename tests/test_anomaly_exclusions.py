@@ -6,6 +6,7 @@ _disable_windows_platform_wmi_probe()
 
 import pandas as pd
 
+from forecasting.diagnostics.forecast_diagnostics import build_production_readiness_scorecard
 from forecasting.forecast.anomaly_exclusions import (
     drop_excluded_intervals,
     excluded_interval_mask,
@@ -17,7 +18,7 @@ DER_CONFIG = {
     "anomaly_exclusions": {
         "enabled": True,
         "events": [
-            {"name": "2026-07-15 DER dispatch", "date": "2026-07-15", "he_start": 17, "he_end": 19},
+            {"name": "2026-07-15 DER dispatch", "date": "2026-07-15", "he_start": 18, "he_end": 21},
         ],
     }
 }
@@ -36,19 +37,21 @@ class AnomalyExclusionMaskTests(unittest.TestCase):
     def test_he_range_maps_to_hour_beginning(self):
         df = _july_day_frame("2026-07-15")
         mask = excluded_interval_mask(df, DER_CONFIG)
-        # HE 17-19 (hour-ending) map to hour-beginning 16, 17, 18.
-        self.assertEqual(sorted(df.loc[mask, "DT"].dt.hour.tolist()), [16, 17, 18])
+        # HE 18-21 (hour-ending) map to hour-beginning 17, 18, 19, 20.
+        self.assertEqual(sorted(df.loc[mask, "DT"].dt.hour.tolist()), [17, 18, 19, 20])
 
     def test_drop_removes_only_excluded_rows(self):
         df = _july_day_frame("2026-07-15")
         out = drop_excluded_intervals(df, DER_CONFIG)
         remaining = out["DT"].dt.hour.tolist()
-        self.assertEqual(len(out), 21)
-        self.assertNotIn(16, remaining)
+        self.assertEqual(len(out), 20)
         self.assertNotIn(17, remaining)
         self.assertNotIn(18, remaining)
+        self.assertNotIn(19, remaining)
+        self.assertNotIn(20, remaining)
+        self.assertIn(16, remaining)
         self.assertIn(15, remaining)
-        self.assertIn(19, remaining)
+        self.assertIn(21, remaining)
 
     def test_other_day_untouched(self):
         df = _july_day_frame("2026-07-14")
@@ -80,9 +83,22 @@ class AnomalyExclusionMaskTests(unittest.TestCase):
         self.assertTrue(drop_excluded_intervals(pd.DataFrame(), DER_CONFIG).empty)
 
     def test_tz_naive_dt_supported(self):
-        df = pd.DataFrame({"DT": pd.date_range("2026-07-15 15:00", periods=4, freq="h")})  # 15,16,17,18
+        df = pd.DataFrame({"DT": pd.date_range("2026-07-15 16:00", periods=6, freq="h")})  # 16..21
         mask = excluded_interval_mask(df, DER_CONFIG)
-        self.assertEqual(sorted(df.loc[mask, "DT"].dt.hour.tolist()), [16, 17, 18])
+        self.assertEqual(sorted(df.loc[mask, "DT"].dt.hour.tolist()), [17, 18, 19, 20])
+
+    def test_mixed_offset_export_timestamps_are_treated_as_local_wall_clock(self):
+        df = pd.DataFrame(
+            {
+                "DT": [
+                    "2026-07-15 17:00:00-07:00",
+                    "2026-07-15 20:00:00-07:00",
+                    "2026-01-15 17:00:00-08:00",
+                ]
+            }
+        )
+        mask = excluded_interval_mask(df, DER_CONFIG)
+        self.assertEqual(mask.tolist(), [True, True, False])
 
 
 class ProductionConfigExclusionTests(unittest.TestCase):
@@ -91,17 +107,42 @@ class ProductionConfigExclusionTests(unittest.TestCase):
         events = (cfg.get("anomaly_exclusions", {}) or {}).get("events", []) or []
         july15 = [e for e in events if str(e.get("date")) == "2026-07-15"]
         self.assertTrue(july15, "expected a July 15 DER exclusion event in config.yaml")
-        self.assertEqual(int(july15[0]["he_start"]), 17)
-        self.assertEqual(int(july15[0]["he_end"]), 19)
+        self.assertEqual(int(july15[0]["he_start"]), 18)
+        self.assertEqual(int(july15[0]["he_end"]), 21)
 
     def test_production_config_drops_july15_peak_hours(self):
         cfg = load_config()
         df = _july_day_frame("2026-07-15")
         remaining = drop_excluded_intervals(df, cfg)["DT"].dt.hour.tolist()
-        for hour_beginning in (16, 17, 18):
+        for hour_beginning in (17, 18, 19, 20):
             self.assertNotIn(hour_beginning, remaining)
+        self.assertIn(16, remaining)
         self.assertIn(15, remaining)
-        self.assertIn(19, remaining)
+        self.assertIn(21, remaining)
+
+    def test_production_readiness_scorecard_drops_july15_der_hours(self):
+        cfg = load_config()
+        dt = pd.date_range("2026-07-15 00:00", periods=24, freq="h", tz="America/Los_Angeles")
+        frame = pd.DataFrame(
+            {
+                "DT": dt,
+                "Actual_MWH": 100.0,
+                "Final_Backtest_Forecast_MWH": 100.0,
+                "Forecast_Day": 1,
+                "Hour": dt.hour,
+                "Temperature_DailyMax": 95.0,
+                "CloudCover_Norm": 0.0,
+                "BTM_Solar_Loss_From_ClearSky_MW": 0.0,
+                "Season": "Summer",
+            }
+        )
+
+        scorecard = build_production_readiness_scorecard(frame, frame, config=cfg)
+        recent_n = int(scorecard.loc[scorecard["Test"].eq("Last 45 days"), "N"].iloc[0])
+        replay_n = int(scorecard.loc[scorecard["Test"].eq("Seasonal rolling origins"), "N"].iloc[0])
+
+        self.assertEqual(recent_n, 20)
+        self.assertEqual(replay_n, 20)
 
 
 class JulyEveningPeakGuardTests(unittest.TestCase):

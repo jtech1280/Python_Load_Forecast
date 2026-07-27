@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from forecasting.forecast.anomaly_exclusions import drop_excluded_intervals
 from forecasting.forecast.uncertainty_bands import (
     _band_risk_multiplier,
     _hot_bucket_band_floor,
@@ -241,6 +242,8 @@ def _available_stage_columns(df: pd.DataFrame) -> dict[str, str]:
         "recent_corrected_simulation": "Recent_Corrected_Forecast_MWH",
         "stage_selected_production": "Stage_Selected_Forecast_MWH",
         FINAL_STAGE: "Final_Backtest_Forecast_MWH",
+        "auto_residual_shadow": "Auto_Residual_Adjusted_Forecast_MWH",
+        "auto_residual_full_shadow": "Auto_Residual_Full_Shadow_Adjusted_Forecast_MWH",
         "baseline_same_hour_yesterday": "Baseline_SameHourYesterday_MWH",
         "baseline_same_hour_7_days_ago": "Baseline_SameHour7DaysAgo_MWH",
         "baseline_rolling_7day_same_hour_avg": "Baseline_Rolling7DaySameHourAvg_MWH",
@@ -740,8 +743,16 @@ def _scorecard_metric_row(
     return row
 
 
-def build_production_readiness_scorecard(recent_df: pd.DataFrame, replay_df: pd.DataFrame) -> pd.DataFrame:
+def build_production_readiness_scorecard(
+    recent_df: pd.DataFrame,
+    replay_df: pd.DataFrame,
+    config: dict | None = None,
+) -> pd.DataFrame:
     """Official production scorecard: rolling-origin replay is primary, recent backtest is context."""
+    if config is not None:
+        recent_df = drop_excluded_intervals(recent_df, config) if recent_df is not None else recent_df
+        replay_df = drop_excluded_intervals(replay_df, config) if replay_df is not None else replay_df
+
     recent_col = "Final_Backtest_Forecast_MWH"
     replay_col = "Final_Backtest_Forecast_MWH"
     rows: list[dict[str, Any]] = []

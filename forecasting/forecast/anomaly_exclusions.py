@@ -49,7 +49,15 @@ def excluded_interval_mask(df: pd.DataFrame, config: dict | None, dt_col: str = 
     if df is None or df.empty or not events or dt_col not in df.columns:
         return mask
 
-    dt = pd.to_datetime(df[dt_col], errors="coerce")
+    raw_dt = df[dt_col]
+    try:
+        dt = pd.to_datetime(raw_dt, errors="coerce")
+    except ValueError:
+        # CSV exports can contain mixed DST offsets. Exclusion windows are configured
+        # as local wall-clock dates/hours, so strip the offset rather than converting
+        # to UTC and shifting the local hour.
+        cleaned = raw_dt.astype(str).str.strip().str.replace(r"(?:[+-]\d{2}:?\d{2}|Z)$", "", regex=True)
+        dt = pd.to_datetime(cleaned, errors="coerce")
     if getattr(dt.dt, "tz", None) is not None:
         # Exclusion windows are local calendar dates/hours; forecast/replay DT is local tz-aware.
         dt = dt.dt.tz_localize(None)

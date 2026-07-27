@@ -31,6 +31,7 @@ from forecasting.forecast.weather_scenarios import (
     scenario_definitions,
 )
 from forecasting.forecast.weather_robustness_hedge import apply_weather_robustness_hedge
+from forecasting.forecast.operational_residual_learner import apply_operational_residual_learner
 from forecasting.forecast.recursive_engine import recursive_forecast
 from forecasting.data.weather_loader import fetch_previous_run_weather
 from forecasting.features.feature_builder import build_forecast_frame
@@ -67,6 +68,20 @@ WEATHER_REALISM_PREFIX_COLS = [
     "Focused_Guard_Applied_Flag", "Focused_Scorecard_Guard_MWH",
     "Focused_Scorecard_Guard_Source", "Raw_Minus_SameHour7DayMean_MWH",
     "Raw_Minus_SameHourYesterday_MWH",
+    "Auto_Residual_Model_Version", "Auto_Residual_Shadow_Mode",
+    "Auto_Residual_Production_Scope",
+    "Auto_Residual_Base_Forecast_MWH", "Auto_Residual_Correction_MWH",
+    "Auto_Residual_Adjusted_Forecast_MWH", "Auto_Residual_Correction_Applied_Flag",
+    "Auto_Residual_Source", "Auto_Residual_Evaluation_Mode",
+    "Auto_Residual_Residual_MWH", "Auto_Residual_AbsError_MWH",
+    "Auto_Residual_Delta_AbsError_MWH",
+    "Auto_Residual_Full_Shadow_Correction_MWH",
+    "Auto_Residual_Full_Shadow_Adjusted_Forecast_MWH",
+    "Auto_Residual_Full_Shadow_Correction_Applied_Flag",
+    "Auto_Residual_Full_Shadow_Source",
+    "Auto_Residual_Full_Shadow_Residual_MWH",
+    "Auto_Residual_Full_Shadow_AbsError_MWH",
+    "Auto_Residual_Full_Shadow_Delta_AbsError_MWH",
 ]
 
 
@@ -785,6 +800,14 @@ def _run_single_origin_replay(args: tuple) -> tuple[pd.DataFrame | None, list[di
             also_update_stage=True,
         )
     corrected = _apply_replay_focused_guard(corrected, config, also_update_stage=True)
+    corrected = apply_operational_residual_learner(
+        corrected,
+        artifacts.get("operational_residual_artifact"),
+        config,
+        forecast_col="Final_Backtest_Forecast_MWH",
+        also_update_cols=("Stage_Selected_Forecast_MWH",),
+        evaluation_mode="origin_available_shadow",
+    )
     if not raw_weather_realism.empty:
         corrected_weather_realism = apply_origin_available_correction_chain(raw_weather_realism, config, artifacts)
         # V12.9: apply the same weather-uncertainty peak hedge the production pipeline applies.
@@ -800,6 +823,13 @@ def _run_single_origin_replay(args: tuple) -> tuple[pd.DataFrame | None, list[di
             corrected_weather_realism,
             config,
             also_update_stage=False,
+        )
+        corrected_weather_realism = apply_operational_residual_learner(
+            corrected_weather_realism,
+            artifacts.get("operational_residual_artifact"),
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+            evaluation_mode="weather_realism_origin_available_shadow",
         )
         corrected = _merge_weather_realism(corrected, corrected_weather_realism)
     _log_and_record_timing(
@@ -1024,6 +1054,20 @@ def _june_hot_origin_diagnostics(bt: pd.DataFrame) -> pd.DataFrame:
         "Pre_Focused_Guard_Forecast_MWH", "Post_Focused_Guard_Forecast_MWH",
         "Focused_Guard_Applied_Flag", "Focused_Scorecard_Guard_MWH",
         "Focused_Scorecard_Guard_Source", "Final_Backtest_Forecast_MWH", "Final_Forecast_MWH",
+        "Auto_Residual_Model_Version", "Auto_Residual_Shadow_Mode",
+        "Auto_Residual_Production_Scope",
+        "Auto_Residual_Base_Forecast_MWH", "Auto_Residual_Correction_MWH",
+        "Auto_Residual_Adjusted_Forecast_MWH", "Auto_Residual_Correction_Applied_Flag",
+        "Auto_Residual_Source", "Auto_Residual_Evaluation_Mode",
+        "Auto_Residual_Residual_MWH", "Auto_Residual_AbsError_MWH",
+        "Auto_Residual_Delta_AbsError_MWH",
+        "Auto_Residual_Full_Shadow_Correction_MWH",
+        "Auto_Residual_Full_Shadow_Adjusted_Forecast_MWH",
+        "Auto_Residual_Full_Shadow_Correction_Applied_Flag",
+        "Auto_Residual_Full_Shadow_Source",
+        "Auto_Residual_Full_Shadow_Residual_MWH",
+        "Auto_Residual_Full_Shadow_AbsError_MWH",
+        "Auto_Residual_Full_Shadow_Delta_AbsError_MWH",
         "Raw_Residual_MWH", "XGB_Residual_MWH", "LGB_Residual_MWH", "CatBoost_Residual_MWH",
         "Stage_Selected_Residual_MWH", "Pre_Focused_Guard_Residual_MWH",
         "Post_Focused_Guard_Residual_MWH", "Final_Residual_MWH", "Final_AbsError_MWH",

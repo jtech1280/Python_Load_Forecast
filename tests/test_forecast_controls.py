@@ -22,11 +22,296 @@ from forecasting.forecast.recent_residual_correction import (
 )
 from forecasting.forecast.uncertainty_bands import _band_risk_multiplier, _prep, apply_bands
 from forecasting.forecast.weather_robustness_hedge import apply_weather_robustness_hedge
+from forecasting.forecast.operational_residual_learner import (
+    apply_operational_residual_learner,
+    build_operational_residual_learner,
+    simulate_operational_residual_learner_backtest,
+)
 from forecasting.model.ensemble import blend_predictions
 from forecasting.data.local_weather_loader import apply_dynamic_temperature_calibration
 
 
 class ForecastControlTests(unittest.TestCase):
+    def test_operational_residual_learner_shadow_keeps_final_forecast(self):
+        dt = pd.date_range("2026-07-01", periods=72, freq="h")
+        train = pd.DataFrame(
+            {
+                "DT": dt,
+                "Hour": dt.hour,
+                "Month": dt.month,
+                "Actual_MWH": 108.0,
+                "Final_Backtest_Forecast_MWH": 100.0,
+                "Final_Residual_MWH": 8.0,
+                "Raw_Forecast_MWH": 98.0,
+                "XGB_Pred_MWH": 99.0,
+                "LGB_Pred_MWH": 100.0,
+                "CatBoost_Pred_MWH": 97.0,
+                "Prophet_Pred_MWH": 110.0,
+                "Temperature_DailyMax": 101.0,
+                "Temperature": 98.0,
+                "CloudCover_Norm": 0.0,
+            }
+        )
+        config = {
+            "operational_residual_learner": {
+                "enabled": True,
+                "shadow_mode": True,
+                "min_rows": 24,
+                "min_samples_leaf": 2,
+                "max_iter": 20,
+                "blend": 0.5,
+                "cap_mwh": 6.0,
+                "total_cap_mwh": 6.0,
+                "hot_peak": {"enabled": False},
+            }
+        }
+        artifact = build_operational_residual_learner(
+            train,
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+        )
+        future = train.tail(2).rename(columns={"Final_Backtest_Forecast_MWH": "Final_Forecast_MWH"}).copy()
+        original = future["Final_Forecast_MWH"].copy()
+
+        out = apply_operational_residual_learner(
+            future,
+            artifact,
+            config,
+            forecast_col="Final_Forecast_MWH",
+        )
+
+        self.assertTrue((out["Final_Forecast_MWH"] == original).all())
+        self.assertTrue((out["Auto_Residual_Correction_MWH"] > 0.0).all())
+        self.assertTrue((out["Auto_Residual_Adjusted_Forecast_MWH"] > original).all())
+        self.assertTrue((out["Auto_Residual_Shadow_Mode"] == 1).all())
+
+    def test_operational_residual_learner_hot_peak_gate_requires_low_forecast_signal(self):
+        dt = pd.date_range("2026-07-01", periods=96, freq="h")
+        train = pd.DataFrame(
+            {
+                "DT": dt,
+                "Hour": dt.hour,
+                "Month": dt.month,
+                "Actual_MWH": 108.0,
+                "Final_Backtest_Forecast_MWH": 100.0,
+                "Final_Residual_MWH": 8.0,
+                "Raw_Forecast_MWH": 98.0,
+                "MWH_SameHour7DayMean": 80.0,
+                "XGB_Pred_MWH": 99.0,
+                "LGB_Pred_MWH": 100.0,
+                "CatBoost_Pred_MWH": 97.0,
+                "Prophet_Pred_MWH": 110.0,
+                "Temperature_DailyMax": 101.0,
+                "Temperature": 98.0,
+                "CloudCover_Norm": 0.0,
+            }
+        )
+        config = {
+            "operational_residual_learner": {
+                "enabled": True,
+                "shadow_mode": True,
+                "min_rows": 24,
+                "min_samples_leaf": 2,
+                "max_iter": 20,
+                "blend": 0.5,
+                "cap_mwh": 6.0,
+                "total_cap_mwh": 6.0,
+                "hot_peak": {
+                    "enabled": True,
+                    "min_rows": 2,
+                    "min_samples_leaf": 2,
+                    "hours": [17],
+                    "min_maxtemp_f": 90.0,
+                    "blend": 0.5,
+                    "cap_mwh": 6.0,
+                    "positive_gate": {
+                        "enabled": True,
+                        "min_raw_minus_samehour_7day_mean_mwh": 20.0,
+                        "max_raw_minus_samehour_7day_mean_mwh": 35.0,
+                        "min_raw_minus_samehour_yesterday_mwh": 20.0,
+                        "max_final_minus_raw_forecast_mwh": 14.0,
+                        "max_cloud_cover_norm": 0.20,
+                        "allow_negative_correction": False,
+                    },
+                },
+            }
+        }
+        artifact = build_operational_residual_learner(
+            train,
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+        )
+        future = pd.DataFrame(
+            {
+                "DT": pd.date_range("2026-07-05 17:00", periods=6, freq="24h"),
+                "Hour": [17, 17, 17, 17, 17, 17],
+                "Month": [7, 7, 7, 7, 7, 7],
+                "Final_Forecast_MWH": [100.0, 100.0, 100.0, 100.0, 100.0, 116.0],
+                "Raw_Forecast_MWH": [98.0, 98.0, 98.0, 98.0, 98.0, 98.0],
+                "MWH_SameHour7DayMean": [95.0, 70.0, 55.0, 70.0, 70.0, 70.0],
+                "MWH_Lag24": [75.0, 75.0, 75.0, 85.0, 75.0, 75.0],
+                "Temperature_DailyMax": [101.0, 101.0, 101.0, 101.0, 101.0, 101.0],
+                "Temperature": [98.0, 98.0, 98.0, 98.0, 98.0, 98.0],
+                "CloudCover_Norm": [0.0, 0.0, 0.0, 0.0, 0.60, 0.0],
+            }
+        )
+
+        out = apply_operational_residual_learner(
+            future,
+            artifact,
+            config,
+            forecast_col="Final_Forecast_MWH",
+        )
+
+        self.assertEqual(out.loc[0, "Auto_Residual_Correction_MWH"], 0.0)
+        self.assertEqual(out.loc[0, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked")
+        self.assertGreater(out.loc[1, "Auto_Residual_Correction_MWH"], 0.0)
+        self.assertEqual(out.loc[1, "Auto_Residual_Source"], "global+hot_peak")
+        self.assertEqual(out.loc[2, "Auto_Residual_Correction_MWH"], 0.0)
+        self.assertEqual(out.loc[2, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked")
+        self.assertEqual(out.loc[3, "Auto_Residual_Correction_MWH"], 0.0)
+        self.assertEqual(out.loc[3, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked")
+        self.assertEqual(out.loc[4, "Auto_Residual_Correction_MWH"], 0.0)
+        self.assertEqual(out.loc[4, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked")
+        self.assertEqual(out.loc[5, "Auto_Residual_Correction_MWH"], 0.0)
+        self.assertEqual(out.loc[5, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked")
+
+    def test_operational_residual_learner_hot_peak_only_scope_updates_only_gated_hot_rows(self):
+        dt = pd.date_range("2026-07-01", periods=96, freq="h")
+        train = pd.DataFrame(
+            {
+                "DT": dt,
+                "Hour": dt.hour,
+                "Month": dt.month,
+                "Actual_MWH": 108.0,
+                "Final_Backtest_Forecast_MWH": 100.0,
+                "Final_Residual_MWH": 8.0,
+                "Raw_Forecast_MWH": 98.0,
+                "MWH_SameHour7DayMean": 70.0,
+                "MWH_Lag24": 75.0,
+                "XGB_Pred_MWH": 99.0,
+                "LGB_Pred_MWH": 100.0,
+                "CatBoost_Pred_MWH": 97.0,
+                "Prophet_Pred_MWH": 110.0,
+                "Temperature_DailyMax": 101.0,
+                "Temperature": 98.0,
+                "CloudCover_Norm": 0.0,
+            }
+        )
+        config = {
+            "operational_residual_learner": {
+                "enabled": True,
+                "shadow_mode": False,
+                "production_scope": "hot_peak_only",
+                "min_rows": 24,
+                "min_samples_leaf": 2,
+                "max_iter": 20,
+                "blend": 0.5,
+                "cap_mwh": 6.0,
+                "total_cap_mwh": 6.0,
+                "hot_peak": {
+                    "enabled": True,
+                    "min_rows": 2,
+                    "min_samples_leaf": 2,
+                    "hours": [17],
+                    "min_maxtemp_f": 90.0,
+                    "blend": 0.5,
+                    "cap_mwh": 6.0,
+                    "positive_gate": {
+                        "enabled": True,
+                        "min_raw_minus_samehour_7day_mean_mwh": 20.0,
+                        "max_raw_minus_samehour_7day_mean_mwh": 35.0,
+                        "min_raw_minus_samehour_yesterday_mwh": 20.0,
+                        "max_final_minus_raw_forecast_mwh": 14.0,
+                        "max_cloud_cover_norm": 0.20,
+                        "allow_negative_correction": False,
+                    },
+                },
+            }
+        }
+        artifact = build_operational_residual_learner(
+            train,
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+        )
+        future = pd.DataFrame(
+            {
+                "DT": pd.to_datetime(["2026-07-05 10:00", "2026-07-05 17:00"]),
+                "Hour": [10, 17],
+                "Month": [7, 7],
+                "Final_Forecast_MWH": [100.0, 100.0],
+                "Stage_Selected_Forecast_MWH": [100.0, 100.0],
+                "Raw_Forecast_MWH": [98.0, 98.0],
+                "MWH_SameHour7DayMean": [70.0, 70.0],
+                "MWH_Lag24": [75.0, 75.0],
+                "Temperature_DailyMax": [101.0, 101.0],
+                "Temperature": [98.0, 98.0],
+                "CloudCover_Norm": [0.0, 0.0],
+            }
+        )
+
+        out = apply_operational_residual_learner(
+            future,
+            artifact,
+            config,
+            forecast_col="Final_Forecast_MWH",
+            also_update_cols=("Stage_Selected_Forecast_MWH",),
+        )
+
+        self.assertEqual(out.loc[0, "Auto_Residual_Production_Scope"], "hot_peak_only")
+        self.assertEqual(out.loc[1, "Auto_Residual_Production_Scope"], "hot_peak_only")
+        self.assertTrue((out["Auto_Residual_Shadow_Mode"] == 0).all())
+        self.assertGreater(out.loc[0, "Auto_Residual_Full_Shadow_Correction_MWH"], 0.0)
+        self.assertEqual(out.loc[0, "Auto_Residual_Correction_MWH"], 0.0)
+        self.assertEqual(out.loc[0, "Auto_Residual_Source"], "global_shadow_only")
+        self.assertEqual(out.loc[0, "Final_Forecast_MWH"], 100.0)
+        self.assertEqual(out.loc[0, "Stage_Selected_Forecast_MWH"], 100.0)
+        self.assertGreater(out.loc[1, "Auto_Residual_Correction_MWH"], 0.0)
+        self.assertEqual(out.loc[1, "Auto_Residual_Source"], "global+hot_peak")
+        self.assertGreater(out.loc[1, "Final_Forecast_MWH"], 100.0)
+        self.assertEqual(out.loc[1, "Stage_Selected_Forecast_MWH"], out.loc[1, "Final_Forecast_MWH"])
+
+    def test_operational_residual_learner_walk_forward_marks_insufficient_history(self):
+        dt = pd.date_range("2026-07-01", periods=96, freq="h")
+        df = pd.DataFrame(
+            {
+                "DT": dt,
+                "Hour": dt.hour,
+                "Month": dt.month,
+                "Actual_MWH": 105.0,
+                "Final_Backtest_Forecast_MWH": 100.0,
+                "Final_Residual_MWH": 5.0,
+                "Raw_Forecast_MWH": 98.0,
+                "Prophet_Pred_MWH": 108.0,
+                "Temperature_DailyMax": 95.0,
+                "CloudCover_Norm": 0.0,
+            }
+        )
+        config = {
+            "operational_residual_learner": {
+                "enabled": True,
+                "shadow_mode": True,
+                "min_rows": 24,
+                "backtest_min_train_rows": 48,
+                "min_samples_leaf": 2,
+                "max_iter": 20,
+                "blend": 0.5,
+                "cap_mwh": 6.0,
+                "total_cap_mwh": 6.0,
+                "hot_peak": {"enabled": False},
+            }
+        }
+
+        out = simulate_operational_residual_learner_backtest(
+            df,
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+        )
+
+        self.assertEqual(out.loc[0, "Auto_Residual_Source"], "insufficient_walk_forward_history")
+        self.assertTrue((out["Final_Backtest_Forecast_MWH"] == 100.0).all())
+        self.assertTrue((out["Auto_Residual_Adjusted_Forecast_MWH"] >= 100.0).all())
+
     def test_weather_robustness_hedge_derives_forecast_day_from_dt(self):
         df = pd.DataFrame(
             {

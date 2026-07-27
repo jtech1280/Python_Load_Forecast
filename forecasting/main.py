@@ -232,6 +232,17 @@ def _archive_replay_diagnostic_snapshots(
         "Post_Focused_Guard_Forecast_MWH",
         "Focused_Guard_Applied_Flag",
         "Focused_Scorecard_Guard_MWH",
+        "Auto_Residual_Model_Version",
+        "Auto_Residual_Shadow_Mode",
+        "Auto_Residual_Production_Scope",
+        "Auto_Residual_Correction_MWH",
+        "Auto_Residual_Adjusted_Forecast_MWH",
+        "Auto_Residual_Correction_Applied_Flag",
+        "Auto_Residual_Source",
+        "Auto_Residual_Full_Shadow_Correction_MWH",
+        "Auto_Residual_Full_Shadow_Adjusted_Forecast_MWH",
+        "Auto_Residual_Full_Shadow_Correction_Applied_Flag",
+        "Auto_Residual_Full_Shadow_Source",
         "Final_Backtest_Forecast_MWH",
         "Final_Forecast_MWH",
         "Final_Residual_MWH",
@@ -558,6 +569,7 @@ def main(argv: list[str] | None = None):
         results.setdefault("diagnostics", {})["production_readiness_scorecard"] = build_production_readiness_scorecard(
             results.get("backtest"),
             replay_df,
+            config=config,
         )
         print(
             "Rolling-origin replay: "
@@ -596,6 +608,17 @@ def main(argv: list[str] | None = None):
                 "WeatherScenario_Spread_MWH",
                 "WeatherScenario_MaxAbsDelta_MWH",
                 "WeatherScenario_Cap_Applied",
+                "Auto_Residual_Model_Version",
+                "Auto_Residual_Shadow_Mode",
+                "Auto_Residual_Production_Scope",
+                "Auto_Residual_Correction_MWH",
+                "Auto_Residual_Adjusted_Forecast_MWH",
+                "Auto_Residual_Correction_Applied_Flag",
+                "Auto_Residual_Source",
+                "Auto_Residual_Full_Shadow_Correction_MWH",
+                "Auto_Residual_Full_Shadow_Adjusted_Forecast_MWH",
+                "Auto_Residual_Full_Shadow_Correction_Applied_Flag",
+                "Auto_Residual_Full_Shadow_Source",
             ],
             metadata={"Source": "production_forecast"},
         )
