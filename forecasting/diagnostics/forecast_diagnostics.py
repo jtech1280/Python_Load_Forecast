@@ -486,7 +486,25 @@ def build_top_error_tables(df: pd.DataFrame, n: int = 100, forecast_col: str = "
         "Actual_MWH", "Stage_Forecast_MWH", "Raw_Forecast_MWH", "Residual_Calibrated_Forecast_MWH", "Warm_Ramp_Adjusted_Forecast_MWH", "Cloud_Solar_Adjusted_Forecast_MWH", "Peak_Risk_Adjusted_Forecast_MWH", "Recent_Corrected_Forecast_MWH", "XGB_Pred_MWH", "LGB_Pred_MWH", "CatBoost_Pred_MWH", "Prophet_Pred_MWH",
         "Stage_Residual_MWH", "Stage_AbsError_MWH", "Stage_APE", "Temperature", "Temperature_DailyMax", "DailyMaxTempBucket",
         "CloudCover_Norm", "CloudCoverBucket", "BTM_Solar_Proxy_MW", "BTMSolarBucket", "SolarLossBucket",
-        "BTM_Solar_Loss_From_ClearSky_MW", "Cloud_Solar_Shape_Cal_MWH", "Cloud_Solar_Shape_Raw_Cal_MWH", "CloudSolarEventClass", "CloudSolarEventMultiplier", "CloudSolarBaseBucket", "Humidity_Norm", "WindSpeed_Mph", "PrecipIn", "IsWeekend", "IsHoliday",
+        "BTM_Solar_Loss_From_ClearSky_MW", "Cloud_Solar_Shape_Cal_MWH", "Cloud_Solar_Shape_Raw_Cal_MWH", "CloudSolarEventClass", "CloudSolarEventMultiplier", "CloudSolarBaseBucket",
+        "Humidity_Norm", "WindSpeed_Mph", "WindDirection_Deg", "WindDirection_Available_Flag",
+        "Westerly_Flow_Mph", "Westerly_Flow_Flag", "WindRamp_1Hr_Mph", "WindRamp_3Hr_Mph",
+        "WindRamp_Next1Hr_Mph", "WindRamp_Next3Hr_Mph", "WesterlyFlow_Ramp_1Hr_Mph",
+        "WesterlyFlow_Ramp_3Hr_Mph", "WesterlyFlow_Next1Hr_Ramp_Mph", "WesterlyFlow_Next3Hr_Ramp_Mph",
+        "Temperature_Drop_From_DailyMax_F", "TempDrop_1Hr_F", "TempDrop_2Hr_F", "TempDrop_3Hr_F",
+        "TempDrop_Next1Hr_F", "TempDrop_Next2Hr_F", "TempDrop_Next3Hr_F",
+        "IsPostPeakEvening18to23", "ClearHotEvening_Flag", "ClearVeryHotEvening_Flag",
+        "ClearHotEvening_x_TempDropFromDailyMax", "ClearHotEvening_x_ForecastDropNext3Hr",
+        "ClearHotEvening_x_WesterlyFlow", "ClearHotEvening_x_WesterlyFlowRamp",
+        "DeltaBreeze_Westerly_Flow_Flag", "DeltaBreeze_EveningWindRamp_Flag",
+        "DeltaBreeze_Cooling_Flag", "DeltaBreeze_Cooling_Signal",
+        "DeltaBreeze_CoolingNoDirection_Signal", "DeltaBreeze_ClearHotEvening_Signal",
+        "Load_Decay_1Hr_MWH", "Load_Decay_2Hr_MWH",
+        "Lag1_Minus_SameHourYesterday_MWH", "Lag1_Minus_SameHour7DayMean_MWH",
+        "PostPeak_LoadDecay_1Hr_MWH", "PostPeak_LoadDecay_2Hr_MWH",
+        "PostPeak_LoadDecay_VsSameHourYesterday_MWH", "PostPeak_LoadDecay_VsSameHour7DayMean_MWH",
+        "ClearHotEvening_LoadDecay_Vs7Day_MWH", "DeltaBreeze_PostPeak_LoadDecay_Signal",
+        "PrecipIn", "IsWeekend", "IsHoliday",
     ]
     work["ForecastColumn"] = forecast_col
     keep = [c for c in keep if c in work.columns]
@@ -631,6 +649,102 @@ def build_forecast_stage_metrics(df: pd.DataFrame) -> pd.DataFrame:
     if not final_mae.empty:
         out["MAE_Delta_vs_Final_MWH"] = out["MAE_MWH"] - float(final_mae.iloc[0])
     return out.sort_values("MAE_MWH").reset_index(drop=True)
+
+
+def _feature_mean(df: pd.DataFrame, col: str) -> float:
+    if col not in df.columns or df.empty:
+        return np.nan
+    values = _as_num(df[col])
+    return float(values.mean()) if values.notna().any() else np.nan
+
+
+def build_delta_breeze_shape_metrics_by_stage(df: pd.DataFrame, min_count: int = 1) -> pd.DataFrame:
+    """Stage accuracy on explicit evening-cooling / Delta Breeze diagnostic slices."""
+    if df is None or df.empty or "Actual_MWH" not in df.columns:
+        return pd.DataFrame()
+    work = df.copy()
+    if "Hour" not in work.columns and "DT" in work.columns:
+        work["Hour"] = _local_datetime_series(work["DT"]).dt.hour
+    stages = _available_stage_columns(work)
+    if not stages:
+        return pd.DataFrame()
+
+    hour = _as_num(work.get("Hour", pd.Series(np.nan, index=work.index)))
+    daily_max = _as_num(work.get("Temperature_DailyMax", pd.Series(np.nan, index=work.index)))
+    cloud = _as_num(work.get("CloudCover_Norm", pd.Series(np.nan, index=work.index)))
+    wind_direction_available = _as_num(work.get("WindDirection_Available_Flag", pd.Series(0.0, index=work.index))).fillna(0.0).gt(0)
+    westerly_flag = _as_num(work.get("Westerly_Flow_Flag", pd.Series(0.0, index=work.index))).fillna(0.0).gt(0)
+    clear_hot = _as_num(work.get("ClearHotEvening_Flag", pd.Series(0.0, index=work.index))).fillna(0.0).gt(0)
+    cooling_from_max = _as_num(work.get("Temperature_Drop_From_DailyMax_F", pd.Series(np.nan, index=work.index))).ge(5.0)
+    forecast_cooling = _as_num(work.get("TempDrop_Next3Hr_F", pd.Series(np.nan, index=work.index))).ge(6.0)
+    delta_cooling = _as_num(work.get("DeltaBreeze_Cooling_Flag", pd.Series(0.0, index=work.index))).fillna(0.0).gt(0)
+    delta_westerly = _as_num(work.get("DeltaBreeze_Westerly_Flow_Flag", pd.Series(0.0, index=work.index))).fillna(0.0).gt(0)
+    delta_wind_ramp = _as_num(work.get("DeltaBreeze_EveningWindRamp_Flag", pd.Series(0.0, index=work.index))).fillna(0.0).gt(0)
+    post_peak = _as_num(work.get("IsPostPeakEvening18to23", pd.Series(np.nan, index=work.index))).fillna(0.0).gt(0)
+    if not post_peak.any():
+        post_peak = hour.between(18, 23)
+
+    masks: list[tuple[str, pd.Series]] = [
+        ("post_peak_evening_18_23", post_peak),
+        ("clear_hot_evening_95plus", clear_hot),
+        ("clear_hot_evening_wind_direction_available", clear_hot & wind_direction_available),
+        ("clear_hot_evening_westerly", clear_hot & westerly_flag),
+        ("clear_hot_evening_cooling_from_max_5f", clear_hot & cooling_from_max),
+        ("clear_hot_evening_forecast_cooling_next3hr_6f", clear_hot & forecast_cooling),
+        ("delta_breeze_westerly_cooling", delta_westerly & delta_cooling),
+        ("delta_breeze_westerly_ramp", delta_westerly & delta_wind_ramp),
+        ("delta_breeze_cooling_no_direction", clear_hot & delta_cooling),
+        ("hot_clear_evening_proxy_without_direction", hour.between(18, 23) & daily_max.ge(95.0) & cloud.le(0.20)),
+    ]
+    feature_cols = [
+        "Temperature_Drop_From_DailyMax_F",
+        "TempDrop_1Hr_F",
+        "TempDrop_2Hr_F",
+        "TempDrop_3Hr_F",
+        "TempDrop_Next1Hr_F",
+        "TempDrop_Next2Hr_F",
+        "TempDrop_Next3Hr_F",
+        "WindSpeed_Mph",
+        "WindDirection_Available_Flag",
+        "Westerly_Flow_Mph",
+        "Westerly_Flow_Flag",
+        "WindRamp_1Hr_Mph",
+        "WindRamp_3Hr_Mph",
+        "WesterlyFlow_Ramp_1Hr_Mph",
+        "WesterlyFlow_Ramp_3Hr_Mph",
+        "ClearHotEvening_Flag",
+        "DeltaBreeze_Westerly_Flow_Flag",
+        "DeltaBreeze_EveningWindRamp_Flag",
+        "DeltaBreeze_Cooling_Flag",
+        "PostPeak_LoadDecay_1Hr_MWH",
+        "PostPeak_LoadDecay_2Hr_MWH",
+        "PostPeak_LoadDecay_VsSameHourYesterday_MWH",
+        "PostPeak_LoadDecay_VsSameHour7DayMean_MWH",
+        "DeltaBreeze_PostPeak_LoadDecay_Signal",
+    ]
+
+    rows: list[dict[str, Any]] = []
+    for slice_name, mask in masks:
+        mask = pd.Series(mask, index=work.index).fillna(False).astype(bool)
+        subset = work.loc[mask].copy()
+        if len(subset) < int(min_count):
+            continue
+        for stage, forecast_col in stages.items():
+            if stage.startswith("baseline_") or forecast_col not in subset.columns:
+                continue
+            metrics = _metric_dict(subset["Actual_MWH"], subset[forecast_col], label=stage, col=forecast_col)
+            if not metrics:
+                continue
+            row = {"Slice": slice_name}
+            row.update(metrics)
+            for feature_col in feature_cols:
+                row[f"Mean_{feature_col}"] = _feature_mean(subset, feature_col)
+            rows.append(row)
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    sort_cols = [c for c in ["Slice", "MAE_MWH", "Stage"] if c in out.columns]
+    return out.sort_values(sort_cols, ascending=[True, False, True][:len(sort_cols)]).reset_index(drop=True)
 
 
 def build_model_component_metrics(df: pd.DataFrame) -> pd.DataFrame:
@@ -980,6 +1094,7 @@ def build_diagnostics_bundle(
         # V12.4 stage-aware diagnostics.
         "model_component_metrics": build_model_component_metrics(bt),
         "forecast_stage_metrics": build_forecast_stage_metrics(bt),
+        "delta_breeze_shape_metrics_by_stage": build_delta_breeze_shape_metrics_by_stage(bt, min_count=min_segment_count),
         "backtest_metrics_by_segment_by_stage": build_backtest_metrics_by_segment_by_stage(bt, min_count=min_segment_count),
         "error_by_hour_by_stage": build_metrics_by_group_by_stage(bt, ["Hour"], min_count=1),
         "error_by_forecast_lead_hour_by_stage": build_metrics_by_group_by_stage(bt, ["Forecast_Lead_Hour"], min_count=1),

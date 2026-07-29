@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from forecasting.features.weather_features import add_heat_persistence_features
+from forecasting.features.weather_features import add_delta_breeze_weather_shape_features, add_heat_persistence_features
 
 
 def _cfg(config: dict | None) -> dict:
@@ -72,6 +72,7 @@ def _recompute_weather_temperature(out: pd.DataFrame) -> pd.DataFrame:
     out["Humidity_x_Temp"] = humidity * temp
     if "WindSpeed_Mph" in out.columns:
         out["Wind_x_Temp"] = pd.to_numeric(out["WindSpeed_Mph"], errors="coerce").fillna(0.0) * temp
+    out = add_delta_breeze_weather_shape_features(out)
     out = add_heat_persistence_features(out)
     return out
 
@@ -151,6 +152,7 @@ def make_weather_scenario_frame(base_future_frame: pd.DataFrame, scenario: dict[
     if cloud_delta or ghi_multiplier != 1.0:
         out = _recompute_solar_cloud(out)
 
+    out = add_delta_breeze_weather_shape_features(out)
     out["Weather_Scenario_Name"] = str(scenario.get("name", "scenario"))
     return out
 

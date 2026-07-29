@@ -94,6 +94,151 @@ def add_heat_persistence_features(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _numeric_series(df: pd.DataFrame, col: str, default: float = np.nan) -> pd.Series:
+    if col in df.columns:
+        return pd.to_numeric(df[col], errors="coerce")
+    return pd.Series(default, index=df.index, dtype=float)
+
+
+def _shift_within_date(df: pd.DataFrame, values: pd.Series, periods: int) -> pd.Series:
+    if "DT" not in df.columns:
+        return values.shift(periods)
+    date = df["Date"] if "Date" in df.columns else pd.to_datetime(df["DT"], errors="coerce").dt.date
+    work = pd.DataFrame(
+        {
+            "_idx": df.index,
+            "_date": date,
+            "_dt": pd.to_datetime(df["DT"], errors="coerce"),
+            "_value": pd.to_numeric(values, errors="coerce"),
+        }
+    ).sort_values(["_date", "_dt"])
+    work["_shifted"] = work.groupby("_date", dropna=False)["_value"].shift(periods)
+    return work.set_index("_idx")["_shifted"].reindex(df.index)
+
+
+def _direction_delta_deg(direction: pd.Series, center_deg: float) -> pd.Series:
+    return ((direction - float(center_deg) + 180.0) % 360.0) - 180.0
+
+
+def add_delta_breeze_weather_shape_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add leakage-safe weather-shape features for evening cooling / Delta Breeze diagnosis.
+
+    Wind direction is meteorological "from" direction. A direction near 270 degrees means
+    westerly flow: air coming from the Pacific/Bay-Delta side and blowing east toward Roseville.
+    """
+    out = df.copy()
+    if "DT" not in out.columns:
+        return out
+    if "Date" not in out.columns:
+        out["Date"] = pd.to_datetime(out["DT"], errors="coerce").dt.date
+
+    hour = _numeric_series(out, "Hour")
+    if hour.isna().all():
+        hour = pd.to_datetime(out["DT"], errors="coerce").dt.hour.astype(float)
+    temperature = _numeric_series(out, "Temperature")
+    daily_max = _numeric_series(out, "Temperature_DailyMax")
+    wind_speed = _numeric_series(out, "WindSpeed_Mph", 0.0).fillna(0.0)
+    cloud_norm = _numeric_series(out, "CloudCover_Norm")
+    if cloud_norm.isna().all() and "CloudCoverPct" in out.columns:
+        cloud_norm = (_numeric_series(out, "CloudCoverPct") / 100.0).clip(0.0, 1.0)
+    cloud_norm = cloud_norm.clip(0.0, 1.0)
+
+    direction = _numeric_series(out, "WindDirectionDeg")
+    if direction.isna().all():
+        direction = _numeric_series(out, "WindDirection_Deg")
+    direction = direction % 360.0
+    direction_available = direction.notna().astype(float)
+
+    out["WindDirection_Deg"] = direction
+    out["WindDirection_Available_Flag"] = direction_available
+    radians = np.deg2rad(direction)
+    out["WindDir_Sin"] = pd.Series(np.sin(radians), index=out.index).where(direction.notna(), 0.0)
+    out["WindDir_Cos"] = pd.Series(np.cos(radians), index=out.index).where(direction.notna(), 0.0)
+
+    westerly_component = wind_speed * np.cos(np.deg2rad(_direction_delta_deg(direction, 270.0)))
+    out["Westerly_Wind_Component_Mph"] = pd.Series(westerly_component, index=out.index).where(direction.notna(), 0.0)
+    out["Westerly_Flow_Mph"] = out["Westerly_Wind_Component_Mph"].clip(lower=0.0).fillna(0.0)
+    westerly_sector = direction.notna() & _direction_delta_deg(direction, 270.0).abs().le(45.0)
+    out["Westerly_Flow_Flag"] = (westerly_sector & out["Westerly_Flow_Mph"].ge(3.0)).astype(float)
+
+    temp_prior_1 = _shift_within_date(out, temperature, 1)
+    temp_prior_2 = _shift_within_date(out, temperature, 2)
+    temp_prior_3 = _shift_within_date(out, temperature, 3)
+    temp_next_1 = _shift_within_date(out, temperature, -1)
+    temp_next_2 = _shift_within_date(out, temperature, -2)
+    temp_next_3 = _shift_within_date(out, temperature, -3)
+
+    out["Temperature_Drop_From_DailyMax_F"] = (daily_max - temperature).clip(lower=0.0)
+    out["TempDrop_1Hr_F"] = (temp_prior_1 - temperature).clip(lower=0.0)
+    out["TempDrop_2Hr_F"] = (temp_prior_2 - temperature).clip(lower=0.0)
+    out["TempDrop_3Hr_F"] = (temp_prior_3 - temperature).clip(lower=0.0)
+    out["TempDrop_Next1Hr_F"] = (temperature - temp_next_1).clip(lower=0.0)
+    out["TempDrop_Next2Hr_F"] = (temperature - temp_next_2).clip(lower=0.0)
+    out["TempDrop_Next3Hr_F"] = (temperature - temp_next_3).clip(lower=0.0)
+
+    wind_prior_1 = _shift_within_date(out, wind_speed, 1)
+    wind_prior_3 = _shift_within_date(out, wind_speed, 3)
+    wind_next_1 = _shift_within_date(out, wind_speed, -1)
+    wind_next_3 = _shift_within_date(out, wind_speed, -3)
+    out["WindRamp_1Hr_Mph"] = (wind_speed - wind_prior_1).fillna(0.0)
+    out["WindRamp_3Hr_Mph"] = (wind_speed - wind_prior_3).fillna(0.0)
+    out["WindRamp_Next1Hr_Mph"] = (wind_next_1 - wind_speed).fillna(0.0)
+    out["WindRamp_Next3Hr_Mph"] = (wind_next_3 - wind_speed).fillna(0.0)
+
+    westerly_flow = pd.to_numeric(out["Westerly_Flow_Mph"], errors="coerce").fillna(0.0)
+    west_prior_1 = _shift_within_date(out, westerly_flow, 1)
+    west_prior_3 = _shift_within_date(out, westerly_flow, 3)
+    west_next_1 = _shift_within_date(out, westerly_flow, -1)
+    west_next_3 = _shift_within_date(out, westerly_flow, -3)
+    out["WesterlyFlow_Ramp_1Hr_Mph"] = (westerly_flow - west_prior_1).fillna(0.0)
+    out["WesterlyFlow_Ramp_3Hr_Mph"] = (westerly_flow - west_prior_3).fillna(0.0)
+    out["WesterlyFlow_Next1Hr_Ramp_Mph"] = (west_next_1 - westerly_flow).fillna(0.0)
+    out["WesterlyFlow_Next3Hr_Ramp_Mph"] = (west_next_3 - westerly_flow).fillna(0.0)
+
+    post_peak_evening = hour.between(18, 23)
+    clear_hot_evening = post_peak_evening & daily_max.ge(95.0) & cloud_norm.le(0.20)
+    clear_very_hot_evening = post_peak_evening & daily_max.ge(100.0) & cloud_norm.le(0.20)
+    cooling_flag = clear_hot_evening & (
+        pd.to_numeric(out["Temperature_Drop_From_DailyMax_F"], errors="coerce").ge(5.0)
+        | pd.to_numeric(out["TempDrop_Next3Hr_F"], errors="coerce").ge(6.0)
+    )
+    westerly_ramp_flag = (
+        clear_hot_evening
+        & out["Westerly_Flow_Flag"].eq(1.0)
+        & (
+            pd.to_numeric(out["WesterlyFlow_Ramp_1Hr_Mph"], errors="coerce").ge(2.0)
+            | pd.to_numeric(out["WesterlyFlow_Ramp_3Hr_Mph"], errors="coerce").ge(3.0)
+            | pd.to_numeric(out["WesterlyFlow_Next1Hr_Ramp_Mph"], errors="coerce").ge(2.0)
+            | pd.to_numeric(out["WesterlyFlow_Next3Hr_Ramp_Mph"], errors="coerce").ge(3.0)
+        )
+    )
+
+    out["IsPostPeakEvening18to23"] = post_peak_evening.astype(float)
+    out["ClearHotEvening_Flag"] = clear_hot_evening.astype(float)
+    out["ClearVeryHotEvening_Flag"] = clear_very_hot_evening.astype(float)
+    out["ClearHotEvening_x_TempDropFromDailyMax"] = out["ClearHotEvening_Flag"] * out["Temperature_Drop_From_DailyMax_F"].fillna(0.0)
+    out["ClearHotEvening_x_ForecastDropNext3Hr"] = out["ClearHotEvening_Flag"] * out["TempDrop_Next3Hr_F"].fillna(0.0)
+    out["ClearHotEvening_x_WesterlyFlow"] = out["ClearHotEvening_Flag"] * out["Westerly_Flow_Mph"].fillna(0.0)
+    out["ClearHotEvening_x_WesterlyFlowRamp"] = out["ClearHotEvening_Flag"] * out["WesterlyFlow_Ramp_3Hr_Mph"].clip(lower=0.0).fillna(0.0)
+    out["DeltaBreeze_Westerly_Flow_Flag"] = (clear_hot_evening & out["Westerly_Flow_Flag"].eq(1.0)).astype(float)
+    out["DeltaBreeze_EveningWindRamp_Flag"] = westerly_ramp_flag.astype(float)
+    out["DeltaBreeze_Cooling_Flag"] = cooling_flag.astype(float)
+    out["DeltaBreeze_Cooling_Signal"] = (
+        out["DeltaBreeze_Cooling_Flag"]
+        * out["Westerly_Flow_Mph"].fillna(0.0)
+        * (out["Temperature_Drop_From_DailyMax_F"].fillna(0.0) + out["TempDrop_Next3Hr_F"].fillna(0.0))
+    )
+    out["DeltaBreeze_CoolingNoDirection_Signal"] = (
+        out["ClearHotEvening_Flag"]
+        * (out["Temperature_Drop_From_DailyMax_F"].fillna(0.0) + out["TempDrop_Next3Hr_F"].fillna(0.0))
+    )
+    out["DeltaBreeze_ClearHotEvening_Signal"] = (
+        out["ClearHotEvening_Flag"]
+        * (out["Temperature_Drop_From_DailyMax_F"].fillna(0.0) + out["TempDrop_Next1Hr_F"].fillna(0.0) + out["TempDrop_Next3Hr_F"].fillna(0.0))
+    )
+    return out
+
+
 def add_weather_features(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["Temperature"] = pd.to_numeric(out.get("TempF"), errors="coerce")
@@ -166,5 +311,6 @@ def add_weather_features(df: pd.DataFrame) -> pd.DataFrame:
     out["Cloud_x_GHI"] = out["CloudCover_Norm"] * out["GHI_Wm2"]
     out["Rain_x_IsWeekend"] = out["Is_Raining"] * out["IsWeekend"]
     out["Hot_Humid_Stress"] = out["CDD"] * out["Humidity_Norm"]
+    out = add_delta_breeze_weather_shape_features(out)
     out = add_heat_persistence_features(out)
     return out

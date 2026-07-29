@@ -168,6 +168,29 @@ class JulyEveningPeakGuardTests(unittest.TestCase):
             }
         }
     }
+    POST_PEAK_BACKOFF_CONFIG = {
+        "calibration": {
+            "stage_selector": {
+                "focused_scorecard_guard": {
+                    "enabled": True,
+                    "total_cap_mwh": 30.0,
+                    "rules": [
+                        {
+                            "name": "july_recent_95_100_clear_post_peak_decay_backoff",
+                            "adjustment_mwh": -3.0,
+                            "allow_without_forecast_day": True,
+                            "months": [7],
+                            "hours": [18, 19, 20, 21, 22, 23],
+                            "min_maxtemp_f": 95.0,
+                            "max_maxtemp_f": 100.0,
+                            "max_cloud_cover_norm": 0.20,
+                            "holiday": False,
+                        }
+                    ],
+                }
+            }
+        }
+    }
 
     def test_july_100plus_clear_evening_hours_get_lift(self):
         df = pd.DataFrame(
@@ -215,6 +238,51 @@ class JulyEveningPeakGuardTests(unittest.TestCase):
         out = apply_focused_scorecard_guard(df, self.GUARD_CONFIG, forecast_col="Final_Forecast_MWH")
         self.assertTrue((out["Focused_Scorecard_Guard_MWH"] == 0.0).all())
 
+    def test_july_clear_95_100_post_peak_decay_backoff_applies_narrowly(self):
+        df = pd.DataFrame(
+            {
+                "DT": pd.to_datetime(
+                    [
+                        "2026-07-27 17:00",
+                        "2026-07-27 18:00",
+                        "2026-07-27 19:00",
+                        "2026-07-27 20:00",
+                        "2026-07-27 21:00",
+                        "2026-07-27 22:00",
+                        "2026-07-27 23:00",
+                        "2026-07-27 18:00",
+                        "2026-07-27 19:00",
+                    ]
+                ),
+                "Final_Forecast_MWH": [260.0] * 9,
+                "Stage_Selected_Forecast_MWH": [260.0] * 9,
+                "Temperature_DailyMax": [96.8, 96.8, 96.8, 96.8, 96.8, 96.8, 96.8, 96.8, 100.0],
+                "CloudCover_Norm": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.0],
+                "IsHoliday": [0] * 9,
+            }
+        )
+        out = apply_focused_scorecard_guard(
+            df,
+            self.POST_PEAK_BACKOFF_CONFIG,
+            forecast_col="Final_Forecast_MWH",
+        )
+
+        self.assertEqual(
+            out["Focused_Scorecard_Guard_MWH"].tolist(),
+            [0.0, -3.0, -3.0, -3.0, -3.0, -3.0, -3.0, 0.0, 0.0],
+        )
+        self.assertEqual(out.loc[1, "Final_Forecast_MWH"], 257.0)
+        self.assertEqual(out.loc[7, "Final_Forecast_MWH"], 260.0)
+        self.assertEqual(out.loc[8, "Final_Forecast_MWH"], 260.0)
+        self.assertTrue(
+            out.loc[1:6, "Focused_Scorecard_Guard_Source"]
+            .str.contains("july_recent_95_100_clear_post_peak_decay_backoff")
+            .all()
+        )
+        self.assertEqual(out.loc[0, "Focused_Scorecard_Guard_Source"], "none")
+        self.assertEqual(out.loc[7, "Focused_Scorecard_Guard_Source"], "none")
+        self.assertEqual(out.loc[8, "Focused_Scorecard_Guard_Source"], "none")
+
     def test_production_config_defines_july_evening_lift_rule(self):
         cfg = load_config()
         rules = (
@@ -230,6 +298,62 @@ class JulyEveningPeakGuardTests(unittest.TestCase):
         self.assertGreaterEqual(float(rule["adjustment_mwh"]), 8.0)
         self.assertEqual(float(rule["min_maxtemp_f"]), 100.0)
         self.assertTrue(bool(rule.get("allow_without_forecast_day")))
+
+    def test_production_config_defines_july_post_peak_decay_backoff_rule(self):
+        cfg = load_config()
+        rules = (
+            cfg["calibration"]["stage_selector"]["focused_scorecard_guard"]["rules"]
+        )
+        rule = next(
+            (r for r in rules if r.get("name") == "july_recent_95_100_clear_post_peak_decay_backoff"),
+            None,
+        )
+        self.assertIsNotNone(rule, "expected the July post-peak decay backoff guard rule in config.yaml")
+        self.assertEqual(rule["months"], [7])
+        self.assertEqual(rule["hours"], [18, 19, 20, 21, 22, 23])
+        self.assertEqual(float(rule["adjustment_mwh"]), -3.0)
+        self.assertEqual(float(rule["min_maxtemp_f"]), 95.0)
+        self.assertEqual(float(rule["max_maxtemp_f"]), 100.0)
+        self.assertLessEqual(float(rule["max_cloud_cover_norm"]), 0.20)
+        self.assertTrue(bool(rule.get("allow_without_forecast_day")))
+
+    def test_production_config_stacks_post_peak_backoff_with_late_evening_lift(self):
+        cfg = load_config()
+        df = pd.DataFrame(
+            {
+                "DT": pd.to_datetime(
+                    [
+                        "2026-07-27 18:00",
+                        "2026-07-27 19:00",
+                        "2026-07-27 20:00",
+                        "2026-07-27 21:00",
+                        "2026-07-27 22:00",
+                        "2026-07-27 23:00",
+                    ]
+                ),
+                "Final_Forecast_MWH": [260.0] * 6,
+                "Stage_Selected_Forecast_MWH": [260.0] * 6,
+                "Temperature_DailyMax": [96.8] * 6,
+                "CloudCover_Norm": [0.0] * 6,
+                "IsHoliday": [0] * 6,
+                "IsWeekend": [0] * 6,
+            }
+        )
+
+        out = apply_focused_scorecard_guard(df, cfg, forecast_col="Final_Forecast_MWH")
+
+        self.assertEqual(out["Focused_Scorecard_Guard_MWH"].tolist(), [-3.0, -3.0, -3.0, -3.0, 0.0, 0.0])
+        self.assertEqual(out["Final_Forecast_MWH"].tolist(), [257.0, 257.0, 257.0, 257.0, 260.0, 260.0])
+        self.assertTrue(
+            out.loc[0:3, "Focused_Scorecard_Guard_Source"]
+            .str.contains("july_recent_95_100_clear_post_peak_decay_backoff")
+            .all()
+        )
+        self.assertTrue(
+            out.loc[4:5, "Focused_Scorecard_Guard_Source"]
+            .str.contains("july_recent_95_100_clear_post_peak_decay_backoff\\+july_clear_warm_late_evening_lift")
+            .all()
+        )
 
 
 if __name__ == "__main__":

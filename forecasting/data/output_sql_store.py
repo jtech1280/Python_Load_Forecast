@@ -33,6 +33,7 @@ DEFAULT_REPLAY_TABLES = {
     "rolling_origin_replay_weekend_metrics_by_stage": "LoadForecastReplayWeekendMetricByStage",
     "rolling_origin_replay_holiday_metrics_by_stage": "LoadForecastReplayHolidayMetricByStage",
     "rolling_origin_replay_long_horizon_metrics_by_stage": "LoadForecastReplayLongHorizonMetricByStage",
+    "rolling_origin_replay_delta_breeze_shape_metrics_by_stage": "LoadForecastReplayDeltaBreezeShapeMetricByStage",
     "rolling_origin_replay_daily_peak_miss_by_stage": "LoadForecastReplayDailyPeakMissByStage",
     "rolling_origin_replay_timing": "LoadForecastReplayTiming",
     "production_readiness_scorecard": "LoadForecastProductionReadinessScorecard",
@@ -343,6 +344,7 @@ def _ensure_forecast_weather_archive_table(conn, schema: str, table: str) -> Non
                     [HumidityPct] FLOAT NULL,
                     [CloudCoverPct] FLOAT NULL,
                     [WindSpeedMph] FLOAT NULL,
+                    [WindDirectionDeg] FLOAT NULL,
                     [PrecipIn] FLOAT NULL,
                     [GHI_Wm2] FLOAT NULL,
                     [IsDay] BIGINT NULL
@@ -351,6 +353,9 @@ def _ensure_forecast_weather_archive_table(conn, schema: str, table: str) -> Non
             """
         )
     )
+    existing = _existing_columns(conn, schema, table)
+    if "WindDirectionDeg" not in existing:
+        conn.execute(text(f"ALTER TABLE {full} ADD [WindDirectionDeg] FLOAT NULL"))
     _ensure_index(conn, schema, table, ["SnapshotID"])
     _ensure_index(conn, schema, table, ["ContentHash"])
     _ensure_index(conn, schema, table, ["ArchivedAtUTC"])
@@ -490,7 +495,7 @@ def _forecast_weather_archive_frame(
 ) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
-    cols = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay"]
+    cols = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "WindDirectionDeg", "PrecipIn", "GHI_Wm2", "IsDay"]
     out = df[[col for col in cols if col in df.columns]].copy()
     if "DT" not in out.columns or out.empty:
         return pd.DataFrame()
@@ -519,7 +524,7 @@ def archive_forecast_weather_snapshot(
     schema = _clean_identifier(sql_cfg.get("schema", "Forecasting"), "schema")
     table = _clean_identifier(sql_cfg.get("forecast_weather_archive_table", "LoadForecastWeatherArchive"), "table")
     chunksize = int(sql_cfg.get("chunksize") or 1000)
-    cols = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay"]
+    cols = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "WindDirectionDeg", "PrecipIn", "GHI_Wm2", "IsDay"]
     canonical = weather_df[[col for col in cols if col in weather_df.columns]].copy()
     if "DT" not in canonical.columns or canonical.empty:
         return None
@@ -605,13 +610,15 @@ def load_archived_forecast_weather(
         with engine.connect() as conn:
             if not _table_exists(conn, schema, table):
                 return pd.DataFrame()
+            existing = _existing_columns(conn, schema, table)
+            wind_direction_sql = "[WindDirectionDeg]" if "WindDirectionDeg" in existing else "CAST(NULL AS FLOAT) AS [WindDirectionDeg]"
             df = pd.read_sql_query(
                 text(
                     f"""
                     SELECT
                         [SnapshotID], [ArchivedAtUTC], [Source], [ContentHash],
                         [DT], [TempF], [HumidityPct], [CloudCoverPct], [WindSpeedMph],
-                        [PrecipIn], [GHI_Wm2], [IsDay]
+                        {wind_direction_sql}, [PrecipIn], [GHI_Wm2], [IsDay]
                     FROM {_full_name(schema, table)}
                     WHERE [DT] >= :start_dt
                       AND [DT] <= :end_dt
@@ -648,14 +655,14 @@ def load_archived_forecast_weather(
     df["_ArchivedAtUTC"] = pd.to_datetime(df["ArchivedAtUTC"], errors="coerce", utc=True)
     df.sort_values(["DT", "Previous_Run_Lead_Days", "_ArchivedAtUTC"], ascending=[True, True, False], inplace=True)
     df.drop_duplicates(subset=["DT", "Previous_Run_Lead_Days"], keep="first", inplace=True)
-    cols = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay", "Previous_Run_Lead_Days"]
+    cols = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "WindDirectionDeg", "PrecipIn", "GHI_Wm2", "IsDay", "Previous_Run_Lead_Days"]
     return df[[col for col in cols if col in df.columns]].sort_values(["DT", "Previous_Run_Lead_Days"]).reset_index(drop=True)
 
 
 def _canonical_weather_frame(df: pd.DataFrame | None) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
-    cols = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay"]
+    cols = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "WindDirectionDeg", "PrecipIn", "GHI_Wm2", "IsDay"]
     out = df[[col for col in cols if col in df.columns]].copy()
     return out if "DT" in out.columns else pd.DataFrame()
 
@@ -678,6 +685,8 @@ def load_latest_archived_forecast_weather_snapshot(
         with engine.connect() as conn:
             if not _table_exists(conn, schema, table):
                 return pd.DataFrame()
+            existing = _existing_columns(conn, schema, table)
+            wind_direction_sql = "[WindDirectionDeg]" if "WindDirectionDeg" in existing else "CAST(NULL AS FLOAT) AS [WindDirectionDeg]"
             snapshot_id = conn.execute(
                 text(
                     f"""
@@ -696,7 +705,7 @@ def load_latest_archived_forecast_weather_snapshot(
                 text(
                     f"""
                     SELECT [DT], [TempF], [HumidityPct], [CloudCoverPct], [WindSpeedMph],
-                           [PrecipIn], [GHI_Wm2], [IsDay]
+                           {wind_direction_sql}, [PrecipIn], [GHI_Wm2], [IsDay]
                     FROM {_full_name(schema, table)}
                     WHERE [SnapshotID] = :snapshot_id
                     ORDER BY [DT]

@@ -8,6 +8,20 @@ from forecasting.model.prophet_model import predict_prophet
 from forecasting.utils.device_utils import prepare_for_prediction
 
 
+LOAD_DECAY_SHAPE_FEATURES = [
+    "Load_Decay_1Hr_MWH",
+    "Load_Decay_2Hr_MWH",
+    "Lag1_Minus_SameHourYesterday_MWH",
+    "Lag1_Minus_SameHour7DayMean_MWH",
+    "PostPeak_LoadDecay_1Hr_MWH",
+    "PostPeak_LoadDecay_2Hr_MWH",
+    "PostPeak_LoadDecay_VsSameHourYesterday_MWH",
+    "PostPeak_LoadDecay_VsSameHour7DayMean_MWH",
+    "ClearHotEvening_LoadDecay_Vs7Day_MWH",
+    "DeltaBreeze_PostPeak_LoadDecay_Signal",
+]
+
+
 def _last(values: list[float], n: int) -> float:
     return float(values[-n]) if len(values) >= n else np.nan
 
@@ -32,6 +46,63 @@ def _prepare_x(row: pd.Series, features: list[str]) -> pd.DataFrame:
     x = row.reindex(features)
     x = pd.to_numeric(x, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
     return x.astype(float).to_frame().T
+
+
+def _row_float(row: pd.Series, col: str, default: float = 0.0) -> float:
+    try:
+        value = pd.to_numeric(pd.Series([row.get(col, default)]), errors="coerce").iloc[0]
+        return float(value) if np.isfinite(value) else float(default)
+    except Exception:
+        return float(default)
+
+
+def _load_decay_shape_values(row: pd.Series) -> dict[str, float]:
+    lag1 = _row_float(row, "MWH_Lag1", np.nan)
+    lag2 = _row_float(row, "MWH_Lag2", np.nan)
+    lag3 = _row_float(row, "MWH_Lag3", np.nan)
+    lag24 = _row_float(row, "MWH_Lag24", np.nan)
+    same_hour_7day = _row_float(row, "MWH_SameHour7DayMean", np.nan)
+    hour = _row_float(row, "Hour", np.nan)
+    post_peak = _row_float(row, "IsPostPeakEvening18to23", np.nan)
+    if not np.isfinite(post_peak):
+        post_peak = 1.0 if np.isfinite(hour) and 18 <= int(hour) <= 23 else 0.0
+    post_peak = float(np.clip(post_peak, 0.0, 1.0))
+    clear_hot = float(np.clip(_row_float(row, "ClearHotEvening_Flag", 0.0), 0.0, 1.0))
+    delta_flag = max(
+        float(np.clip(_row_float(row, "DeltaBreeze_Cooling_Flag", 0.0), 0.0, 1.0)),
+        float(np.clip(_row_float(row, "DeltaBreeze_Westerly_Flow_Flag", 0.0), 0.0, 1.0)),
+        float(np.clip(_row_float(row, "DeltaBreeze_EveningWindRamp_Flag", 0.0), 0.0, 1.0)),
+    )
+
+    load_decay_1 = lag2 - lag1 if np.isfinite(lag2) and np.isfinite(lag1) else np.nan
+    load_decay_2 = lag3 - lag1 if np.isfinite(lag3) and np.isfinite(lag1) else np.nan
+    lag1_minus_yesterday = lag1 - lag24 if np.isfinite(lag1) and np.isfinite(lag24) else np.nan
+    lag1_minus_7day = lag1 - same_hour_7day if np.isfinite(lag1) and np.isfinite(same_hour_7day) else np.nan
+    vs_yesterday = lag24 - lag1 if np.isfinite(lag24) and np.isfinite(lag1) else np.nan
+    vs_7day = same_hour_7day - lag1 if np.isfinite(same_hour_7day) and np.isfinite(lag1) else np.nan
+    post_decay_1 = post_peak * load_decay_1 if np.isfinite(load_decay_1) else np.nan
+    post_decay_2 = post_peak * load_decay_2 if np.isfinite(load_decay_2) else np.nan
+    post_vs_yesterday = post_peak * vs_yesterday if np.isfinite(vs_yesterday) else np.nan
+    post_vs_7day = post_peak * vs_7day if np.isfinite(vs_7day) else np.nan
+    clear_hot_vs_7day = clear_hot * post_vs_7day if np.isfinite(post_vs_7day) else np.nan
+    delta_signal = delta_flag * (
+        max(0.0, post_decay_1) if np.isfinite(post_decay_1) else 0.0
+    )
+    if np.isfinite(post_vs_7day):
+        delta_signal += delta_flag * max(0.0, post_vs_7day)
+
+    return {
+        "Load_Decay_1Hr_MWH": load_decay_1,
+        "Load_Decay_2Hr_MWH": load_decay_2,
+        "Lag1_Minus_SameHourYesterday_MWH": lag1_minus_yesterday,
+        "Lag1_Minus_SameHour7DayMean_MWH": lag1_minus_7day,
+        "PostPeak_LoadDecay_1Hr_MWH": post_decay_1,
+        "PostPeak_LoadDecay_2Hr_MWH": post_decay_2,
+        "PostPeak_LoadDecay_VsSameHourYesterday_MWH": post_vs_yesterday,
+        "PostPeak_LoadDecay_VsSameHour7DayMean_MWH": post_vs_7day,
+        "ClearHotEvening_LoadDecay_Vs7Day_MWH": clear_hot_vs_7day,
+        "DeltaBreeze_PostPeak_LoadDecay_Signal": delta_signal,
+    }
 
 
 def recursive_forecast(
@@ -70,6 +141,7 @@ def recursive_forecast(
     catboost_preds = []
     lag24_values = []
     same_hour_7day_values = []
+    load_decay_shape_values = {col: [] for col in LOAD_DECAY_SHAPE_FEATURES}
 
     for i in range(len(fut)):
         row = fut.iloc[i].copy()
@@ -91,6 +163,9 @@ def recursive_forecast(
         row["MWH_SameHour7DayMean"] = _same_hour_7day_mean(base_series)
         lag24_values.append(row["MWH_Lag24"])
         same_hour_7day_values.append(row["MWH_SameHour7DayMean"])
+        for col, value in _load_decay_shape_values(row).items():
+            row[col] = value
+            load_decay_shape_values[col].append(value)
 
         X_row = _prepare_x(row, features)
         
@@ -140,5 +215,7 @@ def recursive_forecast(
                 fut[col] = prophet_components[col].to_numpy()
     fut["MWH_Lag24"] = lag24_values
     fut["MWH_SameHour7DayMean"] = same_hour_7day_values
+    for col, values in load_decay_shape_values.items():
+        fut[col] = values
     fut["Raw_Forecast_MWH"] = preds
     return fut

@@ -17,10 +17,22 @@ OPENMETEO_RENAME = {
     "relative_humidity_2m": "HumidityPct",
     "cloud_cover": "CloudCoverPct",
     "wind_speed_10m": "WindSpeedMph",
+    "wind_direction_10m": "WindDirectionDeg",
     "precipitation": "PrecipIn",
     "shortwave_radiation": "GHI_Wm2",
     "is_day": "IsDay",
 }
+WEATHER_CACHE_COLS = [
+    "DT",
+    "TempF",
+    "HumidityPct",
+    "CloudCoverPct",
+    "WindSpeedMph",
+    "WindDirectionDeg",
+    "PrecipIn",
+    "GHI_Wm2",
+    "IsDay",
+]
 _TRUSTSTORE_INJECTED = False
 _TRUSTSTORE_WARNING_EMITTED = False
 
@@ -122,7 +134,18 @@ def _weather_cache_dir(config: dict) -> Path:
 def _weather_cache_path(config: dict, stem: str) -> Path:
     return _weather_cache_dir(config) / f"{stem}.csv"
 
-def _read_weather_cache(path: Path, config: dict, start: dt.date | None = None, end: dt.date | None = None) -> pd.DataFrame:
+def _requested_normalized_weather_cols(config: dict) -> set[str]:
+    hourly_vars = ((config.get("openmeteo", {}) or {}).get("hourly_vars") or [])
+    return {OPENMETEO_RENAME[var] for var in hourly_vars if var in OPENMETEO_RENAME}
+
+def _read_weather_cache(
+    path: Path,
+    config: dict,
+    start: dt.date | None = None,
+    end: dt.date | None = None,
+    *,
+    require_requested_cols: bool = False,
+) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
     try:
@@ -140,7 +163,12 @@ def _read_weather_cache(path: Path, config: dict, start: dt.date | None = None, 
     if end is not None:
         out = out[out["DT"].dt.date <= end]
 
-    cols = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay"]
+    if require_requested_cols:
+        missing = _requested_normalized_weather_cols(config).difference(out.columns)
+        if missing:
+            return pd.DataFrame()
+
+    cols = WEATHER_CACHE_COLS
     out = out[[col for col in cols if col in out.columns]].sort_values("DT").drop_duplicates(subset=["DT"], keep="last")
     return out.reset_index(drop=True)
 
@@ -148,7 +176,7 @@ def _write_weather_cache(df: pd.DataFrame, path: Path) -> None:
     if df is None or df.empty:
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    cols = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay"]
+    cols = WEATHER_CACHE_COLS
     df[[col for col in cols if col in df.columns]].to_csv(path, index=False)
 
 
@@ -178,7 +206,7 @@ def _archive_forecast_weather(df: pd.DataFrame, config: dict) -> str | Path | No
         return None
 
     archive_dir = _weather_cache_dir(config) / "forecast_weather_runs"
-    hash_cols = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay"]
+    hash_cols = WEATHER_CACHE_COLS
     return save_distinct_snapshot(
         df,
         archive_dir=archive_dir,
@@ -209,6 +237,8 @@ def _forecast_results_weather_fallback(config: dict, start: dt.date | None = Non
             "Humidity_Norm",
             "CloudCover_Norm",
             "WindSpeed_Mph",
+            "WindDirection_Deg",
+            "WindDirectionDeg",
             "PrecipIn",
             "Solar_Irradiance",
         ]
@@ -226,6 +256,10 @@ def _forecast_results_weather_fallback(config: dict, start: dt.date | None = Non
     out["HumidityPct"] = pd.to_numeric(src.get("Humidity_Norm"), errors="coerce") * 100.0
     out["CloudCoverPct"] = pd.to_numeric(src.get("CloudCover_Norm"), errors="coerce") * 100.0
     out["WindSpeedMph"] = pd.to_numeric(src.get("WindSpeed_Mph"), errors="coerce")
+    wind_direction_src = src.get("WindDirectionDeg")
+    if wind_direction_src is None:
+        wind_direction_src = src.get("WindDirection_Deg")
+    out["WindDirectionDeg"] = pd.to_numeric(wind_direction_src, errors="coerce")
     out["PrecipIn"] = pd.to_numeric(src.get("PrecipIn"), errors="coerce")
     out["GHI_Wm2"] = pd.to_numeric(src.get("Solar_Irradiance"), errors="coerce")
     out = out.dropna(subset=["DT", "TempF"]).copy()
@@ -244,7 +278,7 @@ def fetch_historical_weather(config: dict) -> pd.DataFrame:
     cache_stem = f"historical_weather_{start.isoformat()}_{end.isoformat()}"
     cache_path = _weather_cache_path(config, cache_stem)
     latest_cache_path = _weather_cache_path(config, "historical_weather_latest")
-    exact_cached = _read_weather_cache(cache_path, config, start=start, end=end)
+    exact_cached = _read_weather_cache(cache_path, config, start=start, end=end, require_requested_cols=True)
     if not exact_cached.empty:
         return exact_cached
 
@@ -436,28 +470,32 @@ def _finalize_weather_frame(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     max_f = float(config["quality"]["valid_temp_max_f"])
 
     # numeric coercions
-    for col in ["TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2"]:
+    for col in ["TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "WindDirectionDeg", "PrecipIn", "GHI_Wm2"]:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
+    if "WindDirectionDeg" in out.columns:
+        out["WindDirectionDeg"] = out["WindDirectionDeg"] % 360.0
 
     # temperature range filter
     out.loc[(out["TempF"] < min_f) | (out["TempF"] > max_f), "TempF"] = np.nan
 
     # Keep canonical set of columns for downstream merge
-    cols = ["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay"]
+    cols = WEATHER_CACHE_COLS
     out = out[[col for col in cols if col in out.columns]].sort_values("DT").drop_duplicates(subset=["DT"], keep="last").reset_index(drop=True)
 
     # Limited interpolation (ported from v11.6) so small, isolated invalid/missing values
     # don't cause hours to be dropped later by model-frame filtering. Keep this conservative.
     if max_gap > 0 and "TempF" in out.columns:
         work = out.set_index("DT")
-        for col in ["TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2"]:
+        for col in ["TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "WindDirectionDeg", "PrecipIn", "GHI_Wm2"]:
             if col in work.columns:
                 work[col] = pd.to_numeric(work[col], errors="coerce").interpolate(
                     method="time",
                     limit=max_gap,
                     limit_direction="both",
                 )
+        if "WindDirectionDeg" in work.columns:
+            work["WindDirectionDeg"] = work["WindDirectionDeg"] % 360.0
         out = work.reset_index()
 
     return out

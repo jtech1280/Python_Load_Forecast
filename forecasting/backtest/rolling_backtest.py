@@ -21,6 +21,16 @@ PRED_COLS = [
     "Prophet_Upper_MWH",
     "MWH_Lag24",
     "MWH_SameHour7DayMean",
+    "Load_Decay_1Hr_MWH",
+    "Load_Decay_2Hr_MWH",
+    "Lag1_Minus_SameHourYesterday_MWH",
+    "Lag1_Minus_SameHour7DayMean_MWH",
+    "PostPeak_LoadDecay_1Hr_MWH",
+    "PostPeak_LoadDecay_2Hr_MWH",
+    "PostPeak_LoadDecay_VsSameHourYesterday_MWH",
+    "PostPeak_LoadDecay_VsSameHour7DayMean_MWH",
+    "ClearHotEvening_LoadDecay_Vs7Day_MWH",
+    "DeltaBreeze_PostPeak_LoadDecay_Signal",
 ]
 
 
@@ -129,7 +139,7 @@ def run_rolling_backtest(
     context_cols = [
         "DT", "MWH", "Season", "Month", "Hour", "HourGroup", "DOW", "IsWeekend", "IsHoliday",
         "IsLikelySystemPeakHour", "Temperature", "Temperature_DailyMax", "DailyMaxTempBin",
-        "BTM_Solar_Proxy_MW", "BTM_Solar_Loss_From_ClearSky_MW", "Midday_Overcast_Solar_Loss_MW", "ClearSky_Index", "CloudCover_Norm", "Humidity_Norm", "WindSpeed_Mph", "PrecipIn",
+        "BTM_Solar_Proxy_MW", "BTM_Solar_Loss_From_ClearSky_MW", "Midday_Overcast_Solar_Loss_MW", "ClearSky_Index", "CloudCover_Norm", "Humidity_Norm", "WindSpeed_Mph", "WindDirection_Deg", "WindDirection_Available_Flag", "Westerly_Flow_Mph", "Westerly_Flow_Flag", "WindRamp_1Hr_Mph", "WindRamp_3Hr_Mph", "WindRamp_Next1Hr_Mph", "WindRamp_Next3Hr_Mph", "WesterlyFlow_Ramp_1Hr_Mph", "WesterlyFlow_Ramp_3Hr_Mph", "WesterlyFlow_Next1Hr_Ramp_Mph", "WesterlyFlow_Next3Hr_Ramp_Mph", "Temperature_Drop_From_DailyMax_F", "TempDrop_1Hr_F", "TempDrop_2Hr_F", "TempDrop_3Hr_F", "TempDrop_Next1Hr_F", "TempDrop_Next2Hr_F", "TempDrop_Next3Hr_F", "IsPostPeakEvening18to23", "ClearHotEvening_Flag", "ClearVeryHotEvening_Flag", "ClearHotEvening_x_TempDropFromDailyMax", "ClearHotEvening_x_ForecastDropNext3Hr", "ClearHotEvening_x_WesterlyFlow", "ClearHotEvening_x_WesterlyFlowRamp", "DeltaBreeze_Westerly_Flow_Flag", "DeltaBreeze_EveningWindRamp_Flag", "DeltaBreeze_Cooling_Flag", "DeltaBreeze_Cooling_Signal", "DeltaBreeze_CoolingNoDirection_Signal", "DeltaBreeze_ClearHotEvening_Signal", "PrecipIn",
     ]
     context_cols = [c for c in context_cols if c in test.columns]
     pred_cols = [c for c in PRED_COLS if c in fut_preds.columns]
