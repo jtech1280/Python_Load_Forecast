@@ -1,0 +1,32 @@
+# Copy to forecasting/config.local.yaml on a server when its DSNs or data roots differ.
+# This file is intentionally not loaded unless copied to config.local.yaml.
+
+project:
+  output_dir: "${FORECAST_OUTPUT_DIR:-forecast_outputs}"
+
+openmeteo:
+  cache_dir: "${FORECAST_WEATHER_CACHE_DIR:-weather_cache}"
+
+sql:
+  dsn_name: "${FORECAST_SQL_DSN:-Informatica LRS}"
+
+output_sql:
+  dsn_name: "${FORECAST_OUTPUT_SQL_DSN:-Forecast_DB}"
+
+five_min_load:
+  dsn_name: "${FORECAST_FIVE_MIN_DSN:-PowerSupply}"
+
+local_weather:
+  dsn_name: "${FORECAST_LOCAL_WEATHER_DSN:-PowerSupply}"
+
+solar:
+  parquet_root: "${FORECAST_SOLAR_PARQUET_ROOT}"
+  parquet_root_candidates:
+    - "${FORECAST_DATA_ROOT}"
+    - "D:/PY_LRS"
+    - "C:/PY_LRS"
+  weather_cache_dir: "${FORECAST_SOLAR_WEATHER_CACHE_DIR:-weather_cache/solar_weather}"
+  driver: "${FORECAST_SOLAR_DRIVER:-ODBC Driver 17 for SQL Server}"
+  dest_server: "${FORECAST_SOLAR_DEST_SERVER:-re-lrs-db-1}"
+  dest_db: "${FORECAST_SOLAR_DEST_DB:-Forecast}"
+  production_source: "${FORECAST_SOLAR_PRODUCTION_SOURCE:-rec-parquet}"
