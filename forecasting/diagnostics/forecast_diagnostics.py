@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from forecasting.forecast.anomaly_exclusions import drop_excluded_intervals
+from forecasting.forecast.focused_scorecard_guard import build_focused_scorecard_rule_audit
 from forecasting.forecast.uncertainty_bands import (
     _band_risk_multiplier,
     _hot_bucket_band_floor,
@@ -241,8 +242,10 @@ def _available_stage_columns(df: pd.DataFrame) -> dict[str, str]:
         "peak_risk_adjusted": "Peak_Risk_Adjusted_Forecast_MWH",
         "recent_corrected_simulation": "Recent_Corrected_Forecast_MWH",
         "stage_selected_production": "Stage_Selected_Forecast_MWH",
+        "focused_shape_shadow": "Focused_Shape_Adjusted_Forecast_MWH",
         FINAL_STAGE: "Final_Backtest_Forecast_MWH",
         "auto_residual_shadow": "Auto_Residual_Adjusted_Forecast_MWH",
+        "daily_peak_shadow": "Daily_Peak_Shadow_Adjusted_Forecast_MWH",
         "auto_residual_full_shadow": "Auto_Residual_Full_Shadow_Adjusted_Forecast_MWH",
         "baseline_same_hour_yesterday": "Baseline_SameHourYesterday_MWH",
         "baseline_same_hour_7_days_ago": "Baseline_SameHour7DaysAgo_MWH",
@@ -283,6 +286,80 @@ def _metric_dict(actual: pd.Series, forecast: pd.Series, label: str | None = Non
     return out
 
 
+_SHADOW_STAGE_NAMES = {
+    "focused_shape_shadow",
+    "auto_residual_shadow",
+    "auto_residual_full_shadow",
+    "daily_peak_shadow",
+}
+
+
+def _stage_leader_audit(df: pd.DataFrame, final_col: str | None) -> dict[str, Any]:
+    if df is None or df.empty or "Actual_MWH" not in df.columns:
+        return {}
+    stages = _available_stage_columns(df)
+    if not stages:
+        return {}
+
+    rows: list[dict[str, Any]] = []
+    for stage, col in stages.items():
+        if stage.startswith("baseline_"):
+            continue
+        metrics = _metric_dict(df["Actual_MWH"], df[col], label=stage, col=col)
+        if metrics:
+            rows.append(metrics)
+    if not rows:
+        return {}
+
+    final_row = next((r for r in rows if r.get("ForecastColumn") == final_col or r.get("Stage") == FINAL_STAGE), None)
+    best = min(rows, key=lambda r: float(r.get("MAE_MWH", np.inf)))
+    out: dict[str, Any] = {
+        "best_stage_by_mae": {
+            "Stage": best.get("Stage"),
+            "ForecastColumn": best.get("ForecastColumn"),
+            "N": best.get("N"),
+            "MAE_MWH": best.get("MAE_MWH"),
+            "Bias_MWH": best.get("Bias_MWH"),
+            "MAPE_PCT": best.get("MAPE_PCT"),
+        },
+    }
+
+    if final_row:
+        final_mae = float(final_row.get("MAE_MWH", np.nan))
+        best_mae = float(best.get("MAE_MWH", np.nan))
+        improvement = final_mae - best_mae
+        out["Best_Stage_MAE_Improvement_vs_Final_MWH"] = improvement
+        out["Final_Is_Best_Stage_By_MAE"] = bool(np.isfinite(improvement) and improvement <= 1e-9)
+
+    shadow_rows = [r for r in rows if r.get("Stage") in _SHADOW_STAGE_NAMES]
+    if shadow_rows:
+        best_shadow = min(shadow_rows, key=lambda r: float(r.get("MAE_MWH", np.inf)))
+        out["best_shadow_stage_by_mae"] = {
+            "Stage": best_shadow.get("Stage"),
+            "ForecastColumn": best_shadow.get("ForecastColumn"),
+            "N": best_shadow.get("N"),
+            "MAE_MWH": best_shadow.get("MAE_MWH"),
+            "Bias_MWH": best_shadow.get("Bias_MWH"),
+            "MAPE_PCT": best_shadow.get("MAPE_PCT"),
+        }
+        if final_row:
+            final_mae = float(final_row.get("MAE_MWH", np.nan))
+            shadow_mae = float(best_shadow.get("MAE_MWH", np.nan))
+            shadow_improvement = final_mae - shadow_mae
+            out["Best_Shadow_MAE_Improvement_vs_Final_MWH"] = shadow_improvement
+            out["Best_Shadow_Beats_Final"] = bool(np.isfinite(shadow_improvement) and shadow_improvement > 1e-9)
+
+    focused = next((r for r in rows if r.get("Stage") == "focused_shape_shadow"), None)
+    if focused and final_row:
+        final_mae = float(final_row.get("MAE_MWH", np.nan))
+        focused_mae = float(focused.get("MAE_MWH", np.nan))
+        focused_improvement = final_mae - focused_mae
+        out["Focused_Shape_Shadow_MAE_MWH"] = focused.get("MAE_MWH")
+        out["Focused_Shape_Shadow_MAE_Improvement_vs_Final_MWH"] = focused_improvement
+        out["Focused_Shape_Shadow_Beats_Final"] = bool(np.isfinite(focused_improvement) and focused_improvement > 1e-9)
+    return out
+
+
 def metrics_summary(df: pd.DataFrame) -> dict[str, Any]:
     if df is None or df.empty:
         return {}
@@ -316,6 +393,7 @@ def metrics_summary(df: pd.DataFrame) -> dict[str, Any]:
         out["Final_MAE_Improvement_vs_Raw_MWH"] = raw.get("MAE_MWH", np.nan) - final.get("MAE_MWH", np.nan)
         out["Final_RMSE_Improvement_vs_Raw_MWH"] = raw.get("RMSE_MWH", np.nan) - final.get("RMSE_MWH", np.nan)
         out["Final_Bias_Abs_Improvement_vs_Raw_MWH"] = abs(raw.get("Bias_MWH", np.nan)) - abs(final.get("Bias_MWH", np.nan))
+    out.update(_stage_leader_audit(df, final_col))
     return out
 
 
@@ -406,7 +484,7 @@ def build_backtest_metrics_by_segment(df: pd.DataFrame, min_count: int = 6, fore
 
 def build_backtest_metrics_by_segment_by_stage(df: pd.DataFrame, min_count: int = 6) -> pd.DataFrame:
     stages = _available_stage_columns(df)
-    preferred = {k: v for k, v in stages.items() if k in [RAW_STAGE, "targeted_residual_meta_adjusted", "residual_calibrated", "heat_adjusted", "warm_ramp_adjusted", "cloud_solar_adjusted", "peak_risk_adjusted", "recent_corrected_simulation", FINAL_STAGE, "prophet_benchmark", "catboost_benchmark", "baseline_same_hour_yesterday", "baseline_rolling_7day_same_hour_avg"]}
+    preferred = {k: v for k, v in stages.items() if k in [RAW_STAGE, "targeted_residual_meta_adjusted", "residual_calibrated", "heat_adjusted", "warm_ramp_adjusted", "cloud_solar_adjusted", "peak_risk_adjusted", "recent_corrected_simulation", FINAL_STAGE, "auto_residual_shadow", "daily_peak_shadow", "prophet_benchmark", "catboost_benchmark", "baseline_same_hour_yesterday", "baseline_rolling_7day_same_hour_avg"]}
     frames = []
     for stage, col in preferred.items():
         seg = build_backtest_metrics_by_segment(df, min_count=min_count, forecast_col=col)
@@ -470,6 +548,254 @@ def build_daily_peak_miss_by_stage(df: pd.DataFrame) -> pd.DataFrame:
         if not tab.empty:
             frames.append(tab)
     return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+
+
+def _daily_peak_shadow_cfg(config: dict | None) -> dict:
+    if not isinstance(config, dict):
+        return {}
+    if isinstance(config.get("daily_peak_shadow_model"), dict):
+        return config.get("daily_peak_shadow_model", {}) or {}
+    cal = config.get("calibration", {}) or {}
+    if isinstance(cal.get("daily_peak_shadow_model"), dict):
+        return cal.get("daily_peak_shadow_model", {}) or {}
+    stage_selector = cal.get("stage_selector", {}) or {}
+    return stage_selector.get("daily_peak_shadow_model", {}) or {}
+
+
+def _daily_peak_comparison_rows(
+    df: pd.DataFrame,
+    *,
+    base_col: str,
+    shadow_col: str,
+    peak_hours: set[int],
+) -> pd.DataFrame:
+    if df is None or df.empty or base_col not in df.columns or shadow_col not in df.columns:
+        return pd.DataFrame()
+    required = {"Actual_MWH", "DT", "Date", "Hour"}
+    if not required.issubset(df.columns):
+        return pd.DataFrame()
+
+    group_keys = ["Date"]
+    if "Replay_Origin_ID" in df.columns:
+        group_keys.insert(0, "Replay_Origin_ID")
+
+    rows: list[dict[str, Any]] = []
+    for keys, group in df.groupby(group_keys, dropna=False):
+        scored = group.dropna(subset=["Actual_MWH", base_col, shadow_col]).copy()
+        if scored.empty:
+            continue
+        if peak_hours:
+            peak_mask = _as_num(scored["Hour"]).astype("Int64").isin(peak_hours).fillna(False)
+            if peak_mask.any():
+                scored = scored.loc[peak_mask].copy()
+        if scored.empty:
+            continue
+
+        actual = _as_num(scored["Actual_MWH"]).astype(float)
+        base = _as_num(scored[base_col]).astype(float)
+        shadow = _as_num(scored[shadow_col]).astype(float)
+        valid = actual.notna() & base.notna() & shadow.notna()
+        if not valid.any():
+            continue
+        scored = scored.loc[valid]
+        actual = actual.loc[valid]
+        base = base.loc[valid]
+        shadow = shadow.loc[valid]
+
+        actual_peak_idx = actual.idxmax()
+        base_peak_idx = base.idxmax()
+        shadow_peak_idx = shadow.idxmax()
+        actual_peak_dt = pd.to_datetime(scored.loc[actual_peak_idx, "DT"])
+        base_peak_dt = pd.to_datetime(scored.loc[base_peak_idx, "DT"])
+        shadow_peak_dt = pd.to_datetime(scored.loc[shadow_peak_idx, "DT"])
+        forecast_day = np.nan
+        if "Forecast_Day" in scored.columns:
+            day_values = _as_num(scored["Forecast_Day"]).dropna()
+            if not day_values.empty:
+                forecast_day = float(day_values.median())
+
+        row: dict[str, Any] = {
+            "Date": scored.loc[actual_peak_idx, "Date"],
+            "Forecast_Day": forecast_day,
+            "Actual_Peak_MWH": float(actual.max()),
+            "Base_AtActualPeak_MWH": float(base.loc[actual_peak_idx]),
+            "Shadow_AtActualPeak_MWH": float(shadow.loc[actual_peak_idx]),
+            "Base_ForecastPeak_MWH": float(base.max()),
+            "Shadow_ForecastPeak_MWH": float(shadow.max()),
+            "Base_PeakAtActual_AbsError_MWH": float(abs(actual.loc[actual_peak_idx] - base.loc[actual_peak_idx])),
+            "Shadow_PeakAtActual_AbsError_MWH": float(abs(actual.loc[actual_peak_idx] - shadow.loc[actual_peak_idx])),
+            "Base_ForecastPeak_AbsError_MWH": float(abs(actual.max() - base.max())),
+            "Shadow_ForecastPeak_AbsError_MWH": float(abs(actual.max() - shadow.max())),
+            "Base_Bias_AtActualPeak_MWH": float(actual.loc[actual_peak_idx] - base.loc[actual_peak_idx]),
+            "Shadow_Bias_AtActualPeak_MWH": float(actual.loc[actual_peak_idx] - shadow.loc[actual_peak_idx]),
+            "Base_DailyPeak_Timing_Error_Hours": float((base_peak_dt - actual_peak_dt).total_seconds() / 3600.0),
+            "Shadow_DailyPeak_Timing_Error_Hours": float((shadow_peak_dt - actual_peak_dt).total_seconds() / 3600.0),
+            "Base_DailyHourly_MAE_MWH": float((actual - base).abs().mean()),
+            "Shadow_DailyHourly_MAE_MWH": float((actual - shadow).abs().mean()),
+            "Daily_Peak_Correction_Applied_Flag": int(
+                _as_num(scored.get("Daily_Peak_Correction_Applied_Flag", pd.Series(0, index=scored.index))).fillna(0).eq(1).any()
+            ),
+            "MaxAbs_DailyPeakCorrection_MWH": float((shadow - base).abs().max()),
+        }
+        if "Replay_Origin_ID" in scored.columns:
+            row["Replay_Origin_ID"] = scored["Replay_Origin_ID"].iloc[0]
+        if "Replay_Origin_DT" in scored.columns:
+            row["Replay_Origin_DT"] = scored["Replay_Origin_DT"].iloc[0]
+        row["Delta_PeakAtActual_MAE_MWH"] = row["Shadow_PeakAtActual_AbsError_MWH"] - row["Base_PeakAtActual_AbsError_MWH"]
+        row["Delta_ForecastPeak_MAE_MWH"] = row["Shadow_ForecastPeak_AbsError_MWH"] - row["Base_ForecastPeak_AbsError_MWH"]
+        row["Delta_DailyHourly_MAE_MWH"] = row["Shadow_DailyHourly_MAE_MWH"] - row["Base_DailyHourly_MAE_MWH"]
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def build_daily_peak_shadow_window_scorecard(df: pd.DataFrame, config: dict | None = None) -> pd.DataFrame:
+    """Summarize daily-peak shadow performance by the configured forecast-day window.
+
+    This is a promotion diagnostic for the shadow daily-peak layer. It compares the
+    shadow candidate to the production final forecast and shows whether benefit is
+    concentrated inside the configured application window or leaking into weak
+    exact-day horizons.
+    """
+    if df is None or df.empty or "Actual_MWH" not in df.columns:
+        return pd.DataFrame()
+    shadow_col = "Daily_Peak_Shadow_Adjusted_Forecast_MWH"
+    if shadow_col not in df.columns:
+        return pd.DataFrame()
+    base_col = "Daily_Peak_Base_Forecast_MWH" if "Daily_Peak_Base_Forecast_MWH" in df.columns else "Final_Backtest_Forecast_MWH"
+    if base_col not in df.columns:
+        return pd.DataFrame()
+
+    work = prep_backtest(df)
+    if work.empty or base_col not in work.columns or shadow_col not in work.columns:
+        return pd.DataFrame()
+
+    cfg = _daily_peak_shadow_cfg(config)
+    min_day = cfg.get("min_application_forecast_day")
+    max_day = cfg.get("max_application_forecast_day")
+    try:
+        min_day_int = int(min_day) if min_day is not None else None
+    except (TypeError, ValueError):
+        min_day_int = None
+    try:
+        max_day_int = int(max_day) if max_day is not None else None
+    except (TypeError, ValueError):
+        max_day_int = None
+
+    peak_hours = {int(h) for h in cfg.get("peak_hours", [14, 15, 16, 17, 18, 19, 20, 21])}
+    day = _as_num(work.get("Forecast_Day", pd.Series(np.nan, index=work.index)))
+    correction = (_as_num(work[shadow_col]) - _as_num(work[base_col])).abs()
+    applied_mask = _as_num(
+        work.get("Daily_Peak_Correction_Applied_Flag", pd.Series(np.nan, index=work.index))
+    ).eq(1)
+    if not applied_mask.any():
+        applied_mask = correction.gt(1e-9)
+
+    daily = _daily_peak_comparison_rows(
+        work,
+        base_col=base_col,
+        shadow_col=shadow_col,
+        peak_hours=peak_hours,
+    )
+
+    slices: list[tuple[str, str, pd.Series]] = [("all_rows", "all", pd.Series(True, index=work.index))]
+    if min_day_int is not None and max_day_int is not None:
+        slices.extend(
+            [
+                (
+                    f"configured_window_days_{min_day_int}_to_{max_day_int}",
+                    "configured_window",
+                    day.between(min_day_int, max_day_int),
+                ),
+                (f"below_configured_window_before_day_{min_day_int}", "outside_window_low", day.lt(min_day_int)),
+                (f"above_configured_window_after_day_{max_day_int}", "outside_window_high", day.gt(max_day_int)),
+            ]
+        )
+    for forecast_day in sorted(day.dropna().astype(int).unique().tolist()):
+        slices.append((f"forecast_day_{forecast_day}", "exact_forecast_day", day.eq(forecast_day)))
+
+    rows: list[dict[str, Any]] = []
+    for slice_name, slice_type, mask in slices:
+        mask = pd.Series(mask, index=work.index).fillna(False).astype(bool)
+        subset = work.loc[mask].copy()
+        if subset.empty:
+            continue
+
+        base_metrics = _metric_dict(subset["Actual_MWH"], subset[base_col], col=base_col)
+        shadow_metrics = _metric_dict(subset["Actual_MWH"], subset[shadow_col], col=shadow_col)
+        if not base_metrics or not shadow_metrics:
+            continue
+
+        daily_subset = pd.DataFrame()
+        if not daily.empty and "Forecast_Day" in daily.columns:
+            daily_day = _as_num(daily["Forecast_Day"])
+            if slice_name == "all_rows":
+                daily_subset = daily
+            elif slice_type == "configured_window" and min_day_int is not None and max_day_int is not None:
+                daily_subset = daily.loc[daily_day.between(min_day_int, max_day_int)]
+            elif slice_type == "outside_window_low" and min_day_int is not None:
+                daily_subset = daily.loc[daily_day.lt(min_day_int)]
+            elif slice_type == "outside_window_high" and max_day_int is not None:
+                daily_subset = daily.loc[daily_day.gt(max_day_int)]
+            elif slice_type == "exact_forecast_day":
+                try:
+                    exact_day = int(slice_name.rsplit("_", 1)[-1])
+                    daily_subset = daily.loc[daily_day.eq(exact_day)]
+                except ValueError:
+                    daily_subset = pd.DataFrame()
+
+        row: dict[str, Any] = {
+            "Slice": slice_name,
+            "SliceType": slice_type,
+            "BaseForecastColumn": base_col,
+            "ShadowForecastColumn": shadow_col,
+            "Configured_MinApplicationForecastDay": min_day_int,
+            "Configured_MaxApplicationForecastDay": max_day_int,
+            "N_HourlyRows": int(len(subset)),
+            "Applied_HourlyRows": int(applied_mask.loc[subset.index].sum()),
+            "MaxAbs_Correction_MWH": float(correction.loc[subset.index].max()) if correction.loc[subset.index].notna().any() else np.nan,
+            "Base_Hourly_MAE_MWH": base_metrics.get("MAE_MWH"),
+            "Shadow_Hourly_MAE_MWH": shadow_metrics.get("MAE_MWH"),
+            "Delta_Hourly_MAE_MWH": shadow_metrics.get("MAE_MWH", np.nan) - base_metrics.get("MAE_MWH", np.nan),
+            "Base_Hourly_Bias_MWH": base_metrics.get("Bias_MWH"),
+            "Shadow_Hourly_Bias_MWH": shadow_metrics.get("Bias_MWH"),
+            "Delta_Hourly_Bias_MWH": shadow_metrics.get("Bias_MWH", np.nan) - base_metrics.get("Bias_MWH", np.nan),
+            "Base_Hourly_P90_AbsError_MWH": base_metrics.get("P90_AbsError_MWH"),
+            "Shadow_Hourly_P90_AbsError_MWH": shadow_metrics.get("P90_AbsError_MWH"),
+            "Delta_Hourly_P90_AbsError_MWH": shadow_metrics.get("P90_AbsError_MWH", np.nan) - base_metrics.get("P90_AbsError_MWH", np.nan),
+        }
+        if not daily_subset.empty:
+            row.update(
+                {
+                    "N_DailyPeakDays": int(len(daily_subset)),
+                    "Applied_DailyPeakDays": int(_as_num(daily_subset["Daily_Peak_Correction_Applied_Flag"]).fillna(0).eq(1).sum()),
+                    "Base_PeakAtActual_MAE_MWH": float(daily_subset["Base_PeakAtActual_AbsError_MWH"].mean()),
+                    "Shadow_PeakAtActual_MAE_MWH": float(daily_subset["Shadow_PeakAtActual_AbsError_MWH"].mean()),
+                    "Delta_PeakAtActual_MAE_MWH": float(daily_subset["Delta_PeakAtActual_MAE_MWH"].mean()),
+                    "Base_ForecastPeak_MAE_MWH": float(daily_subset["Base_ForecastPeak_AbsError_MWH"].mean()),
+                    "Shadow_ForecastPeak_MAE_MWH": float(daily_subset["Shadow_ForecastPeak_AbsError_MWH"].mean()),
+                    "Delta_ForecastPeak_MAE_MWH": float(daily_subset["Delta_ForecastPeak_MAE_MWH"].mean()),
+                    "Base_Bias_AtActualPeak_MWH": float(daily_subset["Base_Bias_AtActualPeak_MWH"].mean()),
+                    "Shadow_Bias_AtActualPeak_MWH": float(daily_subset["Shadow_Bias_AtActualPeak_MWH"].mean()),
+                    "Delta_Bias_AtActualPeak_MWH": float(
+                        daily_subset["Shadow_Bias_AtActualPeak_MWH"].mean()
+                        - daily_subset["Base_Bias_AtActualPeak_MWH"].mean()
+                    ),
+                    "Base_DailyPeak_Timing_MAE_Hours": float(daily_subset["Base_DailyPeak_Timing_Error_Hours"].abs().mean()),
+                    "Shadow_DailyPeak_Timing_MAE_Hours": float(daily_subset["Shadow_DailyPeak_Timing_Error_Hours"].abs().mean()),
+                    "Delta_DailyPeak_Timing_MAE_Hours": float(
+                        daily_subset["Shadow_DailyPeak_Timing_Error_Hours"].abs().mean()
+                        - daily_subset["Base_DailyPeak_Timing_Error_Hours"].abs().mean()
+                    ),
+                    "Improved_PeakAtActual_Days": int(daily_subset["Delta_PeakAtActual_MAE_MWH"].lt(0.0).sum()),
+                    "Worsened_PeakAtActual_Days": int(daily_subset["Delta_PeakAtActual_MAE_MWH"].gt(0.0).sum()),
+                }
+            )
+        rows.append(row)
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values(["SliceType", "Slice"], kind="stable").reset_index(drop=True)
 
 
 def build_top_error_tables(df: pd.DataFrame, n: int = 100, forecast_col: str = "Raw_Forecast_MWH", stage: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -651,6 +977,50 @@ def build_forecast_stage_metrics(df: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values("MAE_MWH").reset_index(drop=True)
 
 
+def build_shadow_stage_promotion_audit(df: pd.DataFrame) -> pd.DataFrame:
+    """Compare shadow candidate stages directly against the current final forecast."""
+    if df is None or df.empty or "Actual_MWH" not in df.columns:
+        return pd.DataFrame()
+    stages = _available_stage_columns(df)
+    final_col = stages.get(FINAL_STAGE) or stages.get("recent_corrected_simulation") or stages.get(RAW_STAGE)
+    if not final_col:
+        return pd.DataFrame()
+    final = _metric_dict(df["Actual_MWH"], df[final_col], label=FINAL_STAGE, col=final_col)
+    if not final:
+        return pd.DataFrame()
+
+    rows = []
+    final_mae = float(final.get("MAE_MWH", np.nan))
+    final_bias = float(final.get("Bias_MWH", np.nan))
+    for stage, col in stages.items():
+        if stage not in _SHADOW_STAGE_NAMES or col not in df.columns:
+            continue
+        candidate = _metric_dict(df["Actual_MWH"], df[col], label=stage, col=col)
+        if not candidate:
+            continue
+        candidate_mae = float(candidate.get("MAE_MWH", np.nan))
+        improvement = final_mae - candidate_mae
+        rows.append({
+            "Stage": stage,
+            "ForecastColumn": col,
+            "N": candidate.get("N"),
+            "Candidate_MAE_MWH": candidate.get("MAE_MWH"),
+            "Final_MAE_MWH": final.get("MAE_MWH"),
+            "Candidate_MAE_Improvement_vs_Final_MWH": improvement,
+            "Candidate_Bias_MWH": candidate.get("Bias_MWH"),
+            "Final_Bias_MWH": final_bias,
+            "Candidate_MAPE_PCT": candidate.get("MAPE_PCT"),
+            "Final_MAPE_PCT": final.get("MAPE_PCT"),
+            "Candidate_Underforecast_Rate_PCT": candidate.get("Underforecast_Rate_PCT"),
+            "Final_Underforecast_Rate_PCT": final.get("Underforecast_Rate_PCT"),
+            "Beats_Final": bool(np.isfinite(improvement) and improvement > 1e-9),
+        })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values("Candidate_MAE_Improvement_vs_Final_MWH", ascending=False).reset_index(drop=True)
+
+
 def _feature_mean(df: pd.DataFrame, col: str) -> float:
     if col not in df.columns or df.empty:
         return np.nan
@@ -764,6 +1134,7 @@ _STAGE_CHAIN_ORDER = [
     ("Recent_Corrected_Forecast_MWH", "+Recent"),
     ("Stage_Selected_Forecast_MWH", "+StageSelector"),
     ("Final_Backtest_Forecast_MWH", "Final"),
+    ("Daily_Peak_Shadow_Adjusted_Forecast_MWH", "+DailyPeakShadow"),
 ]
 
 
@@ -1094,7 +1465,9 @@ def build_diagnostics_bundle(
         # V12.4 stage-aware diagnostics.
         "model_component_metrics": build_model_component_metrics(bt),
         "forecast_stage_metrics": build_forecast_stage_metrics(bt),
+        "shadow_stage_promotion_audit": build_shadow_stage_promotion_audit(bt),
         "delta_breeze_shape_metrics_by_stage": build_delta_breeze_shape_metrics_by_stage(bt, min_count=min_segment_count),
+        "daily_peak_shadow_window_scorecard": build_daily_peak_shadow_window_scorecard(bt, config=config),
         "backtest_metrics_by_segment_by_stage": build_backtest_metrics_by_segment_by_stage(bt, min_count=min_segment_count),
         "error_by_hour_by_stage": build_metrics_by_group_by_stage(bt, ["Hour"], min_count=1),
         "error_by_forecast_lead_hour_by_stage": build_metrics_by_group_by_stage(bt, ["Forecast_Lead_Hour"], min_count=1),
@@ -1106,6 +1479,11 @@ def build_diagnostics_bundle(
         "cloud_solar_event_hour_error_by_stage": build_metrics_by_group_by_stage(bt, ["CloudSolarEventClass", "Hour"], min_count=min_segment_count),
         "daily_peak_miss_by_stage": build_daily_peak_miss_by_stage(bt),
         "stage_marginal_contributions": build_stage_marginal_contributions(bt),
+        "focused_guard_rule_audit": build_focused_scorecard_rule_audit(
+            bt,
+            config,
+            forecast_col="Pre_Focused_Guard_Forecast_MWH",
+        ),
         "top_100_underforecast_hours_by_stage": under_stage,
         "top_100_overforecast_hours_by_stage": over_stage,
         "band_coverage_summary": band_summary,

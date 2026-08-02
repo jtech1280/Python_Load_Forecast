@@ -30,7 +30,9 @@ def build_hourly_load_from_five_min(
     """Aggregate completed 5-minute MW samples into hourly MWh-equivalent load.
 
     The source values are MW interval readings. For an hourly load series, the average MW
-    across a completed hour is the MWh-equivalent value for that hour.
+    across a completed hour is the MWh-equivalent value for that hour. The official hourly
+    load feed is aligned to the completed hour label, so a 14:00-15:00 five-minute block is
+    exported with DT=15:00.
     """
     if five_min_df is None or five_min_df.empty or not {"DT", "FiveMin_Load_MW"}.issubset(five_min_df.columns):
         return pd.DataFrame()
@@ -62,7 +64,7 @@ def build_hourly_load_from_five_min(
     if hourly.empty:
         return pd.DataFrame()
 
-    hourly.rename(columns={"HourDT": "DT"}, inplace=True)
+    hourly["DT"] = hourly["FiveMin_Hour_End"]
     hourly["Load_Source"] = "five_min_completed_hour"
     keep = [
         "DT",
@@ -139,18 +141,19 @@ def build_intraday_load_feature_frame(five_min_df: pd.DataFrame) -> pd.DataFrame
     first_load = grouped["FiveMin_Load_MW"].first().reset_index(name="FiveMin_PrevHour_First_MW")
     hourly = hourly.merge(first_load, on="HourDT", how="left")
     hourly["FiveMin_PrevHour_Ramp_MW"] = hourly["FiveMin_PrevHour_Last_MW"] - hourly["FiveMin_PrevHour_First_MW"]
-    hourly["DT"] = hourly["HourDT"] + pd.Timedelta(hours=1)
+    hourly["DT"] = hourly["HourDT"] + pd.Timedelta(hours=2)
 
     tail = work.set_index("DT")["FiveMin_Load_MW"].sort_index()
     ramp_rows = []
-    for dt_value in hourly["DT"]:
-        asof = tail[tail.index < dt_value]
+    for hour_start in hourly["HourDT"]:
+        feature_asof = hour_start + pd.Timedelta(hours=1)
+        asof = tail[tail.index < feature_asof]
         if asof.empty:
             ramp_rows.append((np.nan, np.nan, np.nan))
             continue
         last = float(asof.iloc[-1])
         def _lag_delta(minutes: int) -> float:
-            cutoff = dt_value - pd.Timedelta(minutes=minutes)
+            cutoff = feature_asof - pd.Timedelta(minutes=minutes)
             prior = asof[asof.index <= cutoff]
             if prior.empty:
                 return np.nan

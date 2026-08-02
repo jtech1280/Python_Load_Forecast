@@ -34,24 +34,23 @@ def _july_day_frame(day: str, tz: str | None = "America/Los_Angeles") -> pd.Data
 
 
 class AnomalyExclusionMaskTests(unittest.TestCase):
-    def test_he_range_maps_to_hour_beginning(self):
+    def test_he_range_maps_to_completed_hour_label(self):
         df = _july_day_frame("2026-07-15")
         mask = excluded_interval_mask(df, DER_CONFIG)
-        # HE 18-21 (hour-ending) map to hour-beginning 17, 18, 19, 20.
-        self.assertEqual(sorted(df.loc[mask, "DT"].dt.hour.tolist()), [17, 18, 19, 20])
+        self.assertEqual(sorted(df.loc[mask, "DT"].dt.hour.tolist()), [18, 19, 20, 21])
 
     def test_drop_removes_only_excluded_rows(self):
         df = _july_day_frame("2026-07-15")
         out = drop_excluded_intervals(df, DER_CONFIG)
         remaining = out["DT"].dt.hour.tolist()
         self.assertEqual(len(out), 20)
-        self.assertNotIn(17, remaining)
         self.assertNotIn(18, remaining)
         self.assertNotIn(19, remaining)
         self.assertNotIn(20, remaining)
+        self.assertNotIn(21, remaining)
+        self.assertIn(17, remaining)
         self.assertIn(16, remaining)
         self.assertIn(15, remaining)
-        self.assertIn(21, remaining)
 
     def test_other_day_untouched(self):
         df = _july_day_frame("2026-07-14")
@@ -85,7 +84,7 @@ class AnomalyExclusionMaskTests(unittest.TestCase):
     def test_tz_naive_dt_supported(self):
         df = pd.DataFrame({"DT": pd.date_range("2026-07-15 16:00", periods=6, freq="h")})  # 16..21
         mask = excluded_interval_mask(df, DER_CONFIG)
-        self.assertEqual(sorted(df.loc[mask, "DT"].dt.hour.tolist()), [17, 18, 19, 20])
+        self.assertEqual(sorted(df.loc[mask, "DT"].dt.hour.tolist()), [18, 19, 20, 21])
 
     def test_mixed_offset_export_timestamps_are_treated_as_local_wall_clock(self):
         df = pd.DataFrame(
@@ -98,7 +97,7 @@ class AnomalyExclusionMaskTests(unittest.TestCase):
             }
         )
         mask = excluded_interval_mask(df, DER_CONFIG)
-        self.assertEqual(mask.tolist(), [True, True, False])
+        self.assertEqual(mask.tolist(), [False, True, False])
 
 
 class ProductionConfigExclusionTests(unittest.TestCase):
@@ -114,11 +113,11 @@ class ProductionConfigExclusionTests(unittest.TestCase):
         cfg = load_config()
         df = _july_day_frame("2026-07-15")
         remaining = drop_excluded_intervals(df, cfg)["DT"].dt.hour.tolist()
-        for hour_beginning in (17, 18, 19, 20):
-            self.assertNotIn(hour_beginning, remaining)
+        for hour_label in (18, 19, 20, 21):
+            self.assertNotIn(hour_label, remaining)
+        self.assertIn(17, remaining)
         self.assertIn(16, remaining)
         self.assertIn(15, remaining)
-        self.assertIn(21, remaining)
 
     def test_production_readiness_scorecard_drops_july15_der_hours(self):
         cfg = load_config()

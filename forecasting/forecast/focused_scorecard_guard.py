@@ -82,6 +82,10 @@ def _forecast_day_series(df: pd.DataFrame, anchor_col: str | None = None) -> pd.
     return pd.Series(np.nan, index=df.index, dtype=float)
 
 
+def _has_explicit_forecast_day(df: pd.DataFrame) -> bool:
+    return "Forecast_Day" in df.columns and _as_num(df["Forecast_Day"]).notna().any()
+
+
 def _hour_series(df: pd.DataFrame) -> pd.Series:
     if "Hour" in df.columns:
         hour = _as_num(df["Hour"])
@@ -140,6 +144,7 @@ def _rule_mask(
     solar_loss: pd.Series,
     is_holiday: pd.Series,
     is_weekend: pd.Series,
+    explicit_forecast_day: bool,
 ) -> pd.Series:
     mask = pd.Series(True, index=df.index, dtype=bool)
     mask &= _list_mask(month, rule.get("months"))
@@ -152,6 +157,10 @@ def _rule_mask(
         mask &= forecast_day.ge(float(rule["min_forecast_day"]))
     if "max_forecast_day" in rule:
         mask &= forecast_day.le(float(rule["max_forecast_day"]))
+    if explicit_forecast_day and "min_explicit_forecast_day" in rule:
+        mask &= forecast_day.ge(float(rule["min_explicit_forecast_day"]))
+    if explicit_forecast_day and "max_explicit_forecast_day" in rule:
+        mask &= forecast_day.le(float(rule["max_explicit_forecast_day"]))
     if "min_maxtemp_f" in rule:
         mask &= daily_max.ge(float(rule["min_maxtemp_f"]))
     if "max_maxtemp_f" in rule:
@@ -205,8 +214,322 @@ def _rule_mask(
     return mask.fillna(False)
 
 
+def _apply_prior_stack_filters(
+    mask: pd.Series,
+    rule: dict,
+    prior_total_adjustment: pd.Series,
+) -> pd.Series:
+    """Apply rule gates that depend on corrections already accepted for the row."""
+    min_prior_total = _first_rule_value(
+        rule,
+        "min_prior_total_adjustment_mwh",
+        "min_prior_guard_mwh",
+    )
+    if min_prior_total is not None:
+        mask &= prior_total_adjustment.ge(float(min_prior_total))
+
+    max_prior_total = _first_rule_value(
+        rule,
+        "max_prior_total_adjustment_mwh",
+        "max_prior_guard_mwh",
+    )
+    if max_prior_total is not None:
+        mask &= prior_total_adjustment.le(float(max_prior_total))
+    return mask.fillna(False)
+
+
+def _has_prior_stack_filter(rule: dict) -> bool:
+    return any(
+        key in rule
+        for key in (
+            "min_prior_total_adjustment_mwh",
+            "min_prior_guard_mwh",
+            "max_prior_total_adjustment_mwh",
+            "max_prior_guard_mwh",
+        )
+    )
+
+
 def _rule_uses_forecast_day(rule: dict) -> bool:
     return any(key in rule for key in ("min_forecast_day", "max_forecast_day"))
+
+
+def _rule_context(df: pd.DataFrame, forecast_col: str) -> dict[str, pd.Series]:
+    forecast = (
+        _as_num(df[forecast_col])
+        if forecast_col in df.columns
+        else pd.Series(np.nan, index=df.index, dtype=float)
+    )
+    month = _month_series(df)
+    season = _season_series(df, month)
+    hour = _hour_series(df)
+    forecast_day = _forecast_day_series(df, anchor_col=forecast_col)
+    daily_max = _as_num(df.get("Temperature_DailyMax", pd.Series(np.nan, index=df.index)))
+    cloud_cover = _optional_num_series(df, "CloudCover_Norm")
+    solar_loss = _optional_num_series(
+        df,
+        "BTM_Solar_Loss_From_ClearSky_MW",
+        "Midday_Overcast_Solar_Loss_MW",
+    )
+    raw_forecast = _optional_num_series(df, "Raw_Forecast_MWH")
+    samehour_7day = _optional_num_series(
+        df,
+        "MWH_SameHour7DayMean",
+        "Baseline_Rolling7DaySameHourAvg_MWH",
+    )
+    samehour_yesterday = _optional_num_series(
+        df,
+        "MWH_Lag24",
+        "Baseline_SameHourYesterday_MWH",
+    )
+    return {
+        "forecast": forecast,
+        "month": month,
+        "season": season,
+        "hour": hour,
+        "forecast_day": forecast_day,
+        "daily_max": daily_max,
+        "cloud_cover": cloud_cover,
+        "solar_loss": solar_loss,
+        "raw_minus_samehour_7day": raw_forecast - samehour_7day,
+        "raw_minus_samehour_yesterday": raw_forecast - samehour_yesterday,
+        "is_holiday": _bool_series(df, "IsHoliday"),
+        "is_weekend": _bool_series(df, "IsWeekend"),
+    }
+
+
+def _runtime_filtered_rules(df: pd.DataFrame, config: dict | None, forecast_col: str) -> list[dict]:
+    cfg = _guard_cfg(config)
+    rules = list(cfg.get("rules", []) or [])
+    explicit_forecast_day = _has_explicit_forecast_day(df)
+    horizon_context = explicit_forecast_day or "Actual_MWH" not in df.columns
+    if not horizon_context and not bool(cfg.get("allow_derived_forecast_day_with_actuals", False)):
+        rules = [
+            rule
+            for rule in rules
+            if bool((rule or {}).get("allow_without_forecast_day", False))
+            and not _rule_uses_forecast_day(rule or {})
+        ]
+    return [rule or {} for rule in rules]
+
+
+def focused_scorecard_rule_union_mask(
+    df: pd.DataFrame,
+    config: dict | None,
+    *,
+    forecast_col: str,
+    include_disabled: bool = False,
+    runtime_context: bool = True,
+) -> pd.Series:
+    """Return rows matched by the configured focused-scorecard guard rules.
+
+    This is used by shadow diagnostics and replacement learners to define the
+    current manual-exception footprint without applying any correction.
+    """
+    out = df.copy()
+    cfg = _guard_cfg(config)
+    if out.empty or not bool(cfg.get("enabled", False)) or forecast_col not in out.columns:
+        return pd.Series(False, index=out.index, dtype=bool)
+
+    rules = _runtime_filtered_rules(out, config, forecast_col) if runtime_context else list(cfg.get("rules", []) or [])
+    if not rules:
+        return pd.Series(False, index=out.index, dtype=bool)
+
+    ctx = _rule_context(out, forecast_col)
+    explicit_forecast_day = _has_explicit_forecast_day(out)
+    union = pd.Series(False, index=out.index, dtype=bool)
+    total_adjustment = pd.Series(0.0, index=out.index, dtype=float)
+    for raw_rule in rules:
+        rule = raw_rule or {}
+        if not include_disabled and not bool(rule.get("enabled", True)):
+            continue
+        adjustment = float(rule.get("adjustment_mwh", 0.0) or 0.0)
+        if abs(adjustment) < 1e-9:
+            continue
+        mask = _rule_mask(
+            out,
+            rule,
+            forecast=ctx["forecast"],
+            raw_minus_samehour_7day=ctx["raw_minus_samehour_7day"],
+            raw_minus_samehour_yesterday=ctx["raw_minus_samehour_yesterday"],
+            month=ctx["month"],
+            season=ctx["season"],
+            hour=ctx["hour"],
+            forecast_day=ctx["forecast_day"],
+            daily_max=ctx["daily_max"],
+            cloud_cover=ctx["cloud_cover"],
+            solar_loss=ctx["solar_loss"],
+            is_holiday=ctx["is_holiday"],
+            is_weekend=ctx["is_weekend"],
+            explicit_forecast_day=explicit_forecast_day,
+        )
+        mask = _apply_prior_stack_filters(mask, rule, total_adjustment)
+        union |= mask
+        total_adjustment.loc[mask] += adjustment
+    return union.fillna(False)
+
+
+def build_focused_scorecard_rule_audit(
+    df: pd.DataFrame,
+    config: dict | None,
+    *,
+    forecast_col: str = "Pre_Focused_Guard_Forecast_MWH",
+    actual_col: str = "Actual_MWH",
+) -> pd.DataFrame:
+    """Audit the current YAML focused-scorecard guard rule set.
+
+    Each row evaluates one configured rule in isolation against the pre-focused-guard
+    forecast. Negative ``RuleOnly_Delta_MAE_MWH`` means the rule would improve the
+    rows it matches; positive means it would worsen them.
+    """
+    if df is None or df.empty or actual_col not in df.columns:
+        return pd.DataFrame()
+
+    out = df.copy()
+    cfg = _guard_cfg(config)
+    rules = list(cfg.get("rules", []) or [])
+    if not bool(cfg.get("enabled", False)) or not rules:
+        return pd.DataFrame()
+    if forecast_col not in out.columns:
+        if "Final_Backtest_Forecast_MWH" in out.columns:
+            forecast_col = "Final_Backtest_Forecast_MWH"
+        elif "Final_Forecast_MWH" in out.columns:
+            forecast_col = "Final_Forecast_MWH"
+        else:
+            return pd.DataFrame()
+
+    runtime_rules = _runtime_filtered_rules(out, config, forecast_col)
+    runtime_ids = {id(rule) for rule in runtime_rules}
+    ctx = _rule_context(out, forecast_col)
+    explicit_forecast_day = _has_explicit_forecast_day(out)
+    actual = _as_num(out[actual_col])
+    forecast = ctx["forecast"]
+    post_guard = _optional_num_series(out, "Post_Focused_Guard_Forecast_MWH", "Final_Backtest_Forecast_MWH")
+    source = out.get("Focused_Scorecard_Guard_Source", pd.Series("none", index=out.index)).fillna("none").astype(str)
+    total_guard = _optional_num_series(out, "Focused_Scorecard_Guard_MWH")
+
+    rows: list[dict[str, object]] = []
+    active_rule_names: list[str] = []
+    active_masks: list[pd.Series] = []
+    health_cfg = cfg.get("rule_health", {}) or {}
+    health_enabled = bool(health_cfg.get("enabled", True))
+    min_health_rows = int(health_cfg.get("min_scored_rows", 1) or 1)
+    max_rule_only_delta = float(health_cfg.get("max_rule_only_delta_mae_mwh", 0.0) or 0.0)
+    max_current_stack_delta = float(health_cfg.get("max_current_stack_delta_mae_mwh", 0.0) or 0.0)
+    running_adjustment = pd.Series(0.0, index=out.index, dtype=float)
+    for raw_rule in rules:
+        rule = raw_rule or {}
+        name = str(rule.get("name", "focused_scorecard_guard")).strip() or "focused_scorecard_guard"
+        adjustment = float(rule.get("adjustment_mwh", 0.0) or 0.0)
+        enabled = bool(rule.get("enabled", True))
+        runtime_considered = enabled and id(rule) in runtime_ids and abs(adjustment) >= 1e-9
+        mask = _rule_mask(
+            out,
+            rule,
+            forecast=ctx["forecast"],
+            raw_minus_samehour_7day=ctx["raw_minus_samehour_7day"],
+            raw_minus_samehour_yesterday=ctx["raw_minus_samehour_yesterday"],
+            month=ctx["month"],
+            season=ctx["season"],
+            hour=ctx["hour"],
+            forecast_day=ctx["forecast_day"],
+            daily_max=ctx["daily_max"],
+            cloud_cover=ctx["cloud_cover"],
+            solar_loss=ctx["solar_loss"],
+            is_holiday=ctx["is_holiday"],
+            is_weekend=ctx["is_weekend"],
+            explicit_forecast_day=explicit_forecast_day,
+        )
+        mask = mask.fillna(False)
+        if runtime_considered:
+            mask = _apply_prior_stack_filters(mask, rule, running_adjustment)
+        if runtime_considered:
+            active_rule_names.append(name)
+            active_masks.append(mask)
+
+        valid = mask & actual.notna() & forecast.notna()
+        base_residual = actual[valid] - forecast[valid]
+        rule_forecast = (forecast[valid] + adjustment).clip(lower=0.0)
+        rule_residual = actual[valid] - rule_forecast
+        post_valid = valid & post_guard.notna()
+        source_contains = source.str.contains(name, regex=False, na=False)
+        row = {
+            "RuleName": name,
+            "Enabled": int(enabled),
+            "Runtime_Considered": int(runtime_considered),
+            "Adjustment_MWH": adjustment,
+            "Direction": "up" if adjustment > 0 else ("down" if adjustment < 0 else "zero"),
+            "UsesForecastDay": int(_rule_uses_forecast_day(rule)),
+            "UsesExplicitForecastDay": int(
+                any(key in rule for key in ("min_explicit_forecast_day", "max_explicit_forecast_day"))
+            ),
+            "UsesPriorStackGate": int(_has_prior_stack_filter(rule)),
+            "AllowWithoutForecastDay": int(bool(rule.get("allow_without_forecast_day", False))),
+            "MatchedRows": int(mask.sum()),
+            "ScoredRows": int(valid.sum()),
+            "AppliedSourceRows": int((source_contains & valid).sum()),
+            "RowsWithOtherFocusedRules": int((source_contains & source.str.contains("+", regex=False, na=False) & valid).sum()),
+            "MeanActual_MWH": float(actual[valid].mean()) if valid.any() else np.nan,
+            "MeanForecast_MWH": float(forecast[valid].mean()) if valid.any() else np.nan,
+            "MeanForecastDay": float(ctx["forecast_day"][valid].mean()) if valid.any() else np.nan,
+            "MeanDailyMax_F": float(ctx["daily_max"][valid].mean()) if valid.any() else np.nan,
+            "MeanCloudCover_Norm": float(ctx["cloud_cover"][valid].mean()) if valid.any() else np.nan,
+            "MeanSolarLoss_MW": float(ctx["solar_loss"][valid].mean()) if valid.any() else np.nan,
+            "MeanRawMinusSameHour7Day_MWH": float(ctx["raw_minus_samehour_7day"][valid].mean()) if valid.any() else np.nan,
+            "Baseline_Bias_MWH": float(base_residual.mean()) if valid.any() else np.nan,
+            "RuleOnly_Bias_MWH": float(rule_residual.mean()) if valid.any() else np.nan,
+            "Baseline_MAE_MWH": float(base_residual.abs().mean()) if valid.any() else np.nan,
+            "RuleOnly_MAE_MWH": float(rule_residual.abs().mean()) if valid.any() else np.nan,
+            "RuleOnly_Delta_MAE_MWH": (
+                float(rule_residual.abs().mean() - base_residual.abs().mean()) if valid.any() else np.nan
+            ),
+            "CurrentStack_MAE_OnRows_MWH": (
+                float((actual[post_valid] - post_guard[post_valid]).abs().mean()) if post_valid.any() else np.nan
+            ),
+            "CurrentStack_Delta_MAE_OnRows_MWH": (
+                float(
+                    (actual[post_valid] - post_guard[post_valid]).abs().mean()
+                    - (actual[post_valid] - forecast[post_valid]).abs().mean()
+                )
+                if post_valid.any() else np.nan
+            ),
+            "MeanStackedGuardMWH_OnRows": float(total_guard[valid].mean()) if valid.any() else np.nan,
+        }
+        fail_reasons: list[str] = []
+        rule_delta = row["RuleOnly_Delta_MAE_MWH"]
+        stack_delta = row["CurrentStack_Delta_MAE_OnRows_MWH"]
+        if not enabled:
+            health_status = "disabled"
+        elif not runtime_considered:
+            health_status = "not_runtime_considered"
+        elif int(row["ScoredRows"]) < min_health_rows:
+            health_status = "insufficient_rows"
+        elif not health_enabled:
+            health_status = "not_evaluated"
+        else:
+            stack_gated = _has_prior_stack_filter(rule)
+            if not stack_gated and pd.notna(rule_delta) and float(rule_delta) > max_rule_only_delta:
+                fail_reasons.append("rule_only_mae_worse")
+            if pd.notna(stack_delta) and float(stack_delta) > max_current_stack_delta:
+                fail_reasons.append("current_stack_mae_worse")
+            if fail_reasons:
+                health_status = "fail"
+            else:
+                health_status = "pass_stack_gated" if stack_gated else "pass"
+        row["RuleHealth_Status"] = health_status
+        row["RuleHealth_FailReasons"] = ";".join(fail_reasons)
+        rows.append(row)
+        if runtime_considered:
+            running_adjustment.loc[mask] += adjustment
+
+    audit = pd.DataFrame(rows)
+    if audit.empty:
+        return audit
+    audit["RuleRank_ByDeltaMAE"] = audit["RuleOnly_Delta_MAE_MWH"].rank(method="dense", na_option="bottom")
+    return audit.sort_values(
+        ["Runtime_Considered", "ScoredRows", "RuleOnly_Delta_MAE_MWH"],
+        ascending=[False, False, True],
+    ).reset_index(drop=True)
 
 
 def apply_focused_scorecard_guard(
@@ -244,10 +567,7 @@ def apply_focused_scorecard_guard(
     if not rules:
         return out
 
-    explicit_forecast_day = (
-        "Forecast_Day" in out.columns
-        and _as_num(out["Forecast_Day"]).notna().any()
-    )
+    explicit_forecast_day = _has_explicit_forecast_day(out)
     horizon_context = explicit_forecast_day or "Actual_MWH" not in out.columns
     if not horizon_context and not bool(cfg.get("allow_derived_forecast_day_with_actuals", False)):
         rules = [
@@ -315,7 +635,9 @@ def apply_focused_scorecard_guard(
             solar_loss=solar_loss,
             is_holiday=is_holiday,
             is_weekend=is_weekend,
+            explicit_forecast_day=explicit_forecast_day,
         )
+        mask = _apply_prior_stack_filters(mask, rule, total_adjustment)
         if not mask.any():
             continue
         name = str(rule.get("name", "focused_scorecard_guard")).strip() or "focused_scorecard_guard"

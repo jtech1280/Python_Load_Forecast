@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime
 from io import StringIO
 from unittest.mock import patch
 
@@ -162,6 +163,65 @@ class MainLauncherTests(unittest.TestCase):
                     forecast_main._run_solar_forecast(output_dir, allow_stale_on_failure=True)
 
             self.assertIn("continuing with existing", stdout.getvalue())
+
+    def test_solar_forecast_refresh_skips_outside_weather_import_window_with_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            hourly = output_dir / "roseville_solar_forecast_hourly.csv"
+            hourly.write_text("IntervalStartDT,Forecast_MW\n", encoding="utf-8")
+            config = {
+                "project": {"timezone": "America/Los_Angeles"},
+                "openmeteo": {
+                    "forecast_import_policy": {
+                        "enabled": True,
+                        "import_window_start_local": "06:00",
+                        "import_window_end_local": "07:45",
+                    }
+                },
+            }
+
+            with (
+                patch.object(
+                    forecast_main,
+                    "_weather_import_window_for_now",
+                    return_value=(
+                        datetime(2026, 8, 1, 13, 0),
+                        datetime(2026, 8, 1, 6, 0),
+                        datetime(2026, 8, 1, 7, 45),
+                    ),
+                ),
+                patch.object(forecast_main.subprocess, "run", side_effect=AssertionError("unexpected solar refresh")),
+            ):
+                with redirect_stdout(StringIO()) as stdout:
+                    forecast_main._run_solar_forecast(output_dir, config=config)
+
+            self.assertIn("Skipping solar forecast refresh outside Open-Meteo morning import window", stdout.getvalue())
+
+    def test_solar_forecast_refresh_raises_outside_weather_import_window_without_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            config = {
+                "project": {"timezone": "America/Los_Angeles"},
+                "openmeteo": {
+                    "forecast_import_policy": {
+                        "enabled": True,
+                        "import_window_start_local": "06:00",
+                        "import_window_end_local": "07:45",
+                    }
+                },
+            }
+
+            with patch.object(
+                forecast_main,
+                "_weather_import_window_for_now",
+                return_value=(
+                    datetime(2026, 8, 1, 13, 0),
+                    datetime(2026, 8, 1, 6, 0),
+                    datetime(2026, 8, 1, 7, 45),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "outside the configured morning window"):
+                    forecast_main._run_solar_forecast(output_dir, config=config)
 
     def test_solar_forecast_refresh_failure_raises_without_existing_file(self):
         with tempfile.TemporaryDirectory() as tmp:

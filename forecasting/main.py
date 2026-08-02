@@ -1,12 +1,13 @@
 import argparse
 import atexit
 import csv
-from datetime import datetime
+from datetime import datetime, time as dt_time, timedelta
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+from zoneinfo import ZoneInfo
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -243,6 +244,10 @@ def _archive_replay_diagnostic_snapshots(
         "Auto_Residual_Full_Shadow_Adjusted_Forecast_MWH",
         "Auto_Residual_Full_Shadow_Correction_Applied_Flag",
         "Auto_Residual_Full_Shadow_Source",
+        "Daily_Peak_Correction_MWH",
+        "Daily_Peak_Shadow_Adjusted_Forecast_MWH",
+        "Daily_Peak_Correction_Applied_Flag",
+        "Daily_Peak_Source",
         "Final_Backtest_Forecast_MWH",
         "Final_Forecast_MWH",
         "Final_Residual_MWH",
@@ -279,6 +284,60 @@ def _add_optional_solar_arg(cmd: list[str], arg_name: str, value: object) -> Non
     if value in {None, ""}:
         return
     cmd.extend([arg_name, str(value)])
+
+
+def _parse_local_clock(value: object, default: str) -> dt_time:
+    text = str(value or default).strip()
+    try:
+        parts = text.split(":")
+        return dt_time(
+            hour=int(parts[0]),
+            minute=int(parts[1]) if len(parts) > 1 else 0,
+            second=int(parts[2]) if len(parts) > 2 else 0,
+        )
+    except Exception:
+        fallback = str(default).split(":")
+        return dt_time(hour=int(fallback[0]), minute=int(fallback[1]) if len(fallback) > 1 else 0)
+
+
+def _weather_import_window_for_now(config: dict | None, now: datetime | None = None) -> tuple[datetime, datetime, datetime] | None:
+    policy = (((config or {}).get("openmeteo", {}) or {}).get("forecast_import_policy", {}) or {})
+    if not bool(policy.get("enabled", False)):
+        return None
+    tz = ZoneInfo(str(((config or {}).get("project", {}) or {}).get("timezone") or "America/Los_Angeles"))
+    now_local = now.astimezone(tz) if now is not None and now.tzinfo is not None else (now.replace(tzinfo=tz) if now is not None else datetime.now(tz))
+    start_time = _parse_local_clock(policy.get("import_window_start_local"), "05:30")
+    end_time = _parse_local_clock(policy.get("import_window_end_local"), "08:00")
+    start = datetime.combine(now_local.date(), start_time, tzinfo=tz)
+    end = datetime.combine(now_local.date(), end_time, tzinfo=tz)
+    if end <= start:
+        if now_local.time() <= end_time:
+            start -= timedelta(days=1)
+        else:
+            end += timedelta(days=1)
+    return now_local, start, end
+
+
+def _solar_refresh_blocked_by_weather_import_policy(
+    config: dict | None,
+    hourly_path: Path,
+    now: datetime | None = None,
+) -> tuple[bool, str]:
+    window = _weather_import_window_for_now(config, now=now)
+    if window is None:
+        return False, ""
+    now_local, start, end = window
+    if start <= now_local <= end:
+        return False, ""
+    if hourly_path.exists():
+        return True, (
+            "Skipping solar forecast refresh outside Open-Meteo morning import window "
+            f"({start} to {end}); using existing file: {hourly_path}"
+        )
+    return True, (
+        "Solar forecast refresh would require an Open-Meteo import outside the configured "
+        f"morning window ({start} to {end}), and no existing solar forecast CSV is available: {hourly_path}"
+    )
 
 
 def _build_solar_command(output_dir: Path, config: dict | None = None) -> list[str]:
@@ -337,6 +396,13 @@ def _run_solar_forecast(
             flush=True,
         )
         return
+    if not require_backtest_outputs:
+        blocked, reason = _solar_refresh_blocked_by_weather_import_policy(config, hourly_path)
+        if blocked:
+            if hourly_path.exists():
+                print(reason, flush=True)
+                return
+            raise RuntimeError(reason)
 
     print("Running solar forecast...")
     started_at = datetime.now().timestamp()

@@ -30,6 +30,7 @@ def _forecast_weather_frame_from_output(df: pd.DataFrame) -> pd.DataFrame:
         "Humidity_Norm": "HumidityPct",
         "CloudCover_Norm": "CloudCoverPct",
         "WindSpeed_Mph": "WindSpeedMph",
+        "WindDirection_Deg": "WindDirectionDeg",
         "PrecipIn": "PrecipIn",
         "Solar_Irradiance": "GHI_Wm2",
     }
@@ -147,7 +148,7 @@ def main():
         previous_weather = load_latest_distinct_snapshot(
             cache_dir / "forecast_weather_runs",
             current_df=current_weather_for_snapshot,
-            hash_columns=["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "PrecipIn", "GHI_Wm2", "IsDay"],
+            hash_columns=["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "WindDirectionDeg", "PrecipIn", "GHI_Wm2", "IsDay"],
         )
     diagnostics = {}
     current_mtime = max([p.stat().st_mtime for p in [forecast_csv, backtest_csv] if p.exists()] or [0.0])
@@ -158,6 +159,7 @@ def main():
         "band_coverage_summary",
         "daily_peak_miss_by_stage",
         "backtest_metrics_by_segment_by_stage",
+        "delta_breeze_shape_metrics_by_stage",
         "top_100_underforecast_hours_by_stage",
         "stage_marginal_contributions",
     ]:

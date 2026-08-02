@@ -119,7 +119,7 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     out["Season"] = out["Month"].map(_month_to_season)
     out["HourGroup"] = out["Hour"].map(_hour_group)
 
-    # Roseville TOU/load-behavior flags.  Hour is hour-beginning: 16 means 4:00-5:00 PM.
+    # Roseville TOU/load-behavior flags. Hour follows the model's official completed-hour label.
     out["IsSummerSeason"] = out["Month"].between(6, 9).astype(int)
     out["IsWinterSeason"] = (~out["Month"].between(6, 9)).astype(int)
     offpeak = (out["IsWeekend"].eq(1) | out["IsHoliday"].eq(1) | (out["Hour"] < 7) | (out["Hour"] >= 22))

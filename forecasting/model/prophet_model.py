@@ -26,20 +26,6 @@ DEFAULT_PROPHET_REGRESSORS = [
     "OvernightHeatStress",
     "Humidity_Norm", "CloudCover_Norm", "WindSpeed_Mph", "PrecipIn", "Is_Raining",
     "Wind_x_Temp", "Rain_x_IsWeekend", "Hot_Humid_Stress",
-    "WindDirection_Available_Flag", "WindDir_Sin", "WindDir_Cos",
-    "Westerly_Flow_Mph", "Westerly_Flow_Flag",
-    "WindRamp_1Hr_Mph", "WindRamp_3Hr_Mph", "WindRamp_Next1Hr_Mph", "WindRamp_Next3Hr_Mph",
-    "WesterlyFlow_Ramp_1Hr_Mph", "WesterlyFlow_Ramp_3Hr_Mph",
-    "WesterlyFlow_Next1Hr_Ramp_Mph", "WesterlyFlow_Next3Hr_Ramp_Mph",
-    "IsPostPeakEvening18to23", "Temperature_Drop_From_DailyMax_F",
-    "TempDrop_1Hr_F", "TempDrop_2Hr_F", "TempDrop_3Hr_F",
-    "TempDrop_Next1Hr_F", "TempDrop_Next2Hr_F", "TempDrop_Next3Hr_F",
-    "ClearHotEvening_Flag", "ClearVeryHotEvening_Flag",
-    "ClearHotEvening_x_TempDropFromDailyMax", "ClearHotEvening_x_ForecastDropNext3Hr",
-    "ClearHotEvening_x_WesterlyFlow", "ClearHotEvening_x_WesterlyFlowRamp",
-    "DeltaBreeze_Westerly_Flow_Flag", "DeltaBreeze_EveningWindRamp_Flag",
-    "DeltaBreeze_Cooling_Flag", "DeltaBreeze_Cooling_Signal",
-    "DeltaBreeze_CoolingNoDirection_Signal", "DeltaBreeze_ClearHotEvening_Signal",
     # Time/calendar/load-shape fields known in advance
     "Hour", "DOW", "Month", "DayOfYear", "WeekOfYear",
     "HourSin", "HourCos", "DOWSin", "DOWCos", "MonthSin", "MonthCos", "DayOfYearSin", "DayOfYearCos",
@@ -117,8 +103,8 @@ def _available_regressors(df: pd.DataFrame, regressors: list[str]) -> list[str]:
 
 
 def _clean_regressor_frame(df: pd.DataFrame, regressors: list[str], fill_values: dict[str, float] | None = None) -> tuple[pd.DataFrame, dict[str, float]]:
-    out = pd.DataFrame(index=df.index)
     fills: dict[str, float] = {} if fill_values is None else dict(fill_values)
+    columns: dict[str, pd.Series] = {}
 
     for col in regressors:
         if col in df.columns:
@@ -129,8 +115,9 @@ def _clean_regressor_frame(df: pd.DataFrame, regressors: list[str], fill_values:
         if col not in fills:
             med = float(s.median()) if s.notna().any() else 0.0
             fills[col] = med if np.isfinite(med) else 0.0
-        out[col] = s.fillna(fills[col]).astype(float)
+        columns[col] = s.fillna(fills[col]).astype(float)
 
+    out = pd.DataFrame(columns, index=df.index) if columns else pd.DataFrame(index=df.index)
     return out, fills
 
 
@@ -224,9 +211,14 @@ def train_prophet(
     reg_candidates = _remove_constant_regressors(work, reg_candidates)
     reg_frame, fill_values = _clean_regressor_frame(work, reg_candidates)
 
-    prophet_df = pd.DataFrame({"ds": work["DT"], "y": work["MWH"].astype(float)})
-    for col in reg_candidates:
-        prophet_df[col] = reg_frame[col].values
+    prophet_base = pd.DataFrame(
+        {
+            "ds": work["DT"].to_numpy(),
+            "y": work["MWH"].astype(float).to_numpy(),
+        },
+        index=work.index,
+    )
+    prophet_df = pd.concat([prophet_base, reg_frame], axis=1).copy()
 
     try:
         model = make_prophet_model(config, work)
@@ -291,10 +283,9 @@ def predict_prophet(model_or_fit: Any | ProphetFitResult | None, df: pd.DataFram
         reg_list = list(regressors or getattr(model, "_forecasting_regressors", []))
         fill_values = dict(getattr(model, "_forecasting_regressor_fill_values", {}))
 
-    future = pd.DataFrame({"ds": _to_prophet_naive_datetime(df["DT"])}, index=df.index)
+    future_base = pd.DataFrame({"ds": _to_prophet_naive_datetime(df["DT"])}, index=df.index)
     reg_frame, _ = _clean_regressor_frame(df, reg_list, fill_values=fill_values)
-    for col in reg_list:
-        future[col] = reg_frame[col].values
+    future = pd.concat([future_base, reg_frame], axis=1).copy()
 
     out = pd.DataFrame(index=df.index)
     out["Prophet_Pred_MWH"] = np.nan

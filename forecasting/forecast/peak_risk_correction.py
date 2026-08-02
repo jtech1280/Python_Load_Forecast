@@ -8,6 +8,13 @@ def _as_num(x):
     return pd.to_numeric(x, errors="coerce")
 
 
+def _optional_num(out: pd.DataFrame, *columns: str, default: float = np.nan) -> pd.Series:
+    for col in columns:
+        if col in out.columns:
+            return _as_num(out[col])
+    return pd.Series(default, index=out.index, dtype=float)
+
+
 def _hour_group(hour: int) -> str:
     h = int(hour)
     if 0 <= h <= 5:
@@ -123,7 +130,56 @@ def apply_peak_risk_correction(df: pd.DataFrame, config: dict | None = None, bas
         for ix in out.index[extreme_mask & signal.gt(0.0)]:
             sources[ix].append("extreme_hot_peak_cap")
 
-    correction = np.minimum((signal * blend).clip(lower=0.0), cap_by_row)
+    correction = pd.Series(np.minimum((signal * blend).clip(lower=0.0), cap_by_row), index=out.index, dtype=float)
+
+    positive_guard_cfg = cfg.get("positive_guard", {}) or {}
+    overforecast_guard_cfg = positive_guard_cfg.get("overforecast_risk", {}) or {}
+    positive_guard_enabled = bool(positive_guard_cfg.get("enabled", False)) and bool(
+        overforecast_guard_cfg.get("enabled", True)
+    )
+    if positive_guard_enabled:
+        guard_hours = [int(h) for h in overforecast_guard_cfg.get("hours", hours)]
+        guard_min_maxtemp = float(overforecast_guard_cfg.get("min_maxtemp_f", min_maxtemp))
+        guard_min_raw_minus_7day = float(
+            overforecast_guard_cfg.get("min_raw_minus_samehour_7day_mean_mwh", np.inf)
+        )
+        guard_min_next3_drop = float(overforecast_guard_cfg.get("min_forecast_drop_next3hr_f", np.inf))
+        guard_max_positive = float(overforecast_guard_cfg.get("max_positive_correction_mwh", 0.0))
+        blocked_source = str(
+            overforecast_guard_cfg.get("blocked_source", "peak_risk_overforecast_guard_blocked")
+        )
+
+        raw = _optional_num(out, "Raw_Forecast_MWH", "Forecast_MWH", default=np.nan)
+        raw = raw.where(raw.notna(), base)
+        raw_minus_samehour_7day = _optional_num(out, "Raw_Minus_SameHour7DayMean_MWH", default=np.nan)
+        if raw_minus_samehour_7day.isna().all():
+            samehour_7day = _optional_num(
+                out,
+                "MWH_SameHour7DayMean",
+                "Baseline_Rolling7DaySameHourAvg_MWH",
+                default=np.nan,
+            )
+            raw_minus_samehour_7day = raw - samehour_7day
+        next3_drop = _optional_num(out, "TempDrop_Next3Hr_F", default=np.nan)
+
+        guard_mask = (
+            correction.gt(guard_max_positive)
+            & hour.isin(guard_hours)
+            & maxt.ge(guard_min_maxtemp)
+            & raw_minus_samehour_7day.ge(guard_min_raw_minus_7day)
+            & next3_drop.ge(guard_min_next3_drop)
+        )
+        if guard_max_positive <= 0.0:
+            correction.loc[guard_mask] = 0.0
+            for ix in out.index[guard_mask]:
+                sources[ix] = [blocked_source]
+        else:
+            capped_mask = guard_mask & correction.gt(guard_max_positive)
+            correction.loc[capped_mask] = guard_max_positive
+            for ix in out.index[capped_mask]:
+                if blocked_source not in sources[ix]:
+                    sources[ix].append(blocked_source)
+
     out["Peak_Risk_Cal_MWH"] = correction
     out["Peak_Risk_Source"] = ["+".join(s) if s else "none" for s in sources]
     out["Peak_Risk_Adjusted_Forecast_MWH"] = (base + correction).clip(lower=0.0)

@@ -12,8 +12,8 @@ This module implements *pure exclusion*: the configured intervals are dropped fr
 residual-learning inputs and from the replay scorecards. It does not attempt to repair the
 underlying actual (that would need the dispatched-MW telemetry). Events are described the
 way operators describe them - a local calendar date plus an inclusive hour-ENDING (HE)
-range. HE ``h`` maps to the project's hour-beginning ``Hour`` value ``h - 1`` (HE 17 is the
-16:00-17:00 interval, i.e. ``Hour == 16``).
+range. The load model's exported ``DT`` is aligned to that completed-hour label, so HE 18
+matches rows where local ``DT.hour == 18``.
 """
 
 import pandas as pd
@@ -27,17 +27,17 @@ def _exclusion_events(config: dict | None) -> list[dict]:
     return [ev for ev in events if isinstance(ev, dict) and ev.get("date") is not None]
 
 
-def _hour_beginning_bounds(event: dict) -> tuple[int, int]:
-    """Return the inclusive hour-beginning bounds for an event's HE range.
+def _hour_label_bounds(event: dict) -> tuple[int, int]:
+    """Return the inclusive DT.hour bounds for an event's HE range.
 
-    A missing ``he_start``/``he_end`` means the whole day (hour-beginning 0..23).
+    A missing ``he_start``/``he_end`` means the whole day (local DT.hour 0..23).
     """
     he_start = event.get("he_start")
     he_end = event.get("he_end")
     if he_start is None and he_end is None:
         return 0, 23
-    hb_start = int(he_start) - 1 if he_start is not None else 0
-    hb_end = int(he_end) - 1 if he_end is not None else 23
+    hb_start = int(he_start) if he_start is not None else 0
+    hb_end = int(he_end) if he_end is not None else 23
     lo, hi = sorted((hb_start, hb_end))
     return max(0, lo), min(23, hi)
 
@@ -69,7 +69,7 @@ def excluded_interval_mask(df: pd.DataFrame, config: dict | None, dt_col: str = 
             event_day = pd.Timestamp(event["date"]).normalize()
         except (ValueError, TypeError):
             continue
-        lo, hi = _hour_beginning_bounds(event)
+        lo, hi = _hour_label_bounds(event)
         mask |= day.eq(event_day) & hour.between(lo, hi)
 
     return mask.fillna(False)

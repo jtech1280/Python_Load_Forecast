@@ -11,6 +11,7 @@ import pandas as pd
 from forecasting.backtest.rolling_backtest import run_rolling_backtest
 from forecasting.diagnostics.forecast_diagnostics import (
     build_daily_peak_miss_by_stage,
+    build_daily_peak_shadow_window_scorecard,
     build_delta_breeze_shape_metrics_by_stage,
     build_forecast_stage_metrics,
     build_metrics_by_group_by_stage,
@@ -22,7 +23,14 @@ from forecasting.forecast.forecast_pipeline import (
     apply_origin_available_correction_chain,
     build_correction_artifacts,
 )
-from forecasting.forecast.focused_scorecard_guard import apply_focused_scorecard_guard
+from forecasting.forecast.focused_scorecard_guard import (
+    apply_focused_scorecard_guard,
+    build_focused_scorecard_rule_audit,
+)
+from forecasting.forecast.focused_shape_residual_learner import (
+    apply_focused_shape_residual_learner,
+    focused_shape_residual_summary,
+)
 from forecasting.forecast.anomaly_exclusions import excluded_interval_mask
 from forecasting.forecast.weather_scenarios import (
     add_scenario_summary_columns,
@@ -33,6 +41,10 @@ from forecasting.forecast.weather_scenarios import (
 )
 from forecasting.forecast.weather_robustness_hedge import apply_weather_robustness_hedge
 from forecasting.forecast.operational_residual_learner import apply_operational_residual_learner
+from forecasting.forecast.daily_peak_shadow_model import (
+    apply_daily_peak_shadow_model,
+    daily_peak_shadow_summary,
+)
 from forecasting.forecast.recursive_engine import recursive_forecast
 from forecasting.data.weather_loader import fetch_previous_run_weather
 from forecasting.features.feature_builder import build_forecast_frame
@@ -105,6 +117,13 @@ WEATHER_REALISM_PREFIX_COLS = [
     "Focused_Guard_Applied_Flag", "Focused_Scorecard_Guard_MWH",
     "Focused_Scorecard_Guard_Source", "Raw_Minus_SameHour7DayMean_MWH",
     "Raw_Minus_SameHourYesterday_MWH",
+    "Focused_Shape_Model_Version", "Focused_Shape_Shadow_Mode",
+    "Focused_Shape_Base_Forecast_MWH", "Focused_Shape_Correction_MWH",
+    "Focused_Shape_Adjusted_Forecast_MWH", "Focused_Shape_Correction_Applied_Flag",
+    "Focused_Shape_Source", "Focused_Shape_Evaluation_Mode",
+    "Focused_Shape_Residual_MWH", "Focused_Shape_AbsError_MWH",
+    "Focused_Shape_Delta_AbsError_MWH", "Focused_Shape_RuleUnion_Flag",
+    "Focused_Shape_Scope_Flag",
     "Auto_Residual_Model_Version", "Auto_Residual_Shadow_Mode",
     "Auto_Residual_Production_Scope",
     "Auto_Residual_Base_Forecast_MWH", "Auto_Residual_Correction_MWH",
@@ -119,6 +138,15 @@ WEATHER_REALISM_PREFIX_COLS = [
     "Auto_Residual_Full_Shadow_Residual_MWH",
     "Auto_Residual_Full_Shadow_AbsError_MWH",
     "Auto_Residual_Full_Shadow_Delta_AbsError_MWH",
+    "Daily_Peak_Model_Version", "Daily_Peak_Shadow_Mode",
+    "Daily_Peak_Base_Forecast_MWH", "Daily_Peak_Correction_MWH",
+    "Daily_Peak_Shadow_Adjusted_Forecast_MWH", "Daily_Peak_Correction_Applied_Flag",
+    "Daily_Peak_Source", "Daily_Peak_Evaluation_Mode",
+    "Daily_Peak_Base_DailyPeak_MWH", "Daily_Peak_Predicted_Residual_MWH",
+    "Daily_Peak_Predicted_DailyPeak_MWH", "Daily_Peak_Base_PeakHour",
+    "Daily_Peak_Predicted_PeakHour", "Daily_Peak_Timing_Shift_Hours",
+    "Daily_Peak_Residual_MWH", "Daily_Peak_AbsError_MWH",
+    "Daily_Peak_Delta_AbsError_MWH",
 ]
 
 
@@ -837,9 +865,31 @@ def _run_single_origin_replay(args: tuple) -> tuple[pd.DataFrame | None, list[di
             also_update_stage=True,
         )
     corrected = _apply_replay_focused_guard(corrected, config, also_update_stage=True)
+    focused_shape_base_col = (
+        "Pre_Focused_Guard_Forecast_MWH"
+        if "Pre_Focused_Guard_Forecast_MWH" in corrected.columns
+        else "Final_Backtest_Forecast_MWH"
+    )
+    corrected = apply_focused_shape_residual_learner(
+        corrected,
+        artifacts.get("focused_shape_residual_artifact"),
+        config,
+        forecast_col=focused_shape_base_col,
+        also_update_cols=("Final_Backtest_Forecast_MWH", "Stage_Selected_Forecast_MWH"),
+        update_forecast_col=focused_shape_base_col != "Pre_Focused_Guard_Forecast_MWH",
+        evaluation_mode="origin_available_shadow",
+    )
     corrected = apply_operational_residual_learner(
         corrected,
         artifacts.get("operational_residual_artifact"),
+        config,
+        forecast_col="Final_Backtest_Forecast_MWH",
+        also_update_cols=("Stage_Selected_Forecast_MWH",),
+        evaluation_mode="origin_available_shadow",
+    )
+    corrected = apply_daily_peak_shadow_model(
+        corrected,
+        artifacts.get("daily_peak_shadow_artifact"),
         config,
         forecast_col="Final_Backtest_Forecast_MWH",
         also_update_cols=("Stage_Selected_Forecast_MWH",),
@@ -861,9 +911,30 @@ def _run_single_origin_replay(args: tuple) -> tuple[pd.DataFrame | None, list[di
             config,
             also_update_stage=False,
         )
+        focused_shape_base_col = (
+            "Pre_Focused_Guard_Forecast_MWH"
+            if "Pre_Focused_Guard_Forecast_MWH" in corrected_weather_realism.columns
+            else "Final_Backtest_Forecast_MWH"
+        )
+        corrected_weather_realism = apply_focused_shape_residual_learner(
+            corrected_weather_realism,
+            artifacts.get("focused_shape_residual_artifact"),
+            config,
+            forecast_col=focused_shape_base_col,
+            also_update_cols=("Final_Backtest_Forecast_MWH",),
+            update_forecast_col=focused_shape_base_col != "Pre_Focused_Guard_Forecast_MWH",
+            evaluation_mode="weather_realism_origin_available_shadow",
+        )
         corrected_weather_realism = apply_operational_residual_learner(
             corrected_weather_realism,
             artifacts.get("operational_residual_artifact"),
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+            evaluation_mode="weather_realism_origin_available_shadow",
+        )
+        corrected_weather_realism = apply_daily_peak_shadow_model(
+            corrected_weather_realism,
+            artifacts.get("daily_peak_shadow_artifact"),
             config,
             forecast_col="Final_Backtest_Forecast_MWH",
             evaluation_mode="weather_realism_origin_available_shadow",
@@ -1091,6 +1162,13 @@ def _june_hot_origin_diagnostics(bt: pd.DataFrame) -> pd.DataFrame:
         "Pre_Focused_Guard_Forecast_MWH", "Post_Focused_Guard_Forecast_MWH",
         "Focused_Guard_Applied_Flag", "Focused_Scorecard_Guard_MWH",
         "Focused_Scorecard_Guard_Source", "Final_Backtest_Forecast_MWH", "Final_Forecast_MWH",
+        "Focused_Shape_Model_Version", "Focused_Shape_Shadow_Mode",
+        "Focused_Shape_Base_Forecast_MWH", "Focused_Shape_Correction_MWH",
+        "Focused_Shape_Adjusted_Forecast_MWH", "Focused_Shape_Correction_Applied_Flag",
+        "Focused_Shape_Source", "Focused_Shape_Evaluation_Mode",
+        "Focused_Shape_Residual_MWH", "Focused_Shape_AbsError_MWH",
+        "Focused_Shape_Delta_AbsError_MWH", "Focused_Shape_RuleUnion_Flag",
+        "Focused_Shape_Scope_Flag",
         "Auto_Residual_Model_Version", "Auto_Residual_Shadow_Mode",
         "Auto_Residual_Production_Scope",
         "Auto_Residual_Base_Forecast_MWH", "Auto_Residual_Correction_MWH",
@@ -1105,6 +1183,15 @@ def _june_hot_origin_diagnostics(bt: pd.DataFrame) -> pd.DataFrame:
         "Auto_Residual_Full_Shadow_Residual_MWH",
         "Auto_Residual_Full_Shadow_AbsError_MWH",
         "Auto_Residual_Full_Shadow_Delta_AbsError_MWH",
+        "Daily_Peak_Model_Version", "Daily_Peak_Shadow_Mode",
+        "Daily_Peak_Base_Forecast_MWH", "Daily_Peak_Correction_MWH",
+        "Daily_Peak_Shadow_Adjusted_Forecast_MWH", "Daily_Peak_Correction_Applied_Flag",
+        "Daily_Peak_Source", "Daily_Peak_Evaluation_Mode",
+        "Daily_Peak_Base_DailyPeak_MWH", "Daily_Peak_Predicted_Residual_MWH",
+        "Daily_Peak_Predicted_DailyPeak_MWH", "Daily_Peak_Base_PeakHour",
+        "Daily_Peak_Predicted_PeakHour", "Daily_Peak_Timing_Shift_Hours",
+        "Daily_Peak_Residual_MWH", "Daily_Peak_AbsError_MWH",
+        "Daily_Peak_Delta_AbsError_MWH",
         "Raw_Residual_MWH", "XGB_Residual_MWH", "LGB_Residual_MWH", "CatBoost_Residual_MWH",
         "Stage_Selected_Residual_MWH", "Pre_Focused_Guard_Residual_MWH",
         "Post_Focused_Guard_Residual_MWH", "Final_Residual_MWH", "Final_AbsError_MWH",
@@ -1751,7 +1838,23 @@ def build_rolling_origin_replay_bundle(replay_df: pd.DataFrame, config: dict) ->
             long_horizon, ["Season", "HourGroup", "DailyMaxTempBucket"], min_count=1,
         ),
         "rolling_origin_replay_delta_breeze_shape_metrics_by_stage": build_delta_breeze_shape_metrics_by_stage(bt, min_count=1),
+        "rolling_origin_replay_daily_peak_shadow_window_scorecard": build_daily_peak_shadow_window_scorecard(bt, config=config),
         "rolling_origin_replay_daily_peak_miss_by_stage": _daily_peak_by_origin(bt),
+        "rolling_origin_replay_focused_guard_rule_audit": build_focused_scorecard_rule_audit(
+            bt,
+            config,
+            forecast_col="Pre_Focused_Guard_Forecast_MWH",
+        ),
+        "focused_shape_residual_summary": focused_shape_residual_summary(
+            bt,
+            None,
+            config,
+        ),
+        "daily_peak_shadow_summary": daily_peak_shadow_summary(
+            bt,
+            None,
+            config,
+        ),
         "june_hot_origin_diagnostics": _june_hot_origin_diagnostics(bt),
     }
     if not timing_df.empty:

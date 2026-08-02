@@ -18,6 +18,14 @@ sql:
     FROM [Informatica].[dbo].[METRIX_HRLY_SYSTEM_VW]
     ORDER BY YEAR, MONTH, DAY
 
+actuals_import:
+  # Freeze model-training actuals during daily tuning. The utility hourly convention
+  # keeps the prior local day through the 23:00 completed-hour label and blocks
+  # same-day actual changes from moving the model.
+  limit_to_prior_day_he24: true
+  cutoff_days_back: 1
+  cutoff_hour_ending: 24
+
 output_sql:
   # Default persistence for high-churn outputs that are overwritten on each CSV run.
   # Use --no-save-sql for local dry runs that should not write to SQL Server.
@@ -53,7 +61,9 @@ output_sql:
     rolling_origin_replay_holiday_metrics_by_stage: "LoadForecastReplayHolidayMetricByStage"
     rolling_origin_replay_long_horizon_metrics_by_stage: "LoadForecastReplayLongHorizonMetricByStage"
     rolling_origin_replay_delta_breeze_shape_metrics_by_stage: "LoadForecastReplayDeltaBreezeShapeMetricByStage"
+    rolling_origin_replay_daily_peak_shadow_window_scorecard: "LoadForecastReplayDailyPeakShadowWindowScorecard"
     rolling_origin_replay_daily_peak_miss_by_stage: "LoadForecastReplayDailyPeakMissByStage"
+    rolling_origin_replay_focused_guard_rule_audit: "LoadForecastReplayFocusedGuardRuleAudit"
     rolling_origin_replay_timing: "LoadForecastReplayTiming"
     production_readiness_scorecard: "LoadForecastProductionReadinessScorecard"
   chunksize: 10
@@ -151,6 +161,15 @@ openmeteo:
   historical_end: null                # null => yesterday local
   forecast_days: 16
   cache_dir: "${FORECAST_WEATHER_CACHE_DIR:-weather_cache}"
+  forecast_import_policy:
+    # Open-Meteo refreshes the 16-day forecast several times per day. For daily
+    # model tuning, accept one morning forecast snapshot and reuse it for the rest
+    # of the local day so repeated runs compare against stable weather inputs.
+    enabled: true
+    target_local_time: "06:30"
+    import_window_start_local: "06:00"
+    import_window_end_local: "07:45"
+    daily_cache_stem: "forecast_weather_morning"
   # TLS certificate verification for weather API calls. Keep true so responses are
   # authenticated. On Windows, ssl_use_os_truststore lets requests honor the machine
   # certificate store via truststore, which fixes managed/self-signed proxy chains
@@ -491,8 +510,8 @@ bands:
 # The listed date + hour-ending (HE) ranges are DROPPED - not repaired - from residual
 # learning, the calibration lookups, the recent-residual profile, and the replay
 # scorecards, so they cannot bias corrections or register as spurious peak misses.
-# HE h maps to the hour-beginning Hour value h-1 (HE 17 == the 16:00-17:00 interval,
-# Hour 16). Omit he_start/he_end to exclude a whole day.
+# HE h maps to rows with local DT.hour == h, matching the official completed-hour
+# load label. Omit he_start/he_end to exclude a whole day.
 anomaly_exclusions:
   enabled: true
   events:
@@ -532,6 +551,20 @@ calibration:
       min_maxtemp_f: -999.0
       stage: recent_corrected
       exclude_hot_peak: true
+      suppress_bias_uplift: true
+      suppress_hot_uplift: true
+    cloud_solar_stage_override:
+      # Latest replay showed Day-1 cloud/solar midday rows were worse when the
+      # generic Day-1 targeted-meta stage replaced the peak-risk stage. Keep the
+      # normal Day-1 policy elsewhere, but use peak-risk for this narrow BTM
+      # solar/cloud slice.
+      enabled: true
+      hours: [10, 11, 12, 13, 14, 15, 16]
+      min_forecast_day: 1
+      max_forecast_day: 1
+      min_cloud_cover_norm: 0.60
+      min_solar_loss_mw: 1.25
+      stage: peak_risk
       suppress_bias_uplift: true
       suppress_hot_uplift: true
     cloud_solar_raw_override:
@@ -609,6 +642,101 @@ calibration:
         "7": 9.07
         "8": 0.11
         "9": 0.0
+    focused_shape_residual_learner:
+      # Guarded production redesign layer. This learns the residual left before
+      # the focused_scorecard_guard and can replace the current final stack, but
+      # only within a bounded delta versus the current final forecast. Hot peak
+      # and HE14-18 rows use a tighter cap because full promotion worsened those
+      # scorecard gates.
+      enabled: true
+      shadow_mode: false
+      model_version: focused_shape_residual_guarded_promotion_v1
+      min_rows: 168
+      target_clip_mwh: 35.0
+      blend: 0.55
+      cap_mwh: 12.0
+      promotion_delta_guard:
+        enabled: true
+        reference_col: current_final
+        max_abs_delta_vs_reference_mwh: 3.0
+        risk_slice_max_abs_delta_vs_reference_mwh: 2.0
+        include_peak_window: true
+        peak_window_hours: [14, 15, 16, 17, 18]
+        include_hot_peak: true
+        hot_peak_hours: [16, 17, 18, 19, 20]
+        hot_peak_min_maxtemp_f: 90.0
+      min_abs_correction_mwh: 0.25
+      learning_rate: 0.04
+      max_iter: 120
+      max_leaf_nodes: 16
+      min_samples_leaf: 16
+      l2_regularization: 5.0
+      random_state: 42
+      scope:
+        use_focused_guard_rule_union: true
+        include_disabled_rules: false
+        use_runtime_rule_context: true
+        require_scope_for_application: true
+        include_hot_peak: true
+        hot_peak_min_maxtemp_f: 90.0
+        hot_peak_hours: [14, 15, 16, 17, 18, 19, 20, 21]
+        include_cloud_solar: true
+        cloud_solar_hours: [10, 11, 12, 13, 14, 15, 16]
+        cloud_solar_min_cloud_cover_norm: 0.60
+        cloud_solar_min_solar_loss_mw: 1.25
+        include_delta_breeze: true
+        delta_breeze_hours: [16, 17, 18, 19, 20, 21, 22]
+        delta_breeze_min_maxtemp_f: 95.0
+        delta_breeze_max_cloud_cover_norm: 0.35
+        delta_breeze_min_forecast_drop_next3hr_f: 6.0
+        include_long_horizon_heat: true
+        long_horizon_min_forecast_day: 8
+        long_horizon_max_forecast_day: 16
+        long_horizon_min_maxtemp_f: 75.0
+        long_horizon_min_hour: 10
+        long_horizon_max_hour: 22
+    daily_peak_shadow_model:
+      # Shadow-only daily peak layer. This models the remaining daily peak
+      # magnitude/timing error after the current production correction stack and
+      # writes Daily_Peak_Shadow_Adjusted_Forecast_MWH for replay promotion
+      # decisions. It does not change Final_Forecast_MWH while shadow_mode=true.
+      enabled: true
+      shadow_mode: true
+      model_version: daily_peak_shadow_v1
+      min_days: 30
+      # Latest rolling-origin replay showed daily peak magnitude improvement is
+      # concentrated in the middle near-term horizon. Keep the layer shadow-only
+      # and evaluate a narrower application window: forecast days 2-5 only.
+      min_application_forecast_day: 2
+      max_application_forecast_day: 5
+      min_peak_window_rows_per_day: 4
+      peak_hours: [14, 15, 16, 17, 18, 19, 20, 21]
+      # adjustment_hours now matches peak_hours so the Gaussian correction center
+      # is no longer clamped into a narrower [16,20] window. Previously a base peak
+      # at HE14/HE15/HE21 had its magnitude correction shoved onto the wrong hour;
+      # aligning the two windows keeps train/apply/score on one peak definition.
+      adjustment_hours: [14, 15, 16, 17, 18, 19, 20, 21]
+      # Leakage-safe evaluation: refit on earlier-only origins and score held-out
+      # later days in daily_peak_shadow_summary. This out-of-sample delta is the
+      # honest promote/hold signal; the in-sample delta is optimistic.
+      out_of_sample_eval_enabled: true
+      holdout_eval_step_days: 7
+      target_clip_mwh: 35.0
+      blend: 0.45
+      cap_mwh: 10.0
+      min_abs_correction_mwh: 0.50
+      spread_hours: 0.65
+      timing_model_enabled: true
+      timing_blend: 0.50
+      target_timing_clip_hours: 4.0
+      max_timing_shift_hours: 3.0
+      learning_rate: 0.04
+      max_iter: 120
+      max_leaf_nodes: 16
+      min_samples_leaf: 8
+      timing_min_samples_leaf: 8
+      l2_regularization: 5.0
+      random_state: 42
     focused_scorecard_guard:
       # 2026-06-14 full rolling-origin counterfactual: retune the overactive June
       # clear-hot, May hot downshift, July holiday, and August day-4..7 rules, then
@@ -617,6 +745,16 @@ calibration:
       # overall 3.94 -> 3.89.
       enabled: true
       total_cap_mwh: 30.0
+      rule_health:
+        # Diagnostic-only labels in the focused guard audit. A production rule is
+        # considered healthy only when both its isolated and current-stack MAE
+        # deltas are non-positive on replay-scored rows. Stack-gated rules are
+        # judged on their current-stack delta because their standalone effect is
+        # intentionally conditional on prior guards.
+        enabled: true
+        min_scored_rows: 1
+        max_rule_only_delta_mae_mwh: 0.0
+        max_current_stack_delta_mae_mwh: 0.0
       rules:
         # 2026-07-07 Last-45 counterfactual: these no-horizon shape guards use
         # only production-visible weather/hour fields. They are allowed on recent
@@ -754,10 +892,16 @@ calibration:
           max_cloud_cover_norm: 0.25
           holiday: false
         - name: july_recent_103_106_hot_peak_lift
-          adjustment_mwh: 10.0
+          # 2026-07-30 rolling replay: this still helps the no-horizon latest
+          # backtest, but day-8+ rolling origins were already high. Keep it as a
+          # near-term/diagnostic heat-wave lift, and avoid the HE17/20/21 decay
+          # hours that were net harmful in recent actuals.
+          adjustment_mwh: 8.0
           allow_without_forecast_day: true
           months: [7]
-          hours: [14, 15, 16, 17, 18, 19, 20, 21]
+          hours: [14, 15, 16, 18, 19]
+          min_explicit_forecast_day: 1
+          max_explicit_forecast_day: 3
           min_maxtemp_f: 103.0
           max_maxtemp_f: 106.0
           max_cloud_cover_norm: 0.40
@@ -830,13 +974,74 @@ calibration:
           min_cloud_cover_norm: 0.60
           holiday: false
         - name: july_recent_98_100_post_heatwave_midday_backoff
-          adjustment_mwh: -8.0
+          adjustment_mwh: -2.0
           allow_without_forecast_day: true
           months: [7]
           hours: [10, 11, 12, 13]
           min_maxtemp_f: 98.0
           max_maxtemp_f: 100.0
           max_raw_minus_samehour_yesterday_mwh: -15.0
+          holiday: false
+        # 2026-07-29 recent-45 miss review: the Last-45 gate (MAE 3.17 vs <=3.0)
+        # was carried by a handful of whole recent July days that split into two
+        # opposite, canceling regimes (bias passed but MAE failed). These four
+        # signed, state-gated no-horizon shape guards target each regime without
+        # touching the neighboring days that share the same weather signature.
+        # Recent-45 counterfactual on Final_Backtest_Forecast_MWH: 3.169 -> 2.971.
+        - name: july_recent_85_90_clear_high_state_afternoon_lift
+          # 07-22-style clear sub-90F day that behaved like a hot day and ran
+          # high all afternoon/evening. It falls in the coverage gap just below
+          # the 90F hot-rule threshold. Gate on raw far below same-hour yesterday
+          # (forecast expected a big day-over-day drop that did not happen) so the
+          # lift does not catch clear 85-90F days that were already accurate.
+          adjustment_mwh: 11.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+          min_maxtemp_f: 85.0
+          max_maxtemp_f: 90.0
+          max_cloud_cover_norm: 0.15
+          max_raw_minus_samehour_yesterday_mwh: -40.0
+          holiday: false
+        - name: july_recent_95_99_partly_cloudy_high_state_peak_lift
+          # 07-19/07-20-style partly-cloudy 95-99F days underforecast through the
+          # midday/peak ramp. Gate on raw below the same-hour 7-day mean so it does
+          # not lift already-high clear heat-wave peaks.
+          adjustment_mwh: 8.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [12, 13, 14, 15, 16, 17]
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 99.0
+          min_cloud_cover_norm: 0.30
+          max_cloud_cover_norm: 0.85
+          max_raw_minus_samehour_7day_mean_mwh: -10.0
+          holiday: false
+        - name: july_recent_100_plus_clear_late_evening_decay_backoff
+          # 07-15/07-14-style extreme-heat clear late-evening decay: load rolls off
+          # faster than the staged forecast holds it, so HE22-01 overforecast. Gate
+          # on raw far above the same-hour 7-day mean (a still-elevated evening hold)
+          # so it does not trim underforecast evenings like 07-21.
+          adjustment_mwh: -6.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [21, 22, 23, 0]
+          min_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.20
+          min_raw_minus_samehour_7day_mean_mwh: 40.0
+          holiday: false
+        - name: july_recent_95_98_clear_post_heatwave_midday_backoff
+          # 07-25/07-28-style clear 95-98F post-heatwave cool-down: the forecast
+          # holds the midday ramp too high after the heat breaks. Gate on load at or
+          # below same-hour yesterday to confirm the cool-down is underway.
+          adjustment_mwh: -6.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [10, 11, 12, 13, 14, 15, 16]
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 98.0
+          max_cloud_cover_norm: 0.15
+          max_raw_minus_samehour_yesterday_mwh: 0.0
           holiday: false
         # Broad, modest shoulder-season heat lift from the latest forecast-output
         # scorecard. These are intentionally smaller than the measured bias so the
@@ -1216,7 +1421,7 @@ calibration:
           min_raw_minus_samehour_7day_mean_mwh: 50.0
           holiday: false
         - name: july_holiday_hot_peak_down
-          adjustment_mwh: -30.0
+          adjustment_mwh: -10.0
           months: [7]
           hours: [14, 15, 16, 17, 18, 19, 20]
           min_forecast_day: 1
@@ -1325,9 +1530,13 @@ calibration:
           max_raw_minus_samehour_7day_mean_mwh: 25.0
           holiday: false
         - name: july_long_clear_hot_peak_ramp_up
-          adjustment_mwh: 7.0
+          # 2026-07-30 rolling replay: the broad HE14-18 +2 MWh version mostly
+          # overstacked with July long-horizon recovery rules. Retain only HE16,
+          # where it acts as a small offset to overly negative low-state stacks,
+          # and suppress it when prior focused guards are already above +4 MWh.
+          adjustment_mwh: 2.0
           months: [7]
-          hours: [14, 15, 16, 17, 18]
+          hours: [16]
           min_forecast_day: 8
           max_forecast_day: 16
           min_maxtemp_f: 94.0
@@ -1335,6 +1544,7 @@ calibration:
           max_cloud_cover_norm: 0.20
           max_solar_loss_mw: 0.50
           max_forecast_mwh: 245.0
+          max_prior_total_adjustment_mwh: 4.0
           holiday: false
         - name: august_day4to7_highload_peak_up
           adjustment_mwh: 5.0
@@ -1669,6 +1879,20 @@ calibration:
       min_maxtemp_f: 110.0
       hours: [16, 17, 18]
       cap_mwh: 16.0
+    # Suppress positive peak-risk uplift when the forecast is already high versus
+    # recent same-hour load and the weather forecast shows a sharp evening cool-down.
+    # This targets the 2026-07-29 delta-breeze-style over-uplift without removing
+    # the July 21-style hot-peak upside protection.
+    positive_guard:
+      enabled: true
+      overforecast_risk:
+        enabled: true
+        hours: [16, 17, 18, 19, 20, 21]
+        min_maxtemp_f: 95.0
+        min_raw_minus_samehour_7day_mean_mwh: 30.0
+        min_forecast_drop_next3hr_f: 6.0
+        max_positive_correction_mwh: 0.0
+        blocked_source: peak_risk_overforecast_guard_blocked
     min_recent_underforecast_correction_mwh: 0.0
 
   weather_robustness_hedge:
@@ -1796,6 +2020,18 @@ calibration:
         max_cloud_cover_norm: 0.20
         allow_negative_correction: false
         blocked_source: "hot_peak_low_forecast_gate_blocked"
+        cooling_underway_guard:
+          # Replay diagnostics showed the correction chain can over-lift hot
+          # evening rows once the load-shape has already rolled into post-peak
+          # decay. Suppress positive auto-residual lifts only when both current
+          # cooling from the daily max and the forecasted next-3-hour drop confirm
+          # that decay is underway.
+          enabled: true
+          mode: "all"
+          min_drop_from_dailymax_f: 5.0
+          min_forecast_drop_next3hr_f: 6.0
+          cap_positive_correction_mwh: 0.0
+          blocked_source: "hot_peak_cooling_underway_guard_blocked"
 
   recent_residual:
     enabled: true

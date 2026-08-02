@@ -34,7 +34,9 @@ DEFAULT_REPLAY_TABLES = {
     "rolling_origin_replay_holiday_metrics_by_stage": "LoadForecastReplayHolidayMetricByStage",
     "rolling_origin_replay_long_horizon_metrics_by_stage": "LoadForecastReplayLongHorizonMetricByStage",
     "rolling_origin_replay_delta_breeze_shape_metrics_by_stage": "LoadForecastReplayDeltaBreezeShapeMetricByStage",
+    "rolling_origin_replay_daily_peak_shadow_window_scorecard": "LoadForecastReplayDailyPeakShadowWindowScorecard",
     "rolling_origin_replay_daily_peak_miss_by_stage": "LoadForecastReplayDailyPeakMissByStage",
+    "rolling_origin_replay_focused_guard_rule_audit": "LoadForecastReplayFocusedGuardRuleAudit",
     "rolling_origin_replay_timing": "LoadForecastReplayTiming",
     "production_readiness_scorecard": "LoadForecastProductionReadinessScorecard",
 }
