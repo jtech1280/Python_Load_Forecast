@@ -54,7 +54,7 @@ def _prep_context(df: pd.DataFrame) -> pd.DataFrame:
         else:
             out["DailyMaxTempBin"] = np.nan
 
-    cloud = pd.to_numeric(out.get("CloudCover_Norm", np.nan), errors="coerce")
+    cloud = pd.to_numeric(out.get("CloudCover_Norm", pd.Series(np.nan, index=out.index)), errors="coerce")
     if cloud.notna().any() and cloud.max(skipna=True) > 1.5:
         cloud = cloud / 100.0
     out["CloudCoverBin"] = pd.cut(
@@ -67,7 +67,7 @@ def _prep_context(df: pd.DataFrame) -> pd.DataFrame:
             labels=["Clear/Low", "Some Clouds", "Partly Cloudy", "Mostly Cloudy", "Overcast"], include_lowest=True,
         ).astype("object")
 
-    solar = pd.to_numeric(out.get("BTM_Solar_Proxy_MW", 0.0), errors="coerce").fillna(0.0)
+    solar = pd.to_numeric(out.get("BTM_Solar_Proxy_MW", pd.Series(0.0, index=out.index)), errors="coerce").fillna(0.0)
     out["BTMSolarProxyBin"] = pd.cut(
         solar, bins=[-0.001, 1, 5, 10, 15, 20, 30, 9999],
         labels=False, include_lowest=True,

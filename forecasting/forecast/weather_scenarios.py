@@ -78,8 +78,9 @@ def _recompute_weather_temperature(out: pd.DataFrame) -> pd.DataFrame:
 
 
 def _recompute_solar_cloud(out: pd.DataFrame) -> pd.DataFrame:
-    cloud = pd.to_numeric(out.get("CloudCover_Norm"), errors="coerce").fillna(0.0).clip(0.0, 1.0)
-    ghi = pd.to_numeric(out.get("GHI_Wm2", out.get("Solar_Irradiance")), errors="coerce").fillna(0.0).clip(lower=0.0)
+    cloud = pd.to_numeric(out.get("CloudCover_Norm", pd.Series(np.nan, index=out.index)), errors="coerce").fillna(0.0).clip(0.0, 1.0)
+    ghi_default = out.get("Solar_Irradiance", pd.Series(np.nan, index=out.index))
+    ghi = pd.to_numeric(out.get("GHI_Wm2", ghi_default), errors="coerce").fillna(0.0).clip(lower=0.0)
     if "GHI_Wm2" in out.columns:
         out["GHI_Wm2"] = ghi
     out["CloudCover_Norm"] = cloud
@@ -125,7 +126,7 @@ def _recompute_solar_cloud(out: pd.DataFrame) -> pd.DataFrame:
     if "BTM_Solar_Loss_From_ClearSky_MW" in out.columns:
         out["Daily_BTM_Solar_Loss_MWh"] = out.groupby("Date")["BTM_Solar_Loss_From_ClearSky_MW"].transform("sum")
         out["Daily_BTM_Solar_Loss_Max_MW"] = out.groupby("Date")["BTM_Solar_Loss_From_ClearSky_MW"].transform("max")
-        midday = pd.to_numeric(out.get("Solar_Midday_Flag", 0), errors="coerce").fillna(0.0)
+        midday = pd.to_numeric(out.get("Solar_Midday_Flag", pd.Series(0, index=out.index)), errors="coerce").fillna(0.0)
         out["Midday_Overcast_Solar_Loss_MW"] = out["BTM_Solar_Loss_From_ClearSky_MW"] * midday * cloud.ge(0.60).astype(int)
     return out
 
@@ -405,7 +406,9 @@ def apply_conformal_weather_bands(df: pd.DataFrame, config: dict | None, output_
             conformal.loc[idx] = float(lookup["horizon"][horizon.loc[idx]])
             source.loc[idx] = "horizon"
 
-    base_band = out["Pre_Conformal_Band_MWH"] / pd.to_numeric(out.get("Weather_Input_Risk_Multiplier", 1.0), errors="coerce").replace(0.0, np.nan).fillna(1.0)
+    base_band = out["Pre_Conformal_Band_MWH"] / pd.to_numeric(
+        out.get("Weather_Input_Risk_Multiplier", pd.Series(1.0, index=out.index)), errors="coerce"
+    ).replace(0.0, np.nan).fillna(1.0)
     scenario_values = out.get("WeatherScenario_HalfSpread_MWH")
     if scenario_values is None:
         scenario_band = pd.Series(0.0, index=out.index, dtype=float)
@@ -433,7 +436,7 @@ def apply_conformal_weather_bands(df: pd.DataFrame, config: dict | None, output_
     ])
     current = out["Pre_Conformal_Band_MWH"].to_numpy(dtype=float)
     eligible = (
-        pd.to_numeric(out.get("Weather_Input_Risk_Multiplier", 1.0), errors="coerce").fillna(1.0).gt(1.0)
+        pd.to_numeric(out.get("Weather_Input_Risk_Multiplier", pd.Series(1.0, index=out.index)), errors="coerce").fillna(1.0).gt(1.0)
         | ~risk.eq("none")
     ).to_numpy()
     candidate = np.where(eligible, candidate, current)

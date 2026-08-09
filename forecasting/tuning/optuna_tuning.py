@@ -92,21 +92,47 @@ def scorecard_objective(scorecard: pd.DataFrame, weights: dict[str, float] | Non
     )
 
 
+# (optuna param name, config path, low, high). Single source of truth shared by
+# `suggest_v125_params` (sampling during search) and `apply_v125_params` (applying a
+# concrete trial's params, e.g. to re-score a held-out set) so the two can never drift.
+V125_PARAM_SPACE: tuple[tuple[str, tuple[str, ...], float, float], ...] = (
+    ("cloud_solar_shape_blend", ("calibration", "cloud_solar_shape_blend"), 0.55, 0.95),
+    ("cloud_solar_shape_cap_mwh", ("calibration", "cloud_solar_shape_cap_mwh"), 8.0, 24.0),
+    ("warm_ramp_blend", ("calibration", "warm_ramp_blend"), 0.55, 0.98),
+    ("warm_ramp_cap_mwh", ("calibration", "warm_ramp_cap_mwh"), 8.0, 22.0),
+    ("recent_blend", ("calibration", "recent_residual", "blend"), 0.60, 0.98),
+    ("recent_cap_mwh", ("calibration", "recent_residual", "cap_mwh"), 6.0, 16.0),
+    ("w_solar_loss_hourgroup", ("calibration", "recent_residual", "weights", "solar_loss_hourgroup"), 0.03, 0.16),
+    ("w_temp_cloud_hourgroup", ("calibration", "recent_residual", "weights", "temp_cloud_hourgroup"), 0.02, 0.12),
+    ("w_same_hour", ("calibration", "recent_residual", "weights", "same_hour"), 0.08, 0.25),
+)
+
+
+def _set_path(cfg: dict, path: tuple[str, ...], value: float) -> None:
+    cur = cfg
+    for key in path[:-1]:
+        cur = cur.setdefault(key, {})
+    cur[path[-1]] = value
+
+
 def suggest_v125_params(trial: Any, base_config: dict) -> dict:
     cfg = deepcopy(base_config)
-    cal = cfg.setdefault("calibration", {})
-    rr = cal.setdefault("recent_residual", {})
-    rr_weights = rr.setdefault("weights", {})
+    for name, path, low, high in V125_PARAM_SPACE:
+        _set_path(cfg, path, trial.suggest_float(name, low, high))
+    return cfg
 
-    cal["cloud_solar_shape_blend"] = trial.suggest_float("cloud_solar_shape_blend", 0.55, 0.95)
-    cal["cloud_solar_shape_cap_mwh"] = trial.suggest_float("cloud_solar_shape_cap_mwh", 8.0, 24.0)
-    cal["warm_ramp_blend"] = trial.suggest_float("warm_ramp_blend", 0.55, 0.98)
-    cal["warm_ramp_cap_mwh"] = trial.suggest_float("warm_ramp_cap_mwh", 8.0, 22.0)
-    rr["blend"] = trial.suggest_float("recent_blend", 0.60, 0.98)
-    rr["cap_mwh"] = trial.suggest_float("recent_cap_mwh", 6.0, 16.0)
-    rr_weights["solar_loss_hourgroup"] = trial.suggest_float("w_solar_loss_hourgroup", 0.03, 0.16)
-    rr_weights["temp_cloud_hourgroup"] = trial.suggest_float("w_temp_cloud_hourgroup", 0.02, 0.12)
-    rr_weights["same_hour"] = trial.suggest_float("w_same_hour", 0.08, 0.25)
+
+def apply_v125_params(param_values: dict[str, float], base_config: dict) -> dict:
+    """Apply a concrete {param_name: value} dict — e.g. `study.best_trial.params` from a
+    finished Optuna study — to `base_config`, using the same parameter/config-path mapping
+    as `suggest_v125_params`. Used to re-score a held-out origin set with a winning trial's
+    config without needing a live `optuna.Trial` object. Names absent from `param_values`
+    are left at `base_config`'s existing value.
+    """
+    cfg = deepcopy(base_config)
+    for name, path, _low, _high in V125_PARAM_SPACE:
+        if name in param_values:
+            _set_path(cfg, path, param_values[name])
     return cfg
 
 

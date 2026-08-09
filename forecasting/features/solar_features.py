@@ -47,7 +47,7 @@ def add_solar_features(df: pd.DataFrame, btm_monthly_df: pd.DataFrame, solar_df:
         out["Solar_Forecast_MW"] = np.nan
         explicit_solar = pd.Series(np.nan, index=out.index, dtype=float)
 
-    out["Solar_Irradiance"] = pd.to_numeric(out.get("GHI_Wm2"), errors="coerce").fillna(0.0).clip(lower=0.0)
+    out["Solar_Irradiance"] = pd.to_numeric(out.get("GHI_Wm2", pd.Series(np.nan, index=out.index)), errors="coerce").fillna(0.0).clip(lower=0.0)
     out["Solar_Hour_Shape"] = solar_hour_shape_from_hour(out["DT"].dt.hour)
     out["Solar_Season_Factor"] = _solar_season_factor(out["DT"])
 
@@ -71,7 +71,7 @@ def add_solar_features(df: pd.DataFrame, btm_monthly_df: pd.DataFrame, solar_df:
     out["BTM_Solar_Cloud_Adjusted_MW"] = out["BTM_Solar_Proxy_MW"]
     out["BTM_Solar_Loss_From_ClearSky_MW"] = (out["BTM_ClearSky_Proxy_MW"] - out["BTM_Solar_Cloud_Adjusted_MW"]).clip(lower=0.0)
 
-    cloud = pd.to_numeric(out.get("CloudCover_Norm", 0.0), errors="coerce").fillna(0.0)
+    cloud = pd.to_numeric(out.get("CloudCover_Norm", pd.Series(0.0, index=out.index)), errors="coerce").fillna(0.0)
     if cloud.max(skipna=True) > 1.5:
         cloud = cloud / 100.0
     cloud = cloud.clip(0.0, 1.0)

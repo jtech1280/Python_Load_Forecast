@@ -903,108 +903,26 @@ def _apply_replay_focused_guard(
     return _recompute_final_errors(out, forecast_col="Final_Backtest_Forecast_MWH")
 
 
-def _run_single_origin_replay(args: tuple) -> tuple[pd.DataFrame | None, list[dict[str, Any]]]:
-    """Run the replay process for a single origin. For use with multiprocessing."""
-    (
-        origin_number,
-        origin_dt,
-        work,
-        features,
-        config,
-        horizon_days,
-        calibration_days,
-        log_timing,
-        skip_catboost,
-        skip_calibration_prophet,
-        apply_primary_weather_hedge,
-    ) = args
+def apply_origin_correction_chain(
+    raw_origin: pd.DataFrame,
+    raw_weather_realism: pd.DataFrame,
+    raw_realized_scenarios: dict[str, pd.DataFrame],
+    raw_weather_scenarios: dict[str, pd.DataFrame],
+    config: dict,
+    artifacts: dict,
+    *,
+    apply_primary_weather_hedge: bool = True,
+) -> pd.DataFrame:
+    """Apply the full post-training correction/calibration chain to one origin's already-computed
+    raw forecast bundle. Pure transform over `artifacts` + `config`: no XGB/LGB/CatBoost/Prophet
+    training happens here (that's `_origin_raw_forecasts`, called by the caller beforehand).
 
-    timing_rows: list[dict[str, Any]] = []
-    origin_started = time.perf_counter()
-    print(
-        "Rolling-origin replay origin "
-        f"{origin_number}: {origin_dt} "
-        f"({_season_from_month(origin_dt.month)})",
-        flush=True,
-    )
-    pre_origin = work[work["DT"] < origin_dt].copy()
-    stage_started = time.perf_counter()
-    raw_calibration = run_rolling_backtest(
-        train_df=pre_origin,
-        features=features,
-        ensemble_weights=_production_ensemble_weights(config),
-        backtest_days=calibration_days,
-        config=config,
-        skip_catboost=skip_catboost,
-        skip_prophet=skip_calibration_prophet,
-        collect_timing=True,
-    )
-    calibration_detail = ";".join(
-        part for part in [
-            "skip_catboost=true" if skip_catboost else "",
-            "skip_prophet=true" if skip_calibration_prophet else "",
-        ]
-        if part
-    )
-    _log_and_record_timing(
-        timing_rows,
-        origin_number=origin_number,
-        origin_dt=origin_dt,
-        stage="calibration backtest",
-        started=stage_started,
-        log_timing=log_timing,
-        rows=len(raw_calibration),
-        detail=calibration_detail,
-    )
-    calibration_timing_rows = raw_calibration.attrs.get("rolling_backtest_timing", []) if hasattr(raw_calibration, "attrs") else []
-    for timing in calibration_timing_rows:
-        rows_value = timing.get("Rows")
-        rows = None if pd.isna(rows_value) else int(rows_value)
-        _append_timing_row(
-            timing_rows,
-            origin_number=origin_number,
-            origin_dt=origin_dt,
-            stage=f"calibration backtest: {timing.get('Stage', '')}",
-            elapsed_sec=float(timing.get("Elapsed_Sec", 0.0) or 0.0),
-            status=str(timing.get("Status", "completed")),
-            rows=rows,
-            detail=str(timing.get("Detail", "") or ""),
-        )
-    raw_calibration.attrs = {}
-    stage_started = time.perf_counter()
-    artifacts = build_correction_artifacts(raw_calibration, config)
-    _log_and_record_timing(
-        timing_rows,
-        origin_number=origin_number,
-        origin_dt=origin_dt,
-        stage="correction artifacts",
-        started=stage_started,
-        log_timing=log_timing,
-        rows=len(raw_calibration),
-    )
-    stage_started = time.perf_counter()
-    raw_origin, raw_weather_realism, raw_realized_scenarios, raw_weather_scenarios = _origin_raw_forecasts(
-        work,
-        features,
-        config,
-        origin_dt,
-        horizon_days,
-        origin_number,
-        timing_rows=timing_rows,
-    )
-    _log_and_record_timing(
-        timing_rows,
-        origin_number=origin_number,
-        origin_dt=origin_dt,
-        stage="raw forecast bundle",
-        started=stage_started,
-        log_timing=log_timing,
-        rows=len(raw_origin),
-    )
-    if raw_origin.empty:
-        return None, timing_rows
-
-    stage_started = time.perf_counter()
+    Split out of `_run_single_origin_replay` so calibration-parameter search (see
+    `forecasting/tuning/optuna_tuning.py` and `scripts/tune_calibration_optuna.py`) can re-run just
+    this chain against a cached raw forecast bundle for many trial configs, instead of repeating the
+    expensive per-origin model training on every trial. Note `artifacts` itself is config-dependent
+    (built by `build_correction_artifacts`) and must be rebuilt per trial alongside this call.
+    """
     corrected = apply_origin_available_correction_chain(raw_origin, config, artifacts)
     if apply_primary_weather_hedge and raw_realized_scenarios:
         corrected = _apply_weather_scenarios_and_hedge(
@@ -1121,6 +1039,120 @@ def _run_single_origin_replay(args: tuple) -> tuple[pd.DataFrame | None, list[di
             evaluation_mode="weather_realism_origin_available_shadow",
         )
         corrected = _merge_weather_realism(corrected, corrected_weather_realism)
+    return corrected
+
+
+def _run_single_origin_replay(args: tuple) -> tuple[pd.DataFrame | None, list[dict[str, Any]]]:
+    """Run the replay process for a single origin. For use with multiprocessing."""
+    (
+        origin_number,
+        origin_dt,
+        work,
+        features,
+        config,
+        horizon_days,
+        calibration_days,
+        log_timing,
+        skip_catboost,
+        skip_calibration_prophet,
+        apply_primary_weather_hedge,
+    ) = args
+
+    timing_rows: list[dict[str, Any]] = []
+    origin_started = time.perf_counter()
+    print(
+        "Rolling-origin replay origin "
+        f"{origin_number}: {origin_dt} "
+        f"({_season_from_month(origin_dt.month)})",
+        flush=True,
+    )
+    pre_origin = work[work["DT"] < origin_dt].copy()
+    stage_started = time.perf_counter()
+    raw_calibration = run_rolling_backtest(
+        train_df=pre_origin,
+        features=features,
+        ensemble_weights=_production_ensemble_weights(config),
+        backtest_days=calibration_days,
+        config=config,
+        skip_catboost=skip_catboost,
+        skip_prophet=skip_calibration_prophet,
+        collect_timing=True,
+    )
+    calibration_detail = ";".join(
+        part for part in [
+            "skip_catboost=true" if skip_catboost else "",
+            "skip_prophet=true" if skip_calibration_prophet else "",
+        ]
+        if part
+    )
+    _log_and_record_timing(
+        timing_rows,
+        origin_number=origin_number,
+        origin_dt=origin_dt,
+        stage="calibration backtest",
+        started=stage_started,
+        log_timing=log_timing,
+        rows=len(raw_calibration),
+        detail=calibration_detail,
+    )
+    calibration_timing_rows = raw_calibration.attrs.get("rolling_backtest_timing", []) if hasattr(raw_calibration, "attrs") else []
+    for timing in calibration_timing_rows:
+        rows_value = timing.get("Rows")
+        rows = None if pd.isna(rows_value) else int(rows_value)
+        _append_timing_row(
+            timing_rows,
+            origin_number=origin_number,
+            origin_dt=origin_dt,
+            stage=f"calibration backtest: {timing.get('Stage', '')}",
+            elapsed_sec=float(timing.get("Elapsed_Sec", 0.0) or 0.0),
+            status=str(timing.get("Status", "completed")),
+            rows=rows,
+            detail=str(timing.get("Detail", "") or ""),
+        )
+    raw_calibration.attrs = {}
+    stage_started = time.perf_counter()
+    artifacts = build_correction_artifacts(raw_calibration, config)
+    _log_and_record_timing(
+        timing_rows,
+        origin_number=origin_number,
+        origin_dt=origin_dt,
+        stage="correction artifacts",
+        started=stage_started,
+        log_timing=log_timing,
+        rows=len(raw_calibration),
+    )
+    stage_started = time.perf_counter()
+    raw_origin, raw_weather_realism, raw_realized_scenarios, raw_weather_scenarios = _origin_raw_forecasts(
+        work,
+        features,
+        config,
+        origin_dt,
+        horizon_days,
+        origin_number,
+        timing_rows=timing_rows,
+    )
+    _log_and_record_timing(
+        timing_rows,
+        origin_number=origin_number,
+        origin_dt=origin_dt,
+        stage="raw forecast bundle",
+        started=stage_started,
+        log_timing=log_timing,
+        rows=len(raw_origin),
+    )
+    if raw_origin.empty:
+        return None, timing_rows
+
+    stage_started = time.perf_counter()
+    corrected = apply_origin_correction_chain(
+        raw_origin,
+        raw_weather_realism,
+        raw_realized_scenarios,
+        raw_weather_scenarios,
+        config,
+        artifacts,
+        apply_primary_weather_hedge=apply_primary_weather_hedge,
+    )
     _log_and_record_timing(
         timing_rows,
         origin_number=origin_number,

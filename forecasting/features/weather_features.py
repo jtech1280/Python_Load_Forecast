@@ -86,7 +86,7 @@ def add_heat_persistence_features(df: pd.DataFrame) -> pd.DataFrame:
     ]:
         out[col] = out["Date"].map(lookup[col]).astype(float)
 
-    peak_hour = pd.to_numeric(out.get("IsLikelySystemPeakHour", 0), errors="coerce").fillna(0.0)
+    peak_hour = pd.to_numeric(out.get("IsLikelySystemPeakHour", pd.Series(0, index=out.index)), errors="coerce").fillna(0.0)
     out["HeatPersistenceStress90"] = out["ConsecutiveHotDays90"].fillna(0.0) * peak_hour
     out["HeatPersistenceStress95"] = out["ConsecutiveVeryHotDays95"].fillna(0.0) * peak_hour
     out["DailyMax3DayMean_x_PeakHour"] = out["DailyMaxTemp_3DayMean"].fillna(0.0) * peak_hour
@@ -244,9 +244,9 @@ def add_weather_features(df: pd.DataFrame) -> pd.DataFrame:
     out["Temperature"] = pd.to_numeric(out.get("TempF"), errors="coerce")
     out["HumidityPct"] = pd.to_numeric(out.get("HumidityPct"), errors="coerce")
     out["CloudCoverPct"] = pd.to_numeric(out.get("CloudCoverPct"), errors="coerce")
-    out["WindSpeed_Mph"] = pd.to_numeric(out.get("WindSpeedMph"), errors="coerce").fillna(0.0)
-    out["PrecipIn"] = pd.to_numeric(out.get("PrecipIn"), errors="coerce").fillna(0.0)
-    out["GHI_Wm2"] = pd.to_numeric(out.get("GHI_Wm2"), errors="coerce").fillna(0.0)
+    out["WindSpeed_Mph"] = pd.to_numeric(out.get("WindSpeedMph", pd.Series(np.nan, index=out.index)), errors="coerce").fillna(0.0)
+    out["PrecipIn"] = pd.to_numeric(out.get("PrecipIn", pd.Series(np.nan, index=out.index)), errors="coerce").fillna(0.0)
+    out["GHI_Wm2"] = pd.to_numeric(out.get("GHI_Wm2", pd.Series(np.nan, index=out.index)), errors="coerce").fillna(0.0)
 
     out["Humidity_Norm"] = (out["HumidityPct"] / 100.0).clip(0, 1).fillna(0.0)
     out["CloudCover_Norm"] = (out["CloudCoverPct"] / 100.0).clip(0, 1).fillna(0.0)
@@ -290,7 +290,7 @@ def add_weather_features(df: pd.DataFrame) -> pd.DataFrame:
     clear_hot_peak_16_18 = clear_hot_peak_16_20 * peak_window_16_18
     non_business_hot_peak = (
         hot_peak_16_20.eq(1.0)
-        & pd.to_numeric(out.get("IsLikelySystemPeakHour", 0), errors="coerce").fillna(0).eq(0)
+        & pd.to_numeric(out.get("IsLikelySystemPeakHour", pd.Series(0, index=out.index)), errors="coerce").fillna(0).eq(0)
     ).astype(float)
     daily_max_excess_90 = (out["Temperature_DailyMax"] - 90.0).clip(lower=0.0)
     daily_max_excess_95 = (out["Temperature_DailyMax"] - 95.0).clip(lower=0.0)
