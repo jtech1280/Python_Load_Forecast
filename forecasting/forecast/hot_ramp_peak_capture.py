@@ -1451,7 +1451,9 @@ def apply_hot_ramp_peak_capture(
     hours = [int(h) for h in cfg.get("hours", [16, 17, 18, 19, 20])]
     spread_hours = float(cfg.get("spread_hours", 1.0))
     cap = float(cfg.get("cap_mwh", 9.0))
-    strong_cap = float(cfg.get("strong_cap_mwh", cap))
+    # Matches config.yaml's hot_ramp_peak_capture.strong_ramp_cap_mwh (not strong_cap_mwh,
+    # which is the key name used by the sibling heat_persistence_peak_capture section).
+    strong_cap = float(cfg.get("strong_ramp_cap_mwh", cap))
     min_abs = float(cfg.get("min_abs_correction_mwh", 0.25))
     floor = float(cfg.get("ramp_floor_mwh", 0.0))
     strong_floor = float(cfg.get("strong_ramp_floor_mwh", 4.0))
@@ -1790,11 +1792,16 @@ def apply_heat_persistence_peak_capture(
             targets.append(base_peak + day_warmer_delta * warmer_fraction)
 
         valid_targets = [t for t in targets if np.isfinite(t)]
-        if not valid_targets and not floor_without_anchor:
-            source.loc[candidate_idx] = "heat_persistence_peak_no_anchor"
-            continue
         target = max(valid_targets) if valid_targets else base_peak
         raw_correction = target - base_peak
+        # `targets` always has at least [base_peak + learned_residual], which is finite even
+        # when nothing actually anchors a positive correction (learned_residual defaults to
+        # 0.0), so `valid_targets` can never be empty. The real "no positive anchor" signal is
+        # whether any target implies load above the base forecast.
+        has_positive_anchor = raw_correction > 1e-9
+        if not has_positive_anchor and not floor_without_anchor:
+            source.loc[candidate_idx] = "heat_persistence_peak_no_anchor"
+            continue
         day_strong = bool(strong.loc[candidate_idx].any())
         day_floor = strong_floor if day_strong else floor
         if day_floor > 0.0 and (floor_without_anchor or raw_correction > -1e-9):
