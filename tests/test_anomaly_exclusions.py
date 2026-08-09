@@ -6,19 +6,25 @@ _disable_windows_platform_wmi_probe()
 
 import pandas as pd
 
-from forecasting.diagnostics.forecast_diagnostics import build_production_readiness_scorecard
+from forecasting.diagnostics.forecast_diagnostics import (
+    build_production_readiness_scorecard,
+)
 from forecasting.forecast.anomaly_exclusions import (
     drop_excluded_intervals,
     excluded_interval_mask,
 )
 from forecasting.forecast.focused_scorecard_guard import apply_focused_scorecard_guard
 
-
 DER_CONFIG = {
     "anomaly_exclusions": {
         "enabled": True,
         "events": [
-            {"name": "2026-07-15 DER dispatch", "date": "2026-07-15", "he_start": 18, "he_end": 21},
+            {
+                "name": "2026-07-15 DER dispatch",
+                "date": "2026-07-15",
+                "he_start": 18,
+                "he_end": 21,
+            },
         ],
     }
 }
@@ -58,18 +64,27 @@ class AnomalyExclusionMaskTests(unittest.TestCase):
 
     def test_disabled_flag_excludes_nothing(self):
         df = _july_day_frame("2026-07-15")
-        cfg = {"anomaly_exclusions": {"enabled": False, "events": DER_CONFIG["anomaly_exclusions"]["events"]}}
+        cfg = {
+            "anomaly_exclusions": {
+                "enabled": False,
+                "events": DER_CONFIG["anomaly_exclusions"]["events"],
+            }
+        }
         self.assertFalse(excluded_interval_mask(df, cfg).any())
 
     def test_no_events_or_config_excludes_nothing(self):
         df = _july_day_frame("2026-07-15")
         self.assertFalse(excluded_interval_mask(df, {}).any())
         self.assertFalse(excluded_interval_mask(df, None).any())
-        self.assertFalse(excluded_interval_mask(df, {"anomaly_exclusions": {"events": []}}).any())
+        self.assertFalse(
+            excluded_interval_mask(df, {"anomaly_exclusions": {"events": []}}).any()
+        )
 
     def test_whole_day_exclusion_when_he_range_omitted(self):
         df = _july_day_frame("2026-07-15")
-        cfg = {"anomaly_exclusions": {"enabled": True, "events": [{"date": "2026-07-15"}]}}
+        cfg = {
+            "anomaly_exclusions": {"enabled": True, "events": [{"date": "2026-07-15"}]}
+        }
         self.assertTrue(excluded_interval_mask(df, cfg).all())
 
     def test_missing_dt_column_is_safe(self):
@@ -82,7 +97,9 @@ class AnomalyExclusionMaskTests(unittest.TestCase):
         self.assertTrue(drop_excluded_intervals(pd.DataFrame(), DER_CONFIG).empty)
 
     def test_tz_naive_dt_supported(self):
-        df = pd.DataFrame({"DT": pd.date_range("2026-07-15 16:00", periods=6, freq="h")})  # 16..21
+        df = pd.DataFrame(
+            {"DT": pd.date_range("2026-07-15 16:00", periods=6, freq="h")}
+        )  # 16..21
         mask = excluded_interval_mask(df, DER_CONFIG)
         self.assertEqual(sorted(df.loc[mask, "DT"].dt.hour.tolist()), [18, 19, 20, 21])
 
@@ -121,7 +138,9 @@ class ProductionConfigExclusionTests(unittest.TestCase):
 
     def test_production_readiness_scorecard_drops_july15_der_hours(self):
         cfg = load_config()
-        dt = pd.date_range("2026-07-15 00:00", periods=24, freq="h", tz="America/Los_Angeles")
+        dt = pd.date_range(
+            "2026-07-15 00:00", periods=24, freq="h", tz="America/Los_Angeles"
+        )
         frame = pd.DataFrame(
             {
                 "DT": dt,
@@ -138,7 +157,9 @@ class ProductionConfigExclusionTests(unittest.TestCase):
 
         scorecard = build_production_readiness_scorecard(frame, frame, config=cfg)
         recent_n = int(scorecard.loc[scorecard["Test"].eq("Last 45 days"), "N"].iloc[0])
-        replay_n = int(scorecard.loc[scorecard["Test"].eq("Seasonal rolling origins"), "N"].iloc[0])
+        replay_n = int(
+            scorecard.loc[scorecard["Test"].eq("Seasonal rolling origins"), "N"].iloc[0]
+        )
 
         self.assertEqual(recent_n, 20)
         self.assertEqual(replay_n, 20)
@@ -210,7 +231,9 @@ class JulyEveningPeakGuardTests(unittest.TestCase):
                 "IsHoliday": [0] * 5,
             }
         )
-        out = apply_focused_scorecard_guard(df, self.GUARD_CONFIG, forecast_col="Final_Forecast_MWH")
+        out = apply_focused_scorecard_guard(
+            df, self.GUARD_CONFIG, forecast_col="Final_Forecast_MWH"
+        )
         guard = out["Focused_Scorecard_Guard_MWH"].tolist()
         # Hour 16 is covered by the sibling pre-peak ramp rule, not this evening lift.
         self.assertEqual(guard[0], 0.0)
@@ -226,7 +249,9 @@ class JulyEveningPeakGuardTests(unittest.TestCase):
         # July 13-style: a cloudy sub-100F afternoon over-forecast must NOT be lifted.
         df = pd.DataFrame(
             {
-                "DT": pd.to_datetime(["2026-07-13 17:00", "2026-07-13 18:00", "2026-07-13 19:00"]),
+                "DT": pd.to_datetime(
+                    ["2026-07-13 17:00", "2026-07-13 18:00", "2026-07-13 19:00"]
+                ),
                 "Final_Forecast_MWH": [277.0, 270.0, 266.0],
                 "Stage_Selected_Forecast_MWH": [277.0, 270.0, 266.0],
                 "Temperature_DailyMax": [99.1, 99.1, 99.1],
@@ -234,7 +259,9 @@ class JulyEveningPeakGuardTests(unittest.TestCase):
                 "IsHoliday": [0, 0, 0],
             }
         )
-        out = apply_focused_scorecard_guard(df, self.GUARD_CONFIG, forecast_col="Final_Forecast_MWH")
+        out = apply_focused_scorecard_guard(
+            df, self.GUARD_CONFIG, forecast_col="Final_Forecast_MWH"
+        )
         self.assertTrue((out["Focused_Scorecard_Guard_MWH"] == 0.0).all())
 
     def test_july_clear_95_100_post_peak_decay_backoff_applies_narrowly(self):
@@ -255,7 +282,17 @@ class JulyEveningPeakGuardTests(unittest.TestCase):
                 ),
                 "Final_Forecast_MWH": [260.0] * 9,
                 "Stage_Selected_Forecast_MWH": [260.0] * 9,
-                "Temperature_DailyMax": [96.8, 96.8, 96.8, 96.8, 96.8, 96.8, 96.8, 96.8, 100.0],
+                "Temperature_DailyMax": [
+                    96.8,
+                    96.8,
+                    96.8,
+                    96.8,
+                    96.8,
+                    96.8,
+                    96.8,
+                    96.8,
+                    100.0,
+                ],
                 "CloudCover_Norm": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.0],
                 "IsHoliday": [0] * 9,
             }
@@ -284,14 +321,18 @@ class JulyEveningPeakGuardTests(unittest.TestCase):
 
     def test_production_config_defines_july_evening_lift_rule(self):
         cfg = load_config()
-        rules = (
-            cfg["calibration"]["stage_selector"]["focused_scorecard_guard"]["rules"]
-        )
+        rules = cfg["calibration"]["stage_selector"]["focused_scorecard_guard"]["rules"]
         rule = next(
-            (r for r in rules if r.get("name") == "july_recent_100_plus_clear_hot_evening_lift"),
+            (
+                r
+                for r in rules
+                if r.get("name") == "july_recent_100_plus_clear_hot_evening_lift"
+            ),
             None,
         )
-        self.assertIsNotNone(rule, "expected the July evening peak-lift guard rule in config.yaml")
+        self.assertIsNotNone(
+            rule, "expected the July evening peak-lift guard rule in config.yaml"
+        )
         self.assertEqual(rule["months"], [7])
         self.assertEqual(rule["hours"], [17, 18, 19, 20])
         self.assertGreaterEqual(float(rule["adjustment_mwh"]), 8.0)
@@ -300,14 +341,18 @@ class JulyEveningPeakGuardTests(unittest.TestCase):
 
     def test_production_config_defines_july_post_peak_decay_backoff_rule(self):
         cfg = load_config()
-        rules = (
-            cfg["calibration"]["stage_selector"]["focused_scorecard_guard"]["rules"]
-        )
+        rules = cfg["calibration"]["stage_selector"]["focused_scorecard_guard"]["rules"]
         rule = next(
-            (r for r in rules if r.get("name") == "july_recent_95_100_clear_post_peak_decay_backoff"),
+            (
+                r
+                for r in rules
+                if r.get("name") == "july_recent_95_100_clear_post_peak_decay_backoff"
+            ),
             None,
         )
-        self.assertIsNotNone(rule, "expected the July post-peak decay backoff guard rule in config.yaml")
+        self.assertIsNotNone(
+            rule, "expected the July post-peak decay backoff guard rule in config.yaml"
+        )
         self.assertEqual(rule["months"], [7])
         self.assertEqual(rule["hours"], [18, 19, 20, 21, 22, 23])
         self.assertEqual(float(rule["adjustment_mwh"]), -3.0)
@@ -341,8 +386,14 @@ class JulyEveningPeakGuardTests(unittest.TestCase):
 
         out = apply_focused_scorecard_guard(df, cfg, forecast_col="Final_Forecast_MWH")
 
-        self.assertEqual(out["Focused_Scorecard_Guard_MWH"].tolist(), [-3.0, -3.0, -3.0, -3.0, 0.0, 0.0])
-        self.assertEqual(out["Final_Forecast_MWH"].tolist(), [257.0, 257.0, 257.0, 257.0, 260.0, 260.0])
+        self.assertEqual(
+            out["Focused_Scorecard_Guard_MWH"].tolist(),
+            [-3.0, -3.0, -3.0, -3.0, 0.0, 0.0],
+        )
+        self.assertEqual(
+            out["Final_Forecast_MWH"].tolist(),
+            [257.0, 257.0, 257.0, 257.0, 260.0, 260.0],
+        )
         self.assertTrue(
             out.loc[0:3, "Focused_Scorecard_Guard_Source"]
             .str.contains("july_recent_95_100_clear_post_peak_decay_backoff")
@@ -350,7 +401,9 @@ class JulyEveningPeakGuardTests(unittest.TestCase):
         )
         self.assertTrue(
             out.loc[4:5, "Focused_Scorecard_Guard_Source"]
-            .str.contains("july_recent_95_100_clear_post_peak_decay_backoff\\+july_clear_warm_late_evening_lift")
+            .str.contains(
+                "july_recent_95_100_clear_post_peak_decay_backoff\\+july_clear_warm_late_evening_lift"
+            )
             .all()
         )
 

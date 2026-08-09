@@ -72,7 +72,9 @@ class DataImportPolicyTests(unittest.TestCase):
                     "forecasting.data.weather_loader._now_local",
                     return_value=pd.Timestamp("2026-08-01 06:35", tz=tz),
                 ),
-                patch("forecasting.data.weather_loader._fetch_json", return_value=payload) as fetch_json,
+                patch(
+                    "forecasting.data.weather_loader._fetch_json", return_value=payload
+                ) as fetch_json,
             ):
                 first = fetch_forecast_weather(config)
 
@@ -86,14 +88,21 @@ class DataImportPolicyTests(unittest.TestCase):
                     "forecasting.data.weather_loader._now_local",
                     return_value=pd.Timestamp("2026-08-01 13:00", tz=tz),
                 ),
-                patch("forecasting.data.weather_loader._fetch_json", side_effect=AssertionError("unexpected API call")),
+                patch(
+                    "forecasting.data.weather_loader._fetch_json",
+                    side_effect=AssertionError("unexpected API call"),
+                ),
             ):
                 second = fetch_forecast_weather(config)
 
-            self.assertEqual(second.attrs["weather_source"], "forecast_weather_morning_daily_cache")
+            self.assertEqual(
+                second.attrs["weather_source"], "forecast_weather_morning_daily_cache"
+            )
             self.assertEqual(second["TempF"].tolist(), [71.0, 72.0])
 
-    def test_forecast_weather_outside_window_reuses_latest_cache_without_api_import(self):
+    def test_forecast_weather_outside_window_reuses_latest_cache_without_api_import(
+        self,
+    ):
         tz = ZoneInfo("America/Los_Angeles")
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp)
@@ -110,11 +119,17 @@ class DataImportPolicyTests(unittest.TestCase):
                     "forecasting.data.weather_loader._now_local",
                     return_value=pd.Timestamp("2026-08-01 13:00", tz=tz),
                 ),
-                patch("forecasting.data.weather_loader._fetch_json", side_effect=AssertionError("unexpected API call")),
+                patch(
+                    "forecasting.data.weather_loader._fetch_json",
+                    side_effect=AssertionError("unexpected API call"),
+                ),
             ):
                 out = fetch_forecast_weather(config)
 
-            self.assertEqual(out.attrs["weather_source"], "forecast_weather_latest_cache_outside_morning_window")
+            self.assertEqual(
+                out.attrs["weather_source"],
+                "forecast_weather_latest_cache_outside_morning_window",
+            )
             self.assertEqual(out["TempF"].tolist(), [80.0, 81.0])
 
     def test_actuals_import_cutoff_uses_prior_day_completed_hour_label(self):
@@ -127,15 +142,21 @@ class DataImportPolicyTests(unittest.TestCase):
             },
         }
 
-        cutoff = actuals_import_cutoff_dt(config, now=pd.Timestamp("2026-08-01 13:00", tz="America/Los_Angeles"))
+        cutoff = actuals_import_cutoff_dt(
+            config, now=pd.Timestamp("2026-08-01 13:00", tz="America/Los_Angeles")
+        )
 
-        self.assertEqual(cutoff, pd.Timestamp("2026-07-31 23:00", tz="America/Los_Angeles"))
+        self.assertEqual(
+            cutoff, pd.Timestamp("2026-07-31 23:00", tz="America/Los_Angeles")
+        )
 
     def test_actuals_cutoff_filters_five_min_hourly_rows_after_prior_day_he24(self):
         cutoff = pd.Timestamp("2026-07-31 23:00", tz="America/Los_Angeles")
         rows = pd.DataFrame(
             {
-                "DT": pd.date_range("2026-07-31 22:00", periods=4, freq="h", tz="America/Los_Angeles"),
+                "DT": pd.date_range(
+                    "2026-07-31 22:00", periods=4, freq="h", tz="America/Los_Angeles"
+                ),
                 "MWH": [100.0, 101.0, 102.0, 103.0],
             }
         )
@@ -153,25 +174,36 @@ class DataImportPolicyTests(unittest.TestCase):
             }
         )
 
-        out = build_hourly_load_from_five_min(rows, timezone=tz, min_intervals_per_hour=12)
+        out = build_hourly_load_from_five_min(
+            rows, timezone=tz, min_intervals_per_hour=12
+        )
 
         self.assertEqual(len(out), 1)
         self.assertEqual(out.loc[0, "DT"], pd.Timestamp("2026-07-15 15:00", tz=tz))
-        self.assertEqual(out.loc[0, "FiveMin_Hour_End"], pd.Timestamp("2026-07-15 15:00", tz=tz))
+        self.assertEqual(
+            out.loc[0, "FiveMin_Hour_End"], pd.Timestamp("2026-07-15 15:00", tz=tz)
+        )
         self.assertAlmostEqual(out.loc[0, "MWH"], 305.5)
 
     def test_intraday_previous_hour_features_do_not_use_current_completed_hour(self):
         tz = "America/Los_Angeles"
         rows = pd.DataFrame(
             {
-                "DT": list(pd.date_range("2026-07-15 14:00", periods=12, freq="5min", tz=tz))
-                + list(pd.date_range("2026-07-15 15:00", periods=12, freq="5min", tz=tz)),
-                "FiveMin_Load_MW": [300.0 + i for i in range(12)] + [400.0 + i for i in range(12)],
+                "DT": list(
+                    pd.date_range("2026-07-15 14:00", periods=12, freq="5min", tz=tz)
+                )
+                + list(
+                    pd.date_range("2026-07-15 15:00", periods=12, freq="5min", tz=tz)
+                ),
+                "FiveMin_Load_MW": [300.0 + i for i in range(12)]
+                + [400.0 + i for i in range(12)],
             }
         )
 
         out = build_intraday_load_feature_frame(rows)
-        out["DT"] = pd.to_datetime(out["DT"], errors="coerce", utc=True).dt.tz_convert(tz)
+        out["DT"] = pd.to_datetime(out["DT"], errors="coerce", utc=True).dt.tz_convert(
+            tz
+        )
 
         row = out.loc[out["DT"].eq(pd.Timestamp("2026-07-15 16:00", tz=tz))].iloc[0]
 

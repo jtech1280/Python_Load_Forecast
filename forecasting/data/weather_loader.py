@@ -36,11 +36,14 @@ WEATHER_CACHE_COLS = [
 _TRUSTSTORE_INJECTED = False
 _TRUSTSTORE_WARNING_EMITTED = False
 
+
 def _today_local(tz_name: str) -> dt.date:
     return dt.datetime.now(ZoneInfo(tz_name)).date()
 
+
 def _now_local(config: dict) -> pd.Timestamp:
     return pd.Timestamp.now(tz=ZoneInfo(config["project"]["timezone"]))
+
 
 def _parse_local_time(value: object, default: str) -> dt.time:
     text = str(value or default).strip()
@@ -52,20 +55,29 @@ def _parse_local_time(value: object, default: str) -> dt.time:
         return dt.time(hour=hour, minute=minute, second=second)
     except Exception:
         fallback = str(default).split(":")
-        return dt.time(hour=int(fallback[0]), minute=int(fallback[1]) if len(fallback) > 1 else 0)
+        return dt.time(
+            hour=int(fallback[0]), minute=int(fallback[1]) if len(fallback) > 1 else 0
+        )
+
 
 def _forecast_import_policy(config: dict) -> dict:
-    cfg = ((config.get("openmeteo", {}) or {}).get("forecast_import_policy", {}) or {})
+    cfg = (config.get("openmeteo", {}) or {}).get("forecast_import_policy", {}) or {}
     return cfg if bool(cfg.get("enabled", False)) else {}
 
-def _localize_date_time(local_date: dt.date, local_time: dt.time, tz: ZoneInfo) -> pd.Timestamp:
+
+def _localize_date_time(
+    local_date: dt.date, local_time: dt.time, tz: ZoneInfo
+) -> pd.Timestamp:
     return pd.Timestamp.combine(local_date, local_time).tz_localize(
         tz,
         ambiguous="NaT",
         nonexistent="shift_forward",
     )
 
-def _forecast_import_window(now_local: pd.Timestamp, policy: dict) -> tuple[pd.Timestamp, pd.Timestamp]:
+
+def _forecast_import_window(
+    now_local: pd.Timestamp, policy: dict
+) -> tuple[pd.Timestamp, pd.Timestamp]:
     tz = now_local.tzinfo
     if tz is None:
         raise ValueError("now_local must be timezone-aware")
@@ -83,28 +95,42 @@ def _forecast_import_window(now_local: pd.Timestamp, policy: dict) -> tuple[pd.T
             end = end + pd.Timedelta(days=1)
     return start, end
 
+
 def _inside_forecast_import_window(now_local: pd.Timestamp, policy: dict) -> bool:
     start, end = _forecast_import_window(now_local, policy)
     return bool(start <= now_local <= end)
 
-def _daily_forecast_weather_cache_path(config: dict, local_date: dt.date, policy: dict) -> Path:
-    stem = str(policy.get("daily_cache_stem") or "forecast_weather_morning").strip() or "forecast_weather_morning"
+
+def _daily_forecast_weather_cache_path(
+    config: dict, local_date: dt.date, policy: dict
+) -> Path:
+    stem = (
+        str(policy.get("daily_cache_stem") or "forecast_weather_morning").strip()
+        or "forecast_weather_morning"
+    )
     return _weather_cache_path(config, f"{stem}_{local_date.isoformat()}")
+
 
 def _cache_mtime_local(path: Path, tz: ZoneInfo) -> pd.Timestamp | None:
     if not path.exists():
         return None
     try:
-        return pd.Timestamp.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc).tz_convert(tz)
+        return pd.Timestamp.fromtimestamp(
+            path.stat().st_mtime, tz=dt.timezone.utc
+        ).tz_convert(tz)
     except OSError:
         return None
 
-def _cache_was_written_in_import_window(path: Path, now_local: pd.Timestamp, policy: dict) -> bool:
+
+def _cache_was_written_in_import_window(
+    path: Path, now_local: pd.Timestamp, policy: dict
+) -> bool:
     mtime = _cache_mtime_local(path, now_local.tzinfo)
     if mtime is None:
         return False
     start, end = _forecast_import_window(now_local, policy)
     return bool(start <= mtime <= end)
+
 
 def _mark_forecast_weather_source(
     df: pd.DataFrame,
@@ -118,16 +144,22 @@ def _mark_forecast_weather_source(
     df.attrs["weather_source"] = str(source or "")
     df.attrs["weather_snapshot_path"] = str(snapshot_path) if snapshot_path else ""
     df.attrs["weather_cache_path"] = str(cache_path) if cache_path else ""
-    df.attrs["weather_daily_cache_path"] = str(daily_cache_path) if daily_cache_path else ""
+    df.attrs["weather_daily_cache_path"] = (
+        str(daily_cache_path) if daily_cache_path else ""
+    )
     if import_window is not None:
-        df.attrs["weather_import_window_local"] = f"{import_window[0]} to {import_window[1]}"
+        df.attrs["weather_import_window_local"] = (
+            f"{import_window[0]} to {import_window[1]}"
+        )
     return df
+
 
 def _historical_end(config: dict) -> dt.date:
     hist_end = config["openmeteo"]["historical_end"]
     if hist_end:
         return dt.date.fromisoformat(str(hist_end))
     return _today_local(config["project"]["timezone"]) - dt.timedelta(days=1)
+
 
 def _standard_params(config: dict) -> dict:
     return {
@@ -140,11 +172,14 @@ def _standard_params(config: dict) -> dict:
         "precipitation_unit": config["openmeteo"]["precipitation_unit"],
     }
 
+
 def _normalize_hourly(payload: dict, captured_at_utc: pd.Timestamp) -> pd.DataFrame:
     hourly = payload.get("hourly", {})
     times = hourly.get("time", [])
     if not times:
-        raise ValueError(f"Open-Meteo payload missing 'hourly.time'. Keys: {list(payload.keys())}")
+        raise ValueError(
+            f"Open-Meteo payload missing 'hourly.time'. Keys: {list(payload.keys())}"
+        )
 
     out = pd.DataFrame({"ValidTimeUTC": pd.to_datetime(times)})
     for key, new_name in OPENMETEO_RENAME.items():
@@ -155,11 +190,21 @@ def _normalize_hourly(payload: dict, captured_at_utc: pd.Timestamp) -> pd.DataFr
     out.sort_values("ValidTimeUTC", inplace=True)
     return out
 
-def _fetch_json(url: str, params: dict, verify: bool | str, timeout_seconds: int = 30, retries: int = 1, backoff_seconds: float = 2.0) -> dict:
+
+def _fetch_json(
+    url: str,
+    params: dict,
+    verify: bool | str,
+    timeout_seconds: int = 30,
+    retries: int = 1,
+    backoff_seconds: float = 2.0,
+) -> dict:
     last_exc: Exception | None = None
     for attempt in range(max(1, int(retries))):
         try:
-            r = requests.get(url, params=params, timeout=int(timeout_seconds), verify=verify)
+            r = requests.get(
+                url, params=params, timeout=int(timeout_seconds), verify=verify
+            )
             r.raise_for_status()
             return r.json()
         except Exception as exc:
@@ -170,21 +215,27 @@ def _fetch_json(url: str, params: dict, verify: bool | str, timeout_seconds: int
         raise last_exc
     raise RuntimeError("Weather request failed without an exception")
 
+
 def _ssl_verify(config: dict) -> bool | str:
     openmeteo_cfg = config.get("openmeteo", {}) or {}
     override = os.getenv("OPENMETEO_SSL_VERIFY")
     if override is not None:
         return str(override).strip().lower() not in {"0", "false", "no", "off"}
-    ca_bundle = os.getenv("OPENMETEO_CA_BUNDLE") or str(openmeteo_cfg.get("ssl_ca_bundle") or "").strip()
+    ca_bundle = (
+        os.getenv("OPENMETEO_CA_BUNDLE")
+        or str(openmeteo_cfg.get("ssl_ca_bundle") or "").strip()
+    )
     if ca_bundle:
         return ca_bundle
     return bool(openmeteo_cfg.get("ssl_verify", True))
+
 
 def _weather_request_verify(config: dict) -> bool | str:
     verify = _ssl_verify(config)
     if verify is True:
         _inject_os_truststore(config)
     return verify
+
 
 def _inject_os_truststore(config: dict) -> None:
     global _TRUSTSTORE_INJECTED, _TRUSTSTORE_WARNING_EMITTED
@@ -208,6 +259,7 @@ def _inject_os_truststore(config: dict) -> None:
             )
             _TRUSTSTORE_WARNING_EMITTED = True
 
+
 def _weather_cache_dir(config: dict) -> Path:
     cache_dir = str(config.get("openmeteo", {}).get("cache_dir") or "weather_cache")
     path = Path(cache_dir)
@@ -215,12 +267,15 @@ def _weather_cache_dir(config: dict) -> Path:
         path = Path.cwd() / path
     return path
 
+
 def _weather_cache_path(config: dict, stem: str) -> Path:
     return _weather_cache_dir(config) / f"{stem}.csv"
 
+
 def _requested_normalized_weather_cols(config: dict) -> set[str]:
-    hourly_vars = ((config.get("openmeteo", {}) or {}).get("hourly_vars") or [])
+    hourly_vars = (config.get("openmeteo", {}) or {}).get("hourly_vars") or []
     return {OPENMETEO_RENAME[var] for var in hourly_vars if var in OPENMETEO_RENAME}
+
 
 def _read_weather_cache(
     path: Path,
@@ -240,7 +295,9 @@ def _read_weather_cache(
         return pd.DataFrame()
 
     tz_local = ZoneInfo(config["project"]["timezone"])
-    out["DT"] = pd.to_datetime(out["DT"], errors="coerce", utc=True).dt.tz_convert(tz_local)
+    out["DT"] = pd.to_datetime(out["DT"], errors="coerce", utc=True).dt.tz_convert(
+        tz_local
+    )
     out = out.dropna(subset=["DT"]).copy()
     if start is not None:
         out = out[out["DT"].dt.date >= start]
@@ -253,8 +310,13 @@ def _read_weather_cache(
             return pd.DataFrame()
 
     cols = WEATHER_CACHE_COLS
-    out = out[[col for col in cols if col in out.columns]].sort_values("DT").drop_duplicates(subset=["DT"], keep="last")
+    out = (
+        out[[col for col in cols if col in out.columns]]
+        .sort_values("DT")
+        .drop_duplicates(subset=["DT"], keep="last")
+    )
     return out.reset_index(drop=True)
+
 
 def _write_weather_cache(df: pd.DataFrame, path: Path) -> None:
     if df is None or df.empty:
@@ -280,7 +342,10 @@ def _archive_forecast_weather(df: pd.DataFrame, config: dict) -> str | Path | No
             )
             sql_cfg = output_sql_config(config)
             schema = str(sql_cfg.get("schema") or "Forecasting")
-            table = str(sql_cfg.get("forecast_weather_archive_table") or "LoadForecastWeatherArchive")
+            table = str(
+                sql_cfg.get("forecast_weather_archive_table")
+                or "LoadForecastWeatherArchive"
+            )
             return f"sql:{schema}.{table}:{snapshot_id}" if snapshot_id else None
     except Exception as exc:
         warnings.warn(
@@ -299,14 +364,19 @@ def _archive_forecast_weather(df: pd.DataFrame, config: dict) -> str | Path | No
         metadata={"Source": "open_meteo_forecast"},
     )
 
-def _forecast_results_weather_fallback(config: dict, start: dt.date | None = None, end: dt.date | None = None) -> pd.DataFrame:
+
+def _forecast_results_weather_fallback(
+    config: dict, start: dt.date | None = None, end: dt.date | None = None
+) -> pd.DataFrame:
     """Recover normalized weather from the latest forecast display export.
 
     This is intentionally a last-resort operational fallback for Open-Meteo outages. It is less
     authoritative than a fresh archive/forecast response, but it prevents a transient 504 from
     blocking model runs when a recent successful export is present.
     """
-    output_dir = Path(str(config.get("project", {}).get("output_dir") or "forecast_outputs"))
+    output_dir = Path(
+        str(config.get("project", {}).get("output_dir") or "forecast_outputs")
+    )
     if not output_dir.is_absolute():
         output_dir = Path.cwd() / output_dir
     path = output_dir / "forecast_results.csv"
@@ -335,10 +405,16 @@ def _forecast_results_weather_fallback(config: dict, start: dt.date | None = Non
 
     tz_local = ZoneInfo(config["project"]["timezone"])
     out = pd.DataFrame()
-    out["DT"] = pd.to_datetime(src["DT"], errors="coerce", utc=True).dt.tz_convert(tz_local)
+    out["DT"] = pd.to_datetime(src["DT"], errors="coerce", utc=True).dt.tz_convert(
+        tz_local
+    )
     out["TempF"] = pd.to_numeric(src.get("Temperature"), errors="coerce")
-    out["HumidityPct"] = pd.to_numeric(src.get("Humidity_Norm"), errors="coerce") * 100.0
-    out["CloudCoverPct"] = pd.to_numeric(src.get("CloudCover_Norm"), errors="coerce") * 100.0
+    out["HumidityPct"] = (
+        pd.to_numeric(src.get("Humidity_Norm"), errors="coerce") * 100.0
+    )
+    out["CloudCoverPct"] = (
+        pd.to_numeric(src.get("CloudCover_Norm"), errors="coerce") * 100.0
+    )
     out["WindSpeedMph"] = pd.to_numeric(src.get("WindSpeed_Mph"), errors="coerce")
     wind_direction_src = src.get("WindDirectionDeg")
     if wind_direction_src is None:
@@ -351,7 +427,12 @@ def _forecast_results_weather_fallback(config: dict, start: dt.date | None = Non
         out = out[out["DT"].dt.date >= start]
     if end is not None:
         out = out[out["DT"].dt.date <= end]
-    return out.sort_values("DT").drop_duplicates(subset=["DT"], keep="last").reset_index(drop=True)
+    return (
+        out.sort_values("DT")
+        .drop_duplicates(subset=["DT"], keep="last")
+        .reset_index(drop=True)
+    )
+
 
 def fetch_historical_weather(config: dict) -> pd.DataFrame:
     params = _standard_params(config)
@@ -362,7 +443,9 @@ def fetch_historical_weather(config: dict) -> pd.DataFrame:
     cache_stem = f"historical_weather_{start.isoformat()}_{end.isoformat()}"
     cache_path = _weather_cache_path(config, cache_stem)
     latest_cache_path = _weather_cache_path(config, "historical_weather_latest")
-    exact_cached = _read_weather_cache(cache_path, config, start=start, end=end, require_requested_cols=True)
+    exact_cached = _read_weather_cache(
+        cache_path, config, start=start, end=end, require_requested_cols=True
+    )
     if not exact_cached.empty:
         return exact_cached
 
@@ -375,7 +458,9 @@ def fetch_historical_weather(config: dict) -> pd.DataFrame:
             retries=4,
             backoff_seconds=6.0,
         )
-        df = _finalize_weather_frame(_normalize_hourly(payload, pd.Timestamp.now("UTC")), config)
+        df = _finalize_weather_frame(
+            _normalize_hourly(payload, pd.Timestamp.now("UTC")), config
+        )
         _write_weather_cache(df, cache_path)
         _write_weather_cache(df, latest_cache_path)
         return df
@@ -383,7 +468,10 @@ def fetch_historical_weather(config: dict) -> pd.DataFrame:
         for path in [cache_path, latest_cache_path]:
             cached = _read_weather_cache(path, config, start=start, end=end)
             if not cached.empty:
-                warnings.warn(f"Historical weather API failed ({exc}); using cached weather: {path}", RuntimeWarning)
+                warnings.warn(
+                    f"Historical weather API failed ({exc}); using cached weather: {path}",
+                    RuntimeWarning,
+                )
                 return cached
 
         fallback = _forecast_results_weather_fallback(config, start=start, end=end)
@@ -396,6 +484,7 @@ def fetch_historical_weather(config: dict) -> pd.DataFrame:
             )
             return fallback
         raise
+
 
 def fetch_forecast_weather(config: dict) -> pd.DataFrame:
     params = _standard_params(config)
@@ -417,8 +506,12 @@ def fetch_forecast_weather(config: dict) -> pd.DataFrame:
 
     if policy:
         import_window = _forecast_import_window(now_local, policy)
-        daily_cache_path = _daily_forecast_weather_cache_path(config, now_local.date(), policy)
-        daily_cached = _read_weather_cache(daily_cache_path, config, require_requested_cols=True)
+        daily_cache_path = _daily_forecast_weather_cache_path(
+            config, now_local.date(), policy
+        )
+        daily_cached = _read_weather_cache(
+            daily_cache_path, config, require_requested_cols=True
+        )
         if not daily_cached.empty:
             return _mark_forecast_weather_source(
                 daily_cached,
@@ -429,7 +522,9 @@ def fetch_forecast_weather(config: dict) -> pd.DataFrame:
             )
 
         if _cache_was_written_in_import_window(latest_cache_path, now_local, policy):
-            latest_cached = _read_weather_cache(latest_cache_path, config, require_requested_cols=True)
+            latest_cached = _read_weather_cache(
+                latest_cache_path, config, require_requested_cols=True
+            )
             if not latest_cached.empty:
                 _write_weather_cache(latest_cached, daily_cache_path)
                 return _mark_forecast_weather_source(
@@ -441,7 +536,9 @@ def fetch_forecast_weather(config: dict) -> pd.DataFrame:
                 )
 
         if not _inside_forecast_import_window(now_local, policy):
-            cached = _read_weather_cache(latest_cache_path, config, require_requested_cols=True)
+            cached = _read_weather_cache(
+                latest_cache_path, config, require_requested_cols=True
+            )
             if not cached.empty:
                 warnings.warn(
                     "Skipping Open-Meteo forecast import outside the configured morning window "
@@ -460,7 +557,8 @@ def fetch_forecast_weather(config: dict) -> pd.DataFrame:
             fallback = _forecast_results_weather_fallback(
                 config,
                 start=today - dt.timedelta(days=2),
-                end=today + dt.timedelta(days=int(config["openmeteo"]["forecast_days"]) + 1),
+                end=today
+                + dt.timedelta(days=int(config["openmeteo"]["forecast_days"]) + 1),
             )
             if not fallback.empty:
                 warnings.warn(
@@ -484,8 +582,12 @@ def fetch_forecast_weather(config: dict) -> pd.DataFrame:
             )
 
     try:
-        payload = _fetch_json(url, params, verify, timeout_seconds=90, retries=4, backoff_seconds=6.0)
-        df = _finalize_weather_frame(_normalize_hourly(payload, pd.Timestamp.now("UTC")), config)
+        payload = _fetch_json(
+            url, params, verify, timeout_seconds=90, retries=4, backoff_seconds=6.0
+        )
+        df = _finalize_weather_frame(
+            _normalize_hourly(payload, pd.Timestamp.now("UTC")), config
+        )
         _write_weather_cache(df, latest_cache_path)
         if daily_cache_path is not None:
             _write_weather_cache(df, daily_cache_path)
@@ -511,14 +613,18 @@ def fetch_forecast_weather(config: dict) -> pd.DataFrame:
                 daily_cache_path=daily_cache_path,
                 import_window=import_window,
             )
-            warnings.warn(f"Forecast weather API failed ({exc}); using cached weather: {latest_cache_path}", RuntimeWarning)
+            warnings.warn(
+                f"Forecast weather API failed ({exc}); using cached weather: {latest_cache_path}",
+                RuntimeWarning,
+            )
             return cached
 
         today = _today_local(config["project"]["timezone"])
         fallback = _forecast_results_weather_fallback(
             config,
             start=today - dt.timedelta(days=2),
-            end=today + dt.timedelta(days=int(config["openmeteo"]["forecast_days"]) + 1),
+            end=today
+            + dt.timedelta(days=int(config["openmeteo"]["forecast_days"]) + 1),
         )
         if not fallback.empty:
             _write_weather_cache(fallback, latest_cache_path)
@@ -548,7 +654,10 @@ def fetch_previous_run_weather(
     """Load fixed-lead archived forecast weather for replay realism checks."""
     max_days = max(1, min(7, int(max_previous_days or 7)))
     try:
-        from forecasting.data.output_sql_store import load_archived_forecast_weather, output_sql_enabled
+        from forecasting.data.output_sql_store import (
+            load_archived_forecast_weather,
+            output_sql_enabled,
+        )
 
         if output_sql_enabled(config):
             archived = load_archived_forecast_weather(
@@ -573,14 +682,21 @@ def fetch_previous_run_weather(
             if variable == "is_day":
                 continue
             previous_hourly.append(f"{variable}_previous_day{lead_day}")
-    params.update({
-        "start_date": pd.Timestamp(start_dt).date().isoformat(),
-        "end_date": pd.Timestamp(end_dt).date().isoformat(),
-        "hourly": ",".join(previous_hourly),
-    })
-    url = str(config.get("openmeteo", {}).get("previous_runs_url") or "https://previous-runs-api.open-meteo.com/v1/forecast")
+    params.update(
+        {
+            "start_date": pd.Timestamp(start_dt).date().isoformat(),
+            "end_date": pd.Timestamp(end_dt).date().isoformat(),
+            "hourly": ",".join(previous_hourly),
+        }
+    )
+    url = str(
+        config.get("openmeteo", {}).get("previous_runs_url")
+        or "https://previous-runs-api.open-meteo.com/v1/forecast"
+    )
     verify = _weather_request_verify(config)
-    payload = _fetch_json(url, params, verify, timeout_seconds=90, retries=3, backoff_seconds=4.0)
+    payload = _fetch_json(
+        url, params, verify, timeout_seconds=90, retries=3, backoff_seconds=4.0
+    )
     hourly = payload.get("hourly", {}) or {}
     times = hourly.get("time", [])
     if not times:
@@ -600,13 +716,17 @@ def fetch_previous_run_weather(
             continue
         frame["Previous_Run_Lead_Days"] = int(lead_day)
         frames.append(frame)
-    return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+    return (
+        pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+    )
+
 
 # forecasting/data/weather_loader.py
 
 from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
+
 
 def _finalize_weather_frame(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     """
@@ -616,8 +736,12 @@ def _finalize_weather_frame(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     """
     tz_local = ZoneInfo(config["project"]["timezone"])
     tz_api_name = str((config.get("openmeteo", {}) or {}).get("timezone") or "GMT")
-    shift_hours = int((config.get("quality", {}) or {}).get("weather_timestamp_shift_hours", 0) or 0)
-    max_gap = int((config.get("quality", {}) or {}).get("max_interpolation_gap_hours", 0) or 0)
+    shift_hours = int(
+        (config.get("quality", {}) or {}).get("weather_timestamp_shift_hours", 0) or 0
+    )
+    max_gap = int(
+        (config.get("quality", {}) or {}).get("max_interpolation_gap_hours", 0) or 0
+    )
 
     out = df.copy()
 
@@ -643,7 +767,15 @@ def _finalize_weather_frame(df: pd.DataFrame, config: dict) -> pd.DataFrame:
     max_f = float(config["quality"]["valid_temp_max_f"])
 
     # numeric coercions
-    for col in ["TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "WindDirectionDeg", "PrecipIn", "GHI_Wm2"]:
+    for col in [
+        "TempF",
+        "HumidityPct",
+        "CloudCoverPct",
+        "WindSpeedMph",
+        "WindDirectionDeg",
+        "PrecipIn",
+        "GHI_Wm2",
+    ]:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
     if "WindDirectionDeg" in out.columns:
@@ -654,13 +786,26 @@ def _finalize_weather_frame(df: pd.DataFrame, config: dict) -> pd.DataFrame:
 
     # Keep canonical set of columns for downstream merge
     cols = WEATHER_CACHE_COLS
-    out = out[[col for col in cols if col in out.columns]].sort_values("DT").drop_duplicates(subset=["DT"], keep="last").reset_index(drop=True)
+    out = (
+        out[[col for col in cols if col in out.columns]]
+        .sort_values("DT")
+        .drop_duplicates(subset=["DT"], keep="last")
+        .reset_index(drop=True)
+    )
 
     # Limited interpolation (ported from v11.6) so small, isolated invalid/missing values
     # don't cause hours to be dropped later by model-frame filtering. Keep this conservative.
     if max_gap > 0 and "TempF" in out.columns:
         work = out.set_index("DT")
-        for col in ["TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "WindDirectionDeg", "PrecipIn", "GHI_Wm2"]:
+        for col in [
+            "TempF",
+            "HumidityPct",
+            "CloudCoverPct",
+            "WindSpeedMph",
+            "WindDirectionDeg",
+            "PrecipIn",
+            "GHI_Wm2",
+        ]:
             if col in work.columns:
                 work[col] = pd.to_numeric(work[col], errors="coerce").interpolate(
                     method="time",

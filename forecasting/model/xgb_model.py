@@ -19,46 +19,101 @@ BASE_FEATURES = [
     # Weather response. Tree ensembles are robust to correlated split candidates, and
     # replay showed that pruning this family removed useful hot-peak signal. Keep the
     # broader heat response here; Prophet keeps its pruned regressor set separately.
-    "Temperature", "Temperature_DailyMax", "Temperature_DailyMin", "Temperature_DailyMean",
-    "CDD", "HDD", "Daily_CDD", "Daily_HDD", "Cooling_Stress",
-    "Temp_Squared", "CDD_Squared", "HDD_Squared",
-    "Extreme_Heat_80", "Extreme_Heat_85", "Extreme_Heat_90", "Extreme_Heat_95", "Extreme_Heat_100",
-    "Temp_Bin", "DailyMaxTempBin",
-    "HeatIndexF", "HeatIndex_CDD", "DailyMax_x_PeakHour",
-    "IsPeakWindow14to18", "IsPeakWindow16to18", "IsHotPeakWindow16to20",
-    "DailyMaxTempExcess90", "DailyMaxTempExcess95",
-    "DailyMax_x_PeakWindow14to18", "DailyMax_x_PeakWindow16to18",
-    "CDD_x_PeakWindow14to18", "CDD_x_HotPeakWindow16to20",
-    "DailyMaxExcess90_x_PeakWindow14to18", "DailyMaxExcess90_x_PeakWindow16to18",
+    "Temperature",
+    "Temperature_DailyMax",
+    "Temperature_DailyMin",
+    "Temperature_DailyMean",
+    "CDD",
+    "HDD",
+    "Daily_CDD",
+    "Daily_HDD",
+    "Cooling_Stress",
+    "Temp_Squared",
+    "CDD_Squared",
+    "HDD_Squared",
+    "Extreme_Heat_80",
+    "Extreme_Heat_85",
+    "Extreme_Heat_90",
+    "Extreme_Heat_95",
+    "Extreme_Heat_100",
+    "Temp_Bin",
+    "DailyMaxTempBin",
+    "HeatIndexF",
+    "HeatIndex_CDD",
+    "DailyMax_x_PeakHour",
+    "IsPeakWindow14to18",
+    "IsPeakWindow16to18",
+    "IsHotPeakWindow16to20",
+    "DailyMaxTempExcess90",
+    "DailyMaxTempExcess95",
+    "DailyMax_x_PeakWindow14to18",
+    "DailyMax_x_PeakWindow16to18",
+    "CDD_x_PeakWindow14to18",
+    "CDD_x_HotPeakWindow16to20",
+    "DailyMaxExcess90_x_PeakWindow14to18",
+    "DailyMaxExcess90_x_PeakWindow16to18",
     "DailyMaxExcess90_x_HotPeakWindow16to20",
-    "DailyMaxExcess95_x_HotPeakWindow16to20", "HeatIndexCDD_x_HotPeakWindow16to20",
-    "NonBusinessHotPeakWindow16to20", "DailyMaxExcess90_x_NonBusinessHotPeak",
-    "ClearHotPeakWindow16to20", "ClearHotPeakWindow16to18", "OvercastHotPeakWindow16to20",
-    "ClearPeakWindow14to18", "OvercastPeakWindow14to18",
-    "ClearPeakWindow16to18", "OvercastPeakWindow16to18",
-    "CloudCover_x_PeakWindow14to18", "CloudCover_x_PeakWindow16to18",
+    "DailyMaxExcess95_x_HotPeakWindow16to20",
+    "HeatIndexCDD_x_HotPeakWindow16to20",
+    "NonBusinessHotPeakWindow16to20",
+    "DailyMaxExcess90_x_NonBusinessHotPeak",
+    "ClearHotPeakWindow16to20",
+    "ClearHotPeakWindow16to18",
+    "OvercastHotPeakWindow16to20",
+    "ClearPeakWindow14to18",
+    "OvercastPeakWindow14to18",
+    "ClearPeakWindow16to18",
+    "OvercastPeakWindow16to18",
+    "CloudCover_x_PeakWindow14to18",
+    "CloudCover_x_PeakWindow16to18",
     "CloudCover_x_HotPeakWindow16to20",
-    "PeakWindowDailyMaxBelow75", "PeakWindowDailyMax75to85", "PeakWindowDailyMax85to90",
-    "ClearPeakDailyMaxBelow75", "ClearPeakDailyMax75to85", "ClearPeakDailyMax85to90",
-    "OvercastPeakDailyMaxBelow75", "OvercastPeakDailyMax75to85", "OvercastPeakDailyMax85to90",
-    "PeakHE16to18DailyMaxBelow75", "OvercastPeakHE16to18DailyMaxBelow75",
-    "OvercastCoolPeakWindow16to18", "OvercastPeakHE16to18DailyMax90to92_5",
-    "ClearPeakHE16to18DailyMax85to90", "ClearPeakHE16to18DailyMax95to98",
-    "ClearPeakHE16to18DailyMax98to100", "ClearPeakHE16to18DailyMax100to105",
+    "PeakWindowDailyMaxBelow75",
+    "PeakWindowDailyMax75to85",
+    "PeakWindowDailyMax85to90",
+    "ClearPeakDailyMaxBelow75",
+    "ClearPeakDailyMax75to85",
+    "ClearPeakDailyMax85to90",
+    "OvercastPeakDailyMaxBelow75",
+    "OvercastPeakDailyMax75to85",
+    "OvercastPeakDailyMax85to90",
+    "PeakHE16to18DailyMaxBelow75",
+    "OvercastPeakHE16to18DailyMaxBelow75",
+    "OvercastCoolPeakWindow16to18",
+    "OvercastPeakHE16to18DailyMax90to92_5",
+    "ClearPeakHE16to18DailyMax85to90",
+    "ClearPeakHE16to18DailyMax95to98",
+    "ClearPeakHE16to18DailyMax98to100",
+    "ClearPeakHE16to18DailyMax100to105",
     "ClearPeakHE16to18DailyMax105Plus",
-    "HotPeakDailyMax90to92_5", "HotPeakDailyMax92_5to95", "HotPeakDailyMax95to98",
-    "HotPeakDailyMax98to100", "HotPeakDailyMax100to105", "HotPeakDailyMax105Plus",
-    "ClearHotPeakDailyMax90to92_5", "ClearHotPeakDailyMax92_5to95",
-    "ClearHotPeakDailyMax95to98", "ClearHotPeakDailyMax98to100",
-    "ClearHotPeakDailyMax100to105", "ClearHotPeakDailyMax105Plus",
-    "OvercastHotPeakDailyMax90to92_5", "OvercastHotPeakDailyMax92_5to95",
-    "OvercastHotPeakDailyMax95to98", "OvercastHotPeakDailyMax98to100",
-    "OvercastHotPeakDailyMax100to105", "OvercastHotPeakDailyMax105Plus",
-    "ClearHotPeak_x_DailyMaxExcess90", "ClearHotPeak_x_DailyMaxExcess95",
-    "ClearHotPeak_x_CDD", "OvercastHotPeak_x_DailyMaxExcess90",
-    "OvercastHotPeak_x_DailyMaxExcess95", "OvercastHotPeak_x_CDD",
-    "Month_x_HotPeak", "MonthSin_x_HotPeak", "MonthCos_x_HotPeak",
-    "Month_x_OvercastPeakWindow14to18", "MonthSin_x_OvercastPeakWindow14to18",
+    "HotPeakDailyMax90to92_5",
+    "HotPeakDailyMax92_5to95",
+    "HotPeakDailyMax95to98",
+    "HotPeakDailyMax98to100",
+    "HotPeakDailyMax100to105",
+    "HotPeakDailyMax105Plus",
+    "ClearHotPeakDailyMax90to92_5",
+    "ClearHotPeakDailyMax92_5to95",
+    "ClearHotPeakDailyMax95to98",
+    "ClearHotPeakDailyMax98to100",
+    "ClearHotPeakDailyMax100to105",
+    "ClearHotPeakDailyMax105Plus",
+    "OvercastHotPeakDailyMax90to92_5",
+    "OvercastHotPeakDailyMax92_5to95",
+    "OvercastHotPeakDailyMax95to98",
+    "OvercastHotPeakDailyMax98to100",
+    "OvercastHotPeakDailyMax100to105",
+    "OvercastHotPeakDailyMax105Plus",
+    "ClearHotPeak_x_DailyMaxExcess90",
+    "ClearHotPeak_x_DailyMaxExcess95",
+    "ClearHotPeak_x_CDD",
+    "OvercastHotPeak_x_DailyMaxExcess90",
+    "OvercastHotPeak_x_DailyMaxExcess95",
+    "OvercastHotPeak_x_CDD",
+    "Month_x_HotPeak",
+    "MonthSin_x_HotPeak",
+    "MonthCos_x_HotPeak",
+    "Month_x_OvercastPeakWindow14to18",
+    "MonthSin_x_OvercastPeakWindow14to18",
     "MonthCos_x_OvercastPeakWindow14to18",
     "Month_x_OvercastPeakHE16to18DailyMaxBelow75",
     "Month_x_OvercastPeakHE16to18DailyMax90to92_5",
@@ -67,60 +122,165 @@ BASE_FEATURES = [
     "Month_x_ClearPeakHE16to18DailyMax98to100",
     "Month_x_ClearPeakHE16to18DailyMax100to105",
     "Month_x_ClearPeakHE16to18DailyMax105Plus",
-    "Month_x_ClearHotPeak", "MonthSin_x_ClearHotPeak", "MonthCos_x_ClearHotPeak",
-    "Month_x_OvercastHotPeak", "MonthSin_x_OvercastHotPeak", "MonthCos_x_OvercastHotPeak",
-    "DailyMaxExcess90_x_HE14", "DailyMaxExcess90_x_HE15", "DailyMaxExcess90_x_HE16",
-    "DailyMaxExcess90_x_HE17", "DailyMaxExcess90_x_HE18", "DailyMaxExcess90_x_HE19",
+    "Month_x_ClearHotPeak",
+    "MonthSin_x_ClearHotPeak",
+    "MonthCos_x_ClearHotPeak",
+    "Month_x_OvercastHotPeak",
+    "MonthSin_x_OvercastHotPeak",
+    "MonthCos_x_OvercastHotPeak",
+    "DailyMaxExcess90_x_HE14",
+    "DailyMaxExcess90_x_HE15",
+    "DailyMaxExcess90_x_HE16",
+    "DailyMaxExcess90_x_HE17",
+    "DailyMaxExcess90_x_HE18",
+    "DailyMaxExcess90_x_HE19",
     "DailyMaxExcess90_x_HE20",
-    "ClearHotPeak_x_HE16", "ClearHotPeak_x_HE17", "ClearHotPeak_x_HE18",
-    "ClearHotPeak_x_HE19", "ClearHotPeak_x_HE20",
-    "WindDirection_Deg", "WindDirection_Available_Flag", "WindDir_Sin", "WindDir_Cos",
-    "Westerly_Wind_Component_Mph", "Westerly_Flow_Mph", "Westerly_Flow_Flag",
-    "WindRamp_1Hr_Mph", "WindRamp_3Hr_Mph", "WindRamp_Next1Hr_Mph", "WindRamp_Next3Hr_Mph",
-    "WesterlyFlow_Ramp_1Hr_Mph", "WesterlyFlow_Ramp_3Hr_Mph",
-    "WesterlyFlow_Next1Hr_Ramp_Mph", "WesterlyFlow_Next3Hr_Ramp_Mph",
-    "IsPostPeakEvening18to23", "Temperature_Drop_From_DailyMax_F",
-    "TempDrop_1Hr_F", "TempDrop_2Hr_F", "TempDrop_3Hr_F",
-    "TempDrop_Next1Hr_F", "TempDrop_Next2Hr_F", "TempDrop_Next3Hr_F",
-    "ClearHotEvening_Flag", "ClearVeryHotEvening_Flag",
-    "ClearHotEvening_x_TempDropFromDailyMax", "ClearHotEvening_x_ForecastDropNext3Hr",
-    "ClearHotEvening_x_WesterlyFlow", "ClearHotEvening_x_WesterlyFlowRamp",
-    "DeltaBreeze_Westerly_Flow_Flag", "DeltaBreeze_EveningWindRamp_Flag",
-    "DeltaBreeze_Cooling_Flag", "DeltaBreeze_Cooling_Signal",
-    "DeltaBreeze_CoolingNoDirection_Signal", "DeltaBreeze_ClearHotEvening_Signal",
-    "PriorDay_DailyMaxTemp", "PriorDay_DailyMinTemp",
-    "DailyMaxTemp_Ramp_1Day", "DailyMinTemp_Ramp_1Day",
-    "DailyMaxTemp_2DayMean", "DailyMaxTemp_3DayMean",
-    "DailyMinTemp_2DayMean", "DailyMinTemp_3DayMean", "DailyMeanTemp_3DayMean",
-    "ConsecutiveHotDays90", "ConsecutiveVeryHotDays95", "ConsecutiveExtremeHotDays100",
-    "HeatPersistenceStress90", "HeatPersistenceStress95", "DailyMax3DayMean_x_PeakHour",
-    "OvernightHeatStress", "OvernightHeatStress_x_PeakHour",
-    "Humidity_Norm", "CloudCover_Norm", "WindSpeed_Mph", "PrecipIn", "Is_Raining",
-    "Wind_x_Temp", "Rain_x_IsWeekend", "Hot_Humid_Stress",
+    "ClearHotPeak_x_HE16",
+    "ClearHotPeak_x_HE17",
+    "ClearHotPeak_x_HE18",
+    "ClearHotPeak_x_HE19",
+    "ClearHotPeak_x_HE20",
+    "WindDirection_Deg",
+    "WindDirection_Available_Flag",
+    "WindDir_Sin",
+    "WindDir_Cos",
+    "Westerly_Wind_Component_Mph",
+    "Westerly_Flow_Mph",
+    "Westerly_Flow_Flag",
+    "WindRamp_1Hr_Mph",
+    "WindRamp_3Hr_Mph",
+    "WindRamp_Next1Hr_Mph",
+    "WindRamp_Next3Hr_Mph",
+    "WesterlyFlow_Ramp_1Hr_Mph",
+    "WesterlyFlow_Ramp_3Hr_Mph",
+    "WesterlyFlow_Next1Hr_Ramp_Mph",
+    "WesterlyFlow_Next3Hr_Ramp_Mph",
+    "IsPostPeakEvening18to23",
+    "Temperature_Drop_From_DailyMax_F",
+    "TempDrop_1Hr_F",
+    "TempDrop_2Hr_F",
+    "TempDrop_3Hr_F",
+    "TempDrop_Next1Hr_F",
+    "TempDrop_Next2Hr_F",
+    "TempDrop_Next3Hr_F",
+    "ClearHotEvening_Flag",
+    "ClearVeryHotEvening_Flag",
+    "ClearHotEvening_x_TempDropFromDailyMax",
+    "ClearHotEvening_x_ForecastDropNext3Hr",
+    "ClearHotEvening_x_WesterlyFlow",
+    "ClearHotEvening_x_WesterlyFlowRamp",
+    "DeltaBreeze_Westerly_Flow_Flag",
+    "DeltaBreeze_EveningWindRamp_Flag",
+    "DeltaBreeze_Cooling_Flag",
+    "DeltaBreeze_Cooling_Signal",
+    "DeltaBreeze_CoolingNoDirection_Signal",
+    "DeltaBreeze_ClearHotEvening_Signal",
+    "PriorDay_DailyMaxTemp",
+    "PriorDay_DailyMinTemp",
+    "DailyMaxTemp_Ramp_1Day",
+    "DailyMinTemp_Ramp_1Day",
+    "DailyMaxTemp_2DayMean",
+    "DailyMaxTemp_3DayMean",
+    "DailyMinTemp_2DayMean",
+    "DailyMinTemp_3DayMean",
+    "DailyMeanTemp_3DayMean",
+    "ConsecutiveHotDays90",
+    "ConsecutiveVeryHotDays95",
+    "ConsecutiveExtremeHotDays100",
+    "HeatPersistenceStress90",
+    "HeatPersistenceStress95",
+    "DailyMax3DayMean_x_PeakHour",
+    "OvernightHeatStress",
+    "OvernightHeatStress_x_PeakHour",
+    "Humidity_Norm",
+    "CloudCover_Norm",
+    "WindSpeed_Mph",
+    "PrecipIn",
+    "Is_Raining",
+    "Wind_x_Temp",
+    "Rain_x_IsWeekend",
+    "Hot_Humid_Stress",
     # Time/calendar/load-shape
-    "Hour", "DOW", "Month", "DayOfYear", "WeekOfYear",
-    "HourSin", "HourCos", "DOWSin", "DOWCos", "MonthSin", "MonthCos", "DayOfYearSin", "DayOfYearCos",
-    "IsWeekend", "IsBusinessDay", "IsHoliday", "IsPreHoliday", "IsPostHoliday", "IsHolidayAdjacent",
-    "IsMonday", "IsFriday", "IsSummerSeason", "IsWinterSeason", "IsOffPeak", "IsOnPeak", "IsSuperPeak", "IsLikelySystemPeakHour",
+    "Hour",
+    "DOW",
+    "Month",
+    "DayOfYear",
+    "WeekOfYear",
+    "HourSin",
+    "HourCos",
+    "DOWSin",
+    "DOWCos",
+    "MonthSin",
+    "MonthCos",
+    "DayOfYearSin",
+    "DayOfYearCos",
+    "IsWeekend",
+    "IsBusinessDay",
+    "IsHoliday",
+    "IsPreHoliday",
+    "IsPostHoliday",
+    "IsHolidayAdjacent",
+    "IsMonday",
+    "IsFriday",
+    "IsSummerSeason",
+    "IsWinterSeason",
+    "IsOffPeak",
+    "IsOnPeak",
+    "IsSuperPeak",
+    "IsLikelySystemPeakHour",
     # Solar / BTM. Restore the broader family for the controlled replay; the heat
     # family remains pruned above.
-    "Nameplate_MW", "Capacity_Ratio_To_Current", "Impact_Cap_MW", "Solar_Irradiance",
-    "BTM_Solar_Proxy_MW", "Daily_BTM_Solar_Proxy_Total_MWh", "Daily_BTM_Solar_Proxy_Max_MW",
+    "Nameplate_MW",
+    "Capacity_Ratio_To_Current",
+    "Impact_Cap_MW",
+    "Solar_Irradiance",
+    "BTM_Solar_Proxy_MW",
+    "Daily_BTM_Solar_Proxy_Total_MWh",
+    "Daily_BTM_Solar_Proxy_Max_MW",
     "BTM_x_GHI",
-    "BTM_x_Cloud", "Solar_Midday_Flag", "Solar_Evening_Ramp_Flag", "BTM_Evening_Ramp_Impact",
-    "Solar_Hour_Shape", "Cloud_x_Solar_Hour", "Solar_Season_Factor", "ClearSky_Index",
-    "ClearSky_GHI_Proxy_Wm2", "BTM_ClearSky_Proxy_MW",
-    "BTM_Solar_Cloud_Adjusted_MW", "BTM_Solar_Loss_From_ClearSky_MW",
-    "Cloud_x_GHI", "Cloud_x_ClearSky_GHI", "Daily_BTM_ClearSky_Max_MW",
-    "Daily_BTM_Solar_Loss_MWh", "Daily_BTM_Solar_Loss_Max_MW", "Midday_Overcast_Solar_Loss_MW",
-    "BTM_Midday_Impact", "Solar_Ramp_Down_1hr", "Solar_Ramp_Down_2hr", "Solar_Ramp_Up_1hr",
+    "BTM_x_Cloud",
+    "Solar_Midday_Flag",
+    "Solar_Evening_Ramp_Flag",
+    "BTM_Evening_Ramp_Impact",
+    "Solar_Hour_Shape",
+    "Cloud_x_Solar_Hour",
+    "Solar_Season_Factor",
+    "ClearSky_Index",
+    "ClearSky_GHI_Proxy_Wm2",
+    "BTM_ClearSky_Proxy_MW",
+    "BTM_Solar_Cloud_Adjusted_MW",
+    "BTM_Solar_Loss_From_ClearSky_MW",
+    "Cloud_x_GHI",
+    "Cloud_x_ClearSky_GHI",
+    "Daily_BTM_ClearSky_Max_MW",
+    "Daily_BTM_Solar_Loss_MWh",
+    "Daily_BTM_Solar_Loss_Max_MW",
+    "Midday_Overcast_Solar_Loss_MW",
+    "BTM_Midday_Impact",
+    "Solar_Ramp_Down_1hr",
+    "Solar_Ramp_Down_2hr",
+    "Solar_Ramp_Up_1hr",
     "Humidity_x_Temp",
     # Load memory
-    "MWH_Lag1", "MWH_Lag2", "MWH_Lag3", "MWH_Lag24", "MWH_Lag48", "MWH_Lag72", "MWH_Lag168",
-    "MWH_Rolling3", "MWH_Rolling6", "MWH_Rolling12", "MWH_Rolling24", "MWH_Rolling48", "MWH_Rolling168",
-    "MWH_Rolling24Std", "MWH_SameHour7DayMean",
-    "Load_Decay_1Hr_MWH", "Load_Decay_2Hr_MWH",
-    "Lag1_Minus_SameHourYesterday_MWH", "Lag1_Minus_SameHour7DayMean_MWH",
+    "MWH_Lag1",
+    "MWH_Lag2",
+    "MWH_Lag3",
+    "MWH_Lag24",
+    "MWH_Lag48",
+    "MWH_Lag72",
+    "MWH_Lag168",
+    "MWH_Rolling3",
+    "MWH_Rolling6",
+    "MWH_Rolling12",
+    "MWH_Rolling24",
+    "MWH_Rolling48",
+    "MWH_Rolling168",
+    "MWH_Rolling24Std",
+    "MWH_SameHour7DayMean",
+    "Load_Decay_1Hr_MWH",
+    "Load_Decay_2Hr_MWH",
+    "Lag1_Minus_SameHourYesterday_MWH",
+    "Lag1_Minus_SameHour7DayMean_MWH",
     "Lag24_Minus_SameHour7DayMean_MWH",
     "PeakWindow_Lag1_Minus_SameHour7DayMean_MWH",
     "PeakWindow_Lag24_Minus_SameHour7DayMean_MWH",
@@ -137,9 +297,12 @@ BASE_FEATURES = [
     "ClearHotPeak16to18_Lag24_Minus_SameHour7DayMean_MWH",
     "OvercastCoolPeak16to18_Lag1_Minus_SameHour7DayMean_MWH",
     "OvercastCoolPeak16to18_Lag24_Minus_SameHour7DayMean_MWH",
-    "PostPeak_LoadDecay_1Hr_MWH", "PostPeak_LoadDecay_2Hr_MWH",
-    "PostPeak_LoadDecay_VsSameHourYesterday_MWH", "PostPeak_LoadDecay_VsSameHour7DayMean_MWH",
-    "ClearHotEvening_LoadDecay_Vs7Day_MWH", "DeltaBreeze_PostPeak_LoadDecay_Signal",
+    "PostPeak_LoadDecay_1Hr_MWH",
+    "PostPeak_LoadDecay_2Hr_MWH",
+    "PostPeak_LoadDecay_VsSameHourYesterday_MWH",
+    "PostPeak_LoadDecay_VsSameHour7DayMean_MWH",
+    "ClearHotEvening_LoadDecay_Vs7Day_MWH",
+    "DeltaBreeze_PostPeak_LoadDecay_Signal",
 ] + INTRADAY_LOAD_FEATURES
 
 DEFAULT_FEATURES = BASE_FEATURES
@@ -221,27 +384,45 @@ def build_sample_weights(df: pd.DataFrame, config: dict | None = None) -> np.nda
 
     if "Temperature_DailyMax" in df.columns:
         daily_max = pd.to_numeric(df["Temperature_DailyMax"], errors="coerce")
-        hour = pd.to_numeric(df.get("Hour", pd.Series(np.nan, index=df.index)), errors="coerce")
-        likely_peak = pd.to_numeric(
-            df.get("IsLikelySystemPeakHour", pd.Series(0, index=df.index)), errors="coerce"
-        ).fillna(0).astype(int).eq(1)
+        hour = pd.to_numeric(
+            df.get("Hour", pd.Series(np.nan, index=df.index)), errors="coerce"
+        )
+        likely_peak = (
+            pd.to_numeric(
+                df.get("IsLikelySystemPeakHour", pd.Series(0, index=df.index)),
+                errors="coerce",
+            )
+            .fillna(0)
+            .astype(int)
+            .eq(1)
+        )
         hot_min = float(sw_cfg.get("hot_day_min_f", 90.0))
         hot_hours = {int(h) for h in sw_cfg.get("hot_peak_hours", [16, 17, 18, 19, 20])}
-        peak_hours = {int(h) for h in sw_cfg.get("peak_window_hours", [14, 15, 16, 17, 18])}
+        peak_hours = {
+            int(h) for h in sw_cfg.get("peak_window_hours", [14, 15, 16, 17, 18])
+        }
 
-        scorecard_hot_peak = daily_max.ge(hot_min) & hour.astype("Int64").isin(hot_hours)
+        scorecard_hot_peak = daily_max.ge(hot_min) & hour.astype("Int64").isin(
+            hot_hours
+        )
         if not scorecard_hot_peak.any():
             scorecard_hot_peak = daily_max.ge(hot_min) & likely_peak
         business_hot_peak = scorecard_hot_peak & likely_peak
         non_business_hot_peak = scorecard_hot_peak & ~likely_peak
 
-        weights[business_hot_peak.to_numpy()] *= float(sw_cfg.get("hot_peak_weight", 1.7))
-        weights[non_business_hot_peak.to_numpy()] *= float(sw_cfg.get("non_business_hot_peak_weight", 1.0))
+        weights[business_hot_peak.to_numpy()] *= float(
+            sw_cfg.get("hot_peak_weight", 1.7)
+        )
+        weights[non_business_hot_peak.to_numpy()] *= float(
+            sw_cfg.get("non_business_hot_peak_weight", 1.0)
+        )
 
         peak_window_weight = float(sw_cfg.get("peak_window_weight", 1.0))
         if peak_window_weight > 1.0:
             peak_min_temp = float(sw_cfg.get("peak_window_min_maxtemp_f", -999.0))
-            peak_window = hour.astype("Int64").isin(peak_hours) & daily_max.ge(peak_min_temp)
+            peak_window = hour.astype("Int64").isin(peak_hours) & daily_max.ge(
+                peak_min_temp
+            )
             weights[peak_window.to_numpy()] *= peak_window_weight
 
     recency_end_weight = float(sw_cfg.get("recency_end_weight", 1.35))
@@ -270,12 +451,12 @@ def _base_xgb_params(config: dict | None) -> dict[str, Any]:
     }
 
 
-
 def _xgb_major_version() -> int:
     try:
         return int(str(getattr(xgb, "__version__", "0")).split(".")[0])
     except Exception:
         return 0
+
 
 def _gpu_requested(config: dict | None) -> bool:
     hw = _cfg(config, "hardware", default={}) or {}
@@ -283,7 +464,10 @@ def _gpu_requested(config: dict | None) -> bool:
     explicit = hw.get("use_gpu", None)
     if explicit is not None:
         return _as_bool(explicit, default=False)
-    return str(p.get("device", "")).lower() in {"cuda", "gpu"} or str(p.get("tree_method", "")).lower() == "gpu_hist"
+    return (
+        str(p.get("device", "")).lower() in {"cuda", "gpu"}
+        or str(p.get("tree_method", "")).lower() == "gpu_hist"
+    )
 
 
 def _xgb_attempts(config: dict | None) -> list[tuple[str, dict[str, Any]]]:
@@ -295,7 +479,9 @@ def _xgb_attempts(config: dict | None) -> list[tuple[str, dict[str, Any]]]:
     p = _cfg(config, "model", "xgb", default={}) or {}
     hw = _cfg(config, "hardware", default={}) or {}
     gpu_api = str(hw.get("xgb_gpu_api", p.get("gpu_api", "auto"))).lower()
-    fallback_to_cpu = _as_bool(hw.get("fallback_to_cpu", p.get("fallback_to_cpu", True)), default=True)
+    fallback_to_cpu = _as_bool(
+        hw.get("fallback_to_cpu", p.get("fallback_to_cpu", True)), default=True
+    )
     base = _base_xgb_params(config)
 
     cpu_params = dict(base)
@@ -332,7 +518,9 @@ def _xgb_attempts(config: dict | None) -> list[tuple[str, dict[str, Any]]]:
     return attempts
 
 
-def make_xgb_model(config: dict | None, params_override: dict[str, Any] | None = None) -> xgb.XGBRegressor:
+def make_xgb_model(
+    config: dict | None, params_override: dict[str, Any] | None = None
+) -> xgb.XGBRegressor:
     params = params_override or _xgb_attempts(config)[0][1]
     return xgb.XGBRegressor(**params)
 
@@ -344,7 +532,9 @@ def get_last_xgb_training_info() -> dict[str, Any]:
 def write_xgb_training_info(config: dict | None) -> None:
     """Optionally write the most recent XGB training backend info for review."""
     try:
-        out_dir = Path(_cfg(config, "project", "output_dir", default="forecast_outputs"))
+        out_dir = Path(
+            _cfg(config, "project", "output_dir", default="forecast_outputs")
+        )
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "xgb_training_backend.json").write_text(
             json.dumps(get_last_xgb_training_info(), indent=2, default=str),
@@ -354,7 +544,9 @@ def write_xgb_training_info(config: dict | None) -> None:
         pass
 
 
-def train_xgb(df: pd.DataFrame, features: list[str] | None = None, config: dict | None = None):
+def train_xgb(
+    df: pd.DataFrame, features: list[str] | None = None, config: dict | None = None
+):
     global _LAST_XGB_TRAINING_INFO
 
     cfg = config or df.attrs.get("config", {}) or {}
@@ -398,18 +590,27 @@ def train_xgb(df: pd.DataFrame, features: list[str] | None = None, config: dict 
             with warnings.catch_warnings(record=True) as caught_warnings:
                 warnings.simplefilter("always")
                 fit_kwargs: dict[str, Any] = {"sample_weight": sample_weight}
-                if X_valid is not None and y_valid is not None and len(X_valid) and len(y_valid):
+                if (
+                    X_valid is not None
+                    and y_valid is not None
+                    and len(X_valid)
+                    and len(y_valid)
+                ):
                     fit_kwargs["eval_set"] = [(X_valid, y_valid)]
                     try:
                         fit_sig_params = inspect.signature(model.fit).parameters
                     except Exception:
                         fit_sig_params = {}
                     if "sample_weight_eval_set" in fit_sig_params:
-                        fit_kwargs["sample_weight_eval_set"] = [valid_weight] if valid_weight is not None else None
+                        fit_kwargs["sample_weight_eval_set"] = (
+                            [valid_weight] if valid_weight is not None else None
+                        )
                     if "eval_metric" in fit_sig_params:
                         fit_kwargs["eval_metric"] = str(es_cfg.get("metric", "mae"))
                     if "early_stopping_rounds" in fit_sig_params:
-                        fit_kwargs["early_stopping_rounds"] = int(es_cfg.get("rounds", 75))
+                        fit_kwargs["early_stopping_rounds"] = int(
+                            es_cfg.get("rounds", 75)
+                        )
                     if "verbose" in fit_sig_params:
                         fit_kwargs["verbose"] = False
                 model.fit(X, y, **fit_kwargs)
@@ -421,7 +622,9 @@ def train_xgb(df: pd.DataFrame, features: list[str] | None = None, config: dict 
                 booster = model.get_booster()
                 booster_attrs = booster.attributes()
                 booster_config = json.loads(booster.save_config())
-                actual_device = (booster_config.get("learner", {}).get("generic_param", {}) or {}).get("device")
+                actual_device = (
+                    booster_config.get("learner", {}).get("generic_param", {}) or {}
+                ).get("device")
             except Exception:
                 booster_attrs = {}
                 booster_config = {}
@@ -434,9 +637,17 @@ def train_xgb(df: pd.DataFrame, features: list[str] | None = None, config: dict 
                     "not compiled with GPU",
                     "GPU is not enabled",
                 ]
-                if any(marker.lower() in warning_text.lower() for marker in gpu_warning_markers):
-                    raise RuntimeError("XGBoost GPU request fell back or failed according to warnings: " + warning_text[:1000])
-                if actual_device is not None and str(actual_device).lower().startswith("cpu"):
+                if any(
+                    marker.lower() in warning_text.lower()
+                    for marker in gpu_warning_markers
+                ):
+                    raise RuntimeError(
+                        "XGBoost GPU request fell back or failed according to warnings: "
+                        + warning_text[:1000]
+                    )
+                if actual_device is not None and str(actual_device).lower().startswith(
+                    "cpu"
+                ):
                     raise RuntimeError(
                         f"XGBoost accepted GPU parameters but trained on device={actual_device!r}; retrying fallback."
                     )
@@ -462,17 +673,21 @@ def train_xgb(df: pd.DataFrame, features: list[str] | None = None, config: dict 
                 "n_features": int(len(features)),
             }
             if actual_backend in {"cuda", "gpu_hist"}:
-                print(f"XGBoost GPU training succeeded using backend '{actual_backend}'.")
-            
+                print(
+                    f"XGBoost GPU training succeeded using backend '{actual_backend}'."
+                )
+
             # Verify device consistency to catch GPU/CPU mismatch issues early
             ensure_device_consistency(model, cfg)
-            
+
             return model, features
         except Exception as exc:
             msg = f"{backend_name}: {type(exc).__name__}: {exc}"
             errors.append(msg)
             if backend_name in {"cuda", "gpu_hist"}:
-                print(f"WARNING: XGBoost GPU backend '{backend_name}' failed. Details: {exc}")
+                print(
+                    f"WARNING: XGBoost GPU backend '{backend_name}' failed. Details: {exc}"
+                )
             else:
                 print(f"ERROR: XGBoost CPU training failed. Details: {exc}")
 

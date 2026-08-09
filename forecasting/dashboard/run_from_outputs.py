@@ -50,7 +50,10 @@ def _load_latest_sql_outputs(cfg: dict) -> dict:
             output_sql_dashboard_read_enabled,
         )
     except Exception as exc:
-        print(f"SQL output support is unavailable; using CSV outputs. Details: {exc}", flush=True)
+        print(
+            f"SQL output support is unavailable; using CSV outputs. Details: {exc}",
+            flush=True,
+        )
         return {}
 
     if not output_sql_dashboard_read_enabled(cfg):
@@ -59,39 +62,61 @@ def _load_latest_sql_outputs(cfg: dict) -> dict:
     try:
         bundle = load_latest_run_outputs(cfg)
     except Exception as exc:
-        print(f"Could not load latest SQL forecast outputs; using CSV outputs. Details: {exc}", flush=True)
+        print(
+            f"Could not load latest SQL forecast outputs; using CSV outputs. Details: {exc}",
+            flush=True,
+        )
         return {}
 
     forecast = bundle.get("forecast")
     backtest = bundle.get("backtest")
     if not isinstance(forecast, pd.DataFrame) or forecast.empty:
-        print("SQL output loading is enabled but no forecast rows were found; using CSV outputs.", flush=True)
+        print(
+            "SQL output loading is enabled but no forecast rows were found; using CSV outputs.",
+            flush=True,
+        )
         return {}
     if not isinstance(backtest, pd.DataFrame) or backtest.empty:
-        print("SQL output loading is enabled but no backtest rows were found; using CSV outputs.", flush=True)
+        print(
+            "SQL output loading is enabled but no backtest rows were found; using CSV outputs.",
+            flush=True,
+        )
         return {}
 
-    print(f"Loaded latest forecast outputs from SQL Server RunID: {bundle.get('run_id')}", flush=True)
+    print(
+        f"Loaded latest forecast outputs from SQL Server RunID: {bundle.get('run_id')}",
+        flush=True,
+    )
     return bundle
 
 
-def _load_previous_sql_weather_snapshot(cfg: dict, current_weather: pd.DataFrame) -> pd.DataFrame:
+def _load_previous_sql_weather_snapshot(
+    cfg: dict, current_weather: pd.DataFrame
+) -> pd.DataFrame:
     try:
         from forecasting.data.output_sql_store import (
             load_latest_archived_forecast_weather_snapshot,
             output_sql_enabled,
         )
     except Exception as exc:
-        print(f"SQL weather archive support is unavailable; using CSV weather archive. Details: {exc}", flush=True)
+        print(
+            f"SQL weather archive support is unavailable; using CSV weather archive. Details: {exc}",
+            flush=True,
+        )
         return pd.DataFrame()
 
     if not output_sql_enabled(cfg):
         return pd.DataFrame()
 
     try:
-        return load_latest_archived_forecast_weather_snapshot(cfg, current_df=current_weather)
+        return load_latest_archived_forecast_weather_snapshot(
+            cfg, current_df=current_weather
+        )
     except Exception as exc:
-        print(f"Could not load SQL weather archive snapshot; using CSV weather archive. Details: {exc}", flush=True)
+        print(
+            f"Could not load SQL weather archive snapshot; using CSV weather archive. Details: {exc}",
+            flush=True,
+        )
         return pd.DataFrame()
 
 
@@ -112,9 +137,13 @@ def main():
         bt = sql_bundle["backtest"]
     else:
         if not forecast_csv.exists():
-            raise SystemExit(f"Missing {forecast_csv}. Run the pipeline with --save-csv first.")
+            raise SystemExit(
+                f"Missing {forecast_csv}. Run the pipeline with --save-csv first."
+            )
         if not backtest_csv.exists():
-            raise SystemExit(f"Missing {backtest_csv}. Run the pipeline with --save-csv first.")
+            raise SystemExit(
+                f"Missing {backtest_csv}. Run the pipeline with --save-csv first."
+            )
         fut = pd.read_csv(forecast_csv, low_memory=False)
         bt = pd.read_csv(backtest_csv, low_memory=False)
 
@@ -143,15 +172,29 @@ def main():
     if not cache_dir.is_absolute():
         cache_dir = here.parent / cache_dir
     current_weather_for_snapshot = _forecast_weather_frame_from_output(fut)
-    previous_weather = _load_previous_sql_weather_snapshot(cfg, current_weather_for_snapshot)
+    previous_weather = _load_previous_sql_weather_snapshot(
+        cfg, current_weather_for_snapshot
+    )
     if previous_weather.empty:
         previous_weather = load_latest_distinct_snapshot(
             cache_dir / "forecast_weather_runs",
             current_df=current_weather_for_snapshot,
-            hash_columns=["DT", "TempF", "HumidityPct", "CloudCoverPct", "WindSpeedMph", "WindDirectionDeg", "PrecipIn", "GHI_Wm2", "IsDay"],
+            hash_columns=[
+                "DT",
+                "TempF",
+                "HumidityPct",
+                "CloudCoverPct",
+                "WindSpeedMph",
+                "WindDirectionDeg",
+                "PrecipIn",
+                "GHI_Wm2",
+                "IsDay",
+            ],
         )
     diagnostics = {}
-    current_mtime = max([p.stat().st_mtime for p in [forecast_csv, backtest_csv] if p.exists()] or [0.0])
+    current_mtime = max(
+        [p.stat().st_mtime for p in [forecast_csv, backtest_csv] if p.exists()] or [0.0]
+    )
     stale_scorecards = {}
     for name in [
         "forecast_weather_used",
@@ -168,7 +211,11 @@ def main():
             diagnostics[name] = pd.read_csv(path, low_memory=False)
             if name.endswith("scorecard") or name == "production_readiness_scorecard":
                 stale_scorecards[name] = path.stat().st_mtime < current_mtime
-    if sql_bundle and isinstance(sql_bundle.get("weather"), pd.DataFrame) and not sql_bundle["weather"].empty:
+    if (
+        sql_bundle
+        and isinstance(sql_bundle.get("weather"), pd.DataFrame)
+        and not sql_bundle["weather"].empty
+    ):
         diagnostics["forecast_weather_used"] = sql_bundle["weather"]
     if sql_bundle and isinstance(sql_bundle.get("diagnostics"), dict):
         for name, frame in sql_bundle["diagnostics"].items():
@@ -180,7 +227,9 @@ def main():
         historical_fit_df=pd.DataFrame(),  # optional for baseline UI; comparable/sensitivity need full history
         future_results={
             "display": fut,
-            "current_weather_snapshot": diagnostics.get("forecast_weather_used", pd.DataFrame()),
+            "current_weather_snapshot": diagnostics.get(
+                "forecast_weather_used", pd.DataFrame()
+            ),
             "previous_forecast_snapshot": previous_forecast,
             "previous_weather_snapshot": previous_weather,
         },

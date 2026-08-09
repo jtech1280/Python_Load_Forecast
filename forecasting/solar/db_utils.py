@@ -65,7 +65,9 @@ def connect(
     return engine
 
 
-def read_sql(engine: Engine, sql: str, params: Optional[Iterable] = None) -> pd.DataFrame:
+def read_sql(
+    engine: Engine, sql: str, params: Optional[Iterable] = None
+) -> pd.DataFrame:
     """
     Read a SQL query into pandas using a SQLAlchemy engine.
     """

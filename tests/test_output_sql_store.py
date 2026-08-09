@@ -11,9 +11,13 @@ with patch.object(platform, "machine", return_value="AMD64"):
 class OutputSqlStoreTests(unittest.TestCase):
     def test_output_sql_is_enabled_by_default(self):
         self.assertTrue(output_sql_store.output_sql_enabled({}))
-        self.assertEqual(output_sql_store.output_sql_config({})["dsn_name"], "Forecast_DB")
         self.assertEqual(
-            output_sql_store.output_sql_config({})["replay_tables"]["rolling_origin_replay_results"],
+            output_sql_store.output_sql_config({})["dsn_name"], "Forecast_DB"
+        )
+        self.assertEqual(
+            output_sql_store.output_sql_config({})["replay_tables"][
+                "rolling_origin_replay_results"
+            ],
             "LoadForecastReplayResult",
         )
         self.assertEqual(
@@ -32,7 +36,9 @@ class OutputSqlStoreTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(cfg["replay_tables"]["rolling_origin_replay_results"], "CustomReplayResult")
+        self.assertEqual(
+            cfg["replay_tables"]["rolling_origin_replay_results"], "CustomReplayResult"
+        )
         self.assertEqual(
             cfg["replay_tables"]["production_readiness_scorecard"],
             "LoadForecastProductionReadinessScorecard",
@@ -50,7 +56,9 @@ class OutputSqlStoreTests(unittest.TestCase):
             )
 
     def test_prepare_frame_adds_run_metadata_and_formats_datetime_offset(self):
-        inserted_at = pd.Timestamp("2026-06-23T12:00:00Z").tz_localize(None).to_pydatetime()
+        inserted_at = (
+            pd.Timestamp("2026-06-23T12:00:00Z").tz_localize(None).to_pydatetime()
+        )
         df = pd.DataFrame(
             {
                 "DT": ["2026-06-23 05:00:00-07:00"],
@@ -80,15 +88,23 @@ class OutputSqlStoreTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(output_sql_store._infer_sql_type("DT", df["DT"]), "DATETIMEOFFSET(7)")
+        self.assertEqual(
+            output_sql_store._infer_sql_type("DT", df["DT"]), "DATETIMEOFFSET(7)"
+        )
         self.assertEqual(
             output_sql_store._infer_sql_type("Replay_Origin_DT", df["DT"]),
             "DATETIMEOFFSET(7)",
         )
-        self.assertEqual(output_sql_store._infer_sql_type("Forecast", df["Forecast"]), "FLOAT")
-        self.assertEqual(output_sql_store._infer_sql_type("IsDay", df["IsDay"]), "BIGINT")
         self.assertEqual(
-            output_sql_store._infer_sql_type("Production_Risk_Code", df["Production_Risk_Code"]),
+            output_sql_store._infer_sql_type("Forecast", df["Forecast"]), "FLOAT"
+        )
+        self.assertEqual(
+            output_sql_store._infer_sql_type("IsDay", df["IsDay"]), "BIGINT"
+        )
+        self.assertEqual(
+            output_sql_store._infer_sql_type(
+                "Production_Risk_Code", df["Production_Risk_Code"]
+            ),
             "NVARCHAR(MAX)",
         )
 
@@ -136,10 +152,18 @@ class OutputSqlStoreTests(unittest.TestCase):
                 self.calls.append((str(statement), params))
 
         conn = FakeConn()
-        df = pd.DataFrame({"DT": ["2026-06-23T05:00:00-07:00"], "Value": [float("nan")]})
+        df = pd.DataFrame(
+            {"DT": ["2026-06-23T05:00:00-07:00"], "Value": [float("nan")]}
+        )
 
-        with patch.object(pd.DataFrame, "to_sql", side_effect=AssertionError("to_sql should not be used")):
-            count = output_sql_store._append_frame(conn, "Forecasting", "AnyTable", df, chunksize=1)
+        with patch.object(
+            pd.DataFrame,
+            "to_sql",
+            side_effect=AssertionError("to_sql should not be used"),
+        ):
+            count = output_sql_store._append_frame(
+                conn, "Forecasting", "AnyTable", df, chunksize=1
+            )
 
         self.assertEqual(count, 1)
         self.assertEqual(len(conn.calls), 1)
@@ -147,7 +171,9 @@ class OutputSqlStoreTests(unittest.TestCase):
         self.assertIsNone(conn.calls[0][1][0]["p1"])
 
     def test_forecast_weather_archive_frame_adds_snapshot_metadata(self):
-        archived_at = pd.Timestamp("2026-06-23T12:00:00Z").tz_localize(None).to_pydatetime()
+        archived_at = (
+            pd.Timestamp("2026-06-23T12:00:00Z").tz_localize(None).to_pydatetime()
+        )
         df = pd.DataFrame(
             {
                 "DT": ["2026-06-23 05:00:00-07:00"],

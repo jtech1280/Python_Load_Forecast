@@ -6,7 +6,7 @@ performance degradation from GPU↔CPU data transfers.
 Usage:
     import xgboost as xgb
     from forecasting.utils.device_utils import prepare_for_prediction
-    
+
     # Automatically handles device consistency
     predictions = model.predict(prepare_for_prediction(X, model))
 """
@@ -65,7 +65,9 @@ def _move_to_device(data: Any, target_device: str) -> Any:
         # Ensure data is on CPU (numpy/pandas are already CPU)
         if isinstance(data, (pd.DataFrame, pd.Series)):
             return data
-        if hasattr(data, "get") and data.__class__.__module__.startswith("cupy"):  # CuPy array
+        if hasattr(data, "get") and data.__class__.__module__.startswith(
+            "cupy"
+        ):  # CuPy array
             try:
                 return np.asarray(data.get())
             except Exception:

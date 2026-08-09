@@ -14,35 +14,89 @@ except Exception:  # pragma: no cover - exercised only when dependency is absent
 
 from forecasting.features.time_features import roseville_holidays
 
-
 DEFAULT_PROPHET_REGRESSORS = [
     # Weather response known for the forecast horizon. Keep one representative per
     # highly collinear heat cluster so Prophet's standardized regressors stay stable.
     "Temperature_DailyMax",
-    "CDD", "HDD", "Cooling_Stress",
-    "Extreme_Heat_85", "Extreme_Heat_95", "Extreme_Heat_100",
-    "DailyMaxTemp_Ramp_1Day", "DailyMinTemp_Ramp_1Day",
-    "ConsecutiveVeryHotDays95", "ConsecutiveExtremeHotDays100",
+    "CDD",
+    "HDD",
+    "Cooling_Stress",
+    "Extreme_Heat_85",
+    "Extreme_Heat_95",
+    "Extreme_Heat_100",
+    "DailyMaxTemp_Ramp_1Day",
+    "DailyMinTemp_Ramp_1Day",
+    "ConsecutiveVeryHotDays95",
+    "ConsecutiveExtremeHotDays100",
     "OvernightHeatStress",
-    "Humidity_Norm", "CloudCover_Norm", "WindSpeed_Mph", "PrecipIn", "Is_Raining",
-    "Wind_x_Temp", "Rain_x_IsWeekend", "Hot_Humid_Stress",
+    "Humidity_Norm",
+    "CloudCover_Norm",
+    "WindSpeed_Mph",
+    "PrecipIn",
+    "Is_Raining",
+    "Wind_x_Temp",
+    "Rain_x_IsWeekend",
+    "Hot_Humid_Stress",
     # Time/calendar/load-shape fields known in advance
-    "Hour", "DOW", "Month", "DayOfYear", "WeekOfYear",
-    "HourSin", "HourCos", "DOWSin", "DOWCos", "MonthSin", "MonthCos", "DayOfYearSin", "DayOfYearCos",
-    "IsWeekend", "IsBusinessDay", "IsHoliday", "IsPreHoliday", "IsPostHoliday", "IsHolidayAdjacent",
-    "IsMonday", "IsFriday", "IsSummerSeason", "IsWinterSeason", "IsOffPeak", "IsOnPeak", "IsSuperPeak", "IsLikelySystemPeakHour",
+    "Hour",
+    "DOW",
+    "Month",
+    "DayOfYear",
+    "WeekOfYear",
+    "HourSin",
+    "HourCos",
+    "DOWSin",
+    "DOWCos",
+    "MonthSin",
+    "MonthCos",
+    "DayOfYearSin",
+    "DayOfYearCos",
+    "IsWeekend",
+    "IsBusinessDay",
+    "IsHoliday",
+    "IsPreHoliday",
+    "IsPostHoliday",
+    "IsHolidayAdjacent",
+    "IsMonday",
+    "IsFriday",
+    "IsSummerSeason",
+    "IsWinterSeason",
+    "IsOffPeak",
+    "IsOnPeak",
+    "IsSuperPeak",
+    "IsLikelySystemPeakHour",
     # Solar / BTM fields known or proxied for the forecast horizon. Restore the broader
     # family for the controlled replay; the heat family remains pruned above.
-    "Nameplate_MW", "Capacity_Ratio_To_Current", "Impact_Cap_MW", "Solar_Irradiance",
-    "BTM_Solar_Proxy_MW", "Daily_BTM_Solar_Proxy_Total_MWh", "Daily_BTM_Solar_Proxy_Max_MW",
+    "Nameplate_MW",
+    "Capacity_Ratio_To_Current",
+    "Impact_Cap_MW",
+    "Solar_Irradiance",
+    "BTM_Solar_Proxy_MW",
+    "Daily_BTM_Solar_Proxy_Total_MWh",
+    "Daily_BTM_Solar_Proxy_Max_MW",
     "BTM_x_GHI",
-    "BTM_x_Cloud", "Solar_Midday_Flag", "Solar_Evening_Ramp_Flag", "BTM_Evening_Ramp_Impact",
-    "Solar_Hour_Shape", "Cloud_x_Solar_Hour", "Solar_Season_Factor", "ClearSky_Index",
-    "ClearSky_GHI_Proxy_Wm2", "BTM_ClearSky_Proxy_MW",
-    "BTM_Solar_Cloud_Adjusted_MW", "BTM_Solar_Loss_From_ClearSky_MW",
-    "Cloud_x_GHI", "Cloud_x_ClearSky_GHI", "Daily_BTM_ClearSky_Max_MW",
-    "Daily_BTM_Solar_Loss_MWh", "Daily_BTM_Solar_Loss_Max_MW", "Midday_Overcast_Solar_Loss_MW",
-    "BTM_Midday_Impact", "Solar_Ramp_Down_1hr", "Solar_Ramp_Down_2hr", "Solar_Ramp_Up_1hr",
+    "BTM_x_Cloud",
+    "Solar_Midday_Flag",
+    "Solar_Evening_Ramp_Flag",
+    "BTM_Evening_Ramp_Impact",
+    "Solar_Hour_Shape",
+    "Cloud_x_Solar_Hour",
+    "Solar_Season_Factor",
+    "ClearSky_Index",
+    "ClearSky_GHI_Proxy_Wm2",
+    "BTM_ClearSky_Proxy_MW",
+    "BTM_Solar_Cloud_Adjusted_MW",
+    "BTM_Solar_Loss_From_ClearSky_MW",
+    "Cloud_x_GHI",
+    "Cloud_x_ClearSky_GHI",
+    "Daily_BTM_ClearSky_Max_MW",
+    "Daily_BTM_Solar_Loss_MWh",
+    "Daily_BTM_Solar_Loss_Max_MW",
+    "Midday_Overcast_Solar_Loss_MW",
+    "BTM_Midday_Impact",
+    "Solar_Ramp_Down_1hr",
+    "Solar_Ramp_Down_2hr",
+    "Solar_Ramp_Up_1hr",
     "Humidity_x_Temp",
 ]
 
@@ -102,13 +156,17 @@ def _available_regressors(df: pd.DataFrame, regressors: list[str]) -> list[str]:
     return [c for c in regressors if c in df.columns]
 
 
-def _clean_regressor_frame(df: pd.DataFrame, regressors: list[str], fill_values: dict[str, float] | None = None) -> tuple[pd.DataFrame, dict[str, float]]:
+def _clean_regressor_frame(
+    df: pd.DataFrame, regressors: list[str], fill_values: dict[str, float] | None = None
+) -> tuple[pd.DataFrame, dict[str, float]]:
     fills: dict[str, float] = {} if fill_values is None else dict(fill_values)
     columns: dict[str, pd.Series] = {}
 
     for col in regressors:
         if col in df.columns:
-            s = pd.to_numeric(df[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+            s = pd.to_numeric(df[col], errors="coerce").replace(
+                [np.inf, -np.inf], np.nan
+            )
         else:
             s = pd.Series(np.nan, index=df.index, dtype=float)
 
@@ -117,7 +175,11 @@ def _clean_regressor_frame(df: pd.DataFrame, regressors: list[str], fill_values:
             fills[col] = med if np.isfinite(med) else 0.0
         columns[col] = s.fillna(fills[col]).astype(float)
 
-    out = pd.DataFrame(columns, index=df.index) if columns else pd.DataFrame(index=df.index)
+    out = (
+        pd.DataFrame(columns, index=df.index)
+        if columns
+        else pd.DataFrame(index=df.index)
+    )
     return out, fills
 
 
@@ -136,7 +198,12 @@ def _make_roseville_holiday_df(start_year: int, end_year: int) -> pd.DataFrame:
     rows = []
     for year in range(int(start_year), int(end_year) + 1):
         for d in sorted(roseville_holidays(year)):
-            rows.append({"holiday": "Roseville_Utility_Holiday", "ds": pd.Timestamp(d).normalize()})
+            rows.append(
+                {
+                    "holiday": "Roseville_Utility_Holiday",
+                    "ds": pd.Timestamp(d).normalize(),
+                }
+            )
     return pd.DataFrame(rows).drop_duplicates().reset_index(drop=True)
 
 
@@ -151,7 +218,11 @@ def make_prophet_model(config: dict | None, train_df: pd.DataFrame):
     dt = _to_prophet_naive_datetime(train_df["DT"])
     start_year = int(dt.min().year) - 1
     end_year = int(dt.max().year) + int(p.get("holiday_years_forward", 3))
-    holidays = _make_roseville_holiday_df(start_year, end_year) if bool(p.get("add_roseville_holidays", True)) else None
+    holidays = (
+        _make_roseville_holiday_df(start_year, end_year)
+        if bool(p.get("add_roseville_holidays", True))
+        else None
+    )
 
     model = Prophet(
         growth=str(p.get("growth", "linear")),
@@ -198,16 +269,22 @@ def train_prophet(
     work["DT"] = _to_prophet_naive_datetime(work["DT"])
     work["MWH"] = pd.to_numeric(work["MWH"], errors="coerce")
     work = work.dropna(subset=["DT", "MWH"])
-    min_train_rows = int(_cfg(config, "model", "prophet", "min_train_rows", default=24 * 60))
+    min_train_rows = int(
+        _cfg(config, "model", "prophet", "min_train_rows", default=24 * 60)
+    )
     if len(work) < min_train_rows:
         return None
 
     source_rows = len(work)
-    max_train_rows = int(_cfg(config, "model", "prophet", "max_train_rows", default=0) or 0)
+    max_train_rows = int(
+        _cfg(config, "model", "prophet", "max_train_rows", default=0) or 0
+    )
     if max_train_rows > 0 and len(work) > max(max_train_rows, min_train_rows):
         work = work.tail(max(max_train_rows, min_train_rows)).reset_index(drop=True)
 
-    reg_candidates = _available_regressors(work, regressors or DEFAULT_PROPHET_REGRESSORS)
+    reg_candidates = _available_regressors(
+        work, regressors or DEFAULT_PROPHET_REGRESSORS
+    )
     reg_candidates = _remove_constant_regressors(work, reg_candidates)
     reg_frame, fill_values = _clean_regressor_frame(work, reg_candidates)
 
@@ -269,7 +346,11 @@ def train_prophet(
     )
 
 
-def predict_prophet(model_or_fit: Any | ProphetFitResult | None, df: pd.DataFrame, regressors: list[str] | None = None) -> pd.DataFrame:
+def predict_prophet(
+    model_or_fit: Any | ProphetFitResult | None,
+    df: pd.DataFrame,
+    regressors: list[str] | None = None,
+) -> pd.DataFrame:
     """Return Prophet yhat/yhat_lower/yhat_upper aligned to df rows."""
     if model_or_fit is None:
         return pd.DataFrame(index=df.index)
@@ -283,7 +364,9 @@ def predict_prophet(model_or_fit: Any | ProphetFitResult | None, df: pd.DataFram
         reg_list = list(regressors or getattr(model, "_forecasting_regressors", []))
         fill_values = dict(getattr(model, "_forecasting_regressor_fill_values", {}))
 
-    future_base = pd.DataFrame({"ds": _to_prophet_naive_datetime(df["DT"])}, index=df.index)
+    future_base = pd.DataFrame(
+        {"ds": _to_prophet_naive_datetime(df["DT"])}, index=df.index
+    )
     reg_frame, _ = _clean_regressor_frame(df, reg_list, fill_values=fill_values)
     future = pd.concat([future_base, reg_frame], axis=1).copy()
 
@@ -308,9 +391,19 @@ def predict_prophet(model_or_fit: Any | ProphetFitResult | None, df: pd.DataFram
         return out
 
     valid_index = future.index[valid_mask]
-    out.loc[valid_index, "Prophet_Pred_MWH"] = pd.to_numeric(fcst.get("yhat"), errors="coerce").clip(lower=0.0).to_numpy()
+    out.loc[valid_index, "Prophet_Pred_MWH"] = (
+        pd.to_numeric(fcst.get("yhat"), errors="coerce").clip(lower=0.0).to_numpy()
+    )
     if "yhat_lower" in fcst.columns:
-        out.loc[valid_index, "Prophet_Lower_MWH"] = pd.to_numeric(fcst["yhat_lower"], errors="coerce").clip(lower=0.0).to_numpy()
+        out.loc[valid_index, "Prophet_Lower_MWH"] = (
+            pd.to_numeric(fcst["yhat_lower"], errors="coerce")
+            .clip(lower=0.0)
+            .to_numpy()
+        )
     if "yhat_upper" in fcst.columns:
-        out.loc[valid_index, "Prophet_Upper_MWH"] = pd.to_numeric(fcst["yhat_upper"], errors="coerce").clip(lower=0.0).to_numpy()
+        out.loc[valid_index, "Prophet_Upper_MWH"] = (
+            pd.to_numeric(fcst["yhat_upper"], errors="coerce")
+            .clip(lower=0.0)
+            .to_numpy()
+        )
     return out

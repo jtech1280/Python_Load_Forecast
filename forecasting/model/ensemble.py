@@ -20,7 +20,9 @@ def _pad_to_length(arr: np.ndarray, length: int) -> np.ndarray:
     return out
 
 
-def blend_predictions(xgb_pred, lgb_pred, weights: dict[str, float], prophet_pred=None, catboost_pred=None) -> np.ndarray:
+def blend_predictions(
+    xgb_pred, lgb_pred, weights: dict[str, float], prophet_pred=None, catboost_pred=None
+) -> np.ndarray:
     """Blend available model predictions using normalized configured weights.
 
     Supports the original XGB+LGB ensemble plus an optional Prophet component. Missing or NaN-only

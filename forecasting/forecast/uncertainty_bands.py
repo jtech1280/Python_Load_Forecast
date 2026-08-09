@@ -8,7 +8,12 @@ def _local_datetime_series(values) -> pd.Series:
     try:
         return pd.to_datetime(values, errors="coerce")
     except ValueError:
-        cleaned = pd.Series(values).astype(str).str.strip().str.replace(r"(?:[+-]\d{2}:?\d{2}|Z)$", "", regex=True)
+        cleaned = (
+            pd.Series(values)
+            .astype(str)
+            .str.strip()
+            .str.replace(r"(?:[+-]\d{2}:?\d{2}|Z)$", "", regex=True)
+        )
         return pd.to_datetime(cleaned, errors="coerce")
 
 
@@ -29,10 +34,21 @@ def _bucket_cloud(values: pd.Series) -> pd.Series:
     if cloud.dropna().empty:
         return pd.Series(np.nan, index=values.index, dtype="object")
     if cloud.max(skipna=True) <= 1.5:
-        bins = [-0.001, .20, .40, .60, .80, 1.001]
+        bins = [-0.001, 0.20, 0.40, 0.60, 0.80, 1.001]
     else:
         bins = [-0.001, 20, 40, 60, 80, 100.001]
-    return pd.cut(cloud, bins=bins, labels=["Clear/Low", "Some Clouds", "Partly Cloudy", "Mostly Cloudy", "Overcast"], include_lowest=True).astype("object")
+    return pd.cut(
+        cloud,
+        bins=bins,
+        labels=[
+            "Clear/Low",
+            "Some Clouds",
+            "Partly Cloudy",
+            "Mostly Cloudy",
+            "Overcast",
+        ],
+        include_lowest=True,
+    ).astype("object")
 
 
 def _bucket_loss(values: pd.Series) -> pd.Series:
@@ -75,20 +91,28 @@ def _prep(df: pd.DataFrame) -> pd.DataFrame:
     if "CloudCoverBucket" not in out.columns and "CloudCover_Norm" in out.columns:
         out["CloudCoverBucket"] = _bucket_cloud(out["CloudCover_Norm"])
     if "SolarLossBucket" not in out.columns:
-        loss_col = "BTM_Solar_Loss_From_ClearSky_MW" if "BTM_Solar_Loss_From_ClearSky_MW" in out.columns else "Midday_Overcast_Solar_Loss_MW"
+        loss_col = (
+            "BTM_Solar_Loss_From_ClearSky_MW"
+            if "BTM_Solar_Loss_From_ClearSky_MW" in out.columns
+            else "Midday_Overcast_Solar_Loss_MW"
+        )
         if loss_col in out.columns:
             out["SolarLossBucket"] = _bucket_loss(out[loss_col])
     return out
 
 
-def build_residual_band_lookup(backtest_df: pd.DataFrame, shrink_floor_mwh: float = 4.0) -> dict:
+def build_residual_band_lookup(
+    backtest_df: pd.DataFrame, shrink_floor_mwh: float = 4.0
+) -> dict:
     if backtest_df is None or backtest_df.empty:
         return {}
     work = _prep(backtest_df)
     if "Residual_MWH" in work.columns:
         residual = pd.to_numeric(work["Residual_MWH"], errors="coerce")
     else:
-        residual = pd.to_numeric(work["Actual_MWH"], errors="coerce") - pd.to_numeric(work["Raw_Forecast_MWH"], errors="coerce")
+        residual = pd.to_numeric(work["Actual_MWH"], errors="coerce") - pd.to_numeric(
+            work["Raw_Forecast_MWH"], errors="coerce"
+        )
     work["AbsResidual"] = residual.abs()
     work = work.dropna(subset=["AbsResidual"])
     if work.empty:
@@ -105,32 +129,56 @@ def build_residual_band_lookup(backtest_df: pd.DataFrame, shrink_floor_mwh: floa
     ]:
         if not all(k in work.columns for k in keys):
             continue
-        grp = work.groupby(keys, dropna=False)["AbsResidual"].agg(
-            p50=lambda s: float(np.nanquantile(s, 0.50)),
-            p80=lambda s: float(np.nanquantile(s, 0.80)),
-            p90=lambda s: float(np.nanquantile(s, 0.90)),
-            mean="mean",
-            count="count",
-        ).reset_index()
+        grp = (
+            work.groupby(keys, dropna=False)["AbsResidual"]
+            .agg(
+                p50=lambda s: float(np.nanquantile(s, 0.50)),
+                p80=lambda s: float(np.nanquantile(s, 0.80)),
+                p90=lambda s: float(np.nanquantile(s, 0.90)),
+                mean="mean",
+                count="count",
+            )
+            .reset_index()
+        )
         # V12.7 uses conditional residual bands as the primary source instead of forcing a broad
         # percentage band to dominate every hour.  Higher-risk buckets can still be widened below.
         grp["band_mwh"] = np.maximum(float(shrink_floor_mwh), grp["p80"].astype(float))
-        levels.append({"keys": keys, "lookup": grp[keys + ["band_mwh", "count", "p80", "p90", "mean"]]})
+        levels.append(
+            {
+                "keys": keys,
+                "lookup": grp[keys + ["band_mwh", "count", "p80", "p90", "mean"]],
+            }
+        )
 
     return {
         "ordered_levels": levels,
-        "global_band_mwh": max(float(shrink_floor_mwh), float(work["AbsResidual"].quantile(0.80))),
-        "global_p90_band_mwh": max(float(shrink_floor_mwh), float(work["AbsResidual"].quantile(0.90))),
+        "global_band_mwh": max(
+            float(shrink_floor_mwh), float(work["AbsResidual"].quantile(0.80))
+        ),
+        "global_p90_band_mwh": max(
+            float(shrink_floor_mwh), float(work["AbsResidual"].quantile(0.90))
+        ),
     }
 
 
 def _band_risk_multiplier(out: pd.DataFrame) -> pd.Series:
-    hour = pd.to_numeric(out.get("Hour", pd.Series(np.nan, index=out.index)), errors="coerce").fillna(-1).astype(int)
+    hour = (
+        pd.to_numeric(
+            out.get("Hour", pd.Series(np.nan, index=out.index)), errors="coerce"
+        )
+        .fillna(-1)
+        .astype(int)
+    )
     hg = out.get("HourGroup", pd.Series("", index=out.index)).astype(str)
-    temp_max = pd.to_numeric(out.get("Temperature_DailyMax", pd.Series(np.nan, index=out.index)), errors="coerce")
+    temp_max = pd.to_numeric(
+        out.get("Temperature_DailyMax", pd.Series(np.nan, index=out.index)),
+        errors="coerce",
+    )
     cloud = out.get("CloudCoverBucket", pd.Series("", index=out.index)).astype(str)
     loss = out.get("SolarLossBucket", pd.Series("", index=out.index)).astype(str)
-    event_cls = out.get("CloudSolarEventClass", pd.Series("", index=out.index)).astype(str)
+    event_cls = out.get("CloudSolarEventClass", pd.Series("", index=out.index)).astype(
+        str
+    )
     mult = pd.Series(1.0, index=out.index, dtype=float)
     mult.loc[hg.isin(["Overnight", "Morning"])] *= 0.78
 
@@ -144,8 +192,18 @@ def _band_risk_multiplier(out: pd.DataFrame) -> pd.Series:
     mult.loc[hour.eq(17)] *= 1.45
     mult.loc[hour.eq(18)] *= 1.25
     mult.loc[hg.eq("Peak")] *= 1.12
-    mult.loc[cloud.isin(["Mostly Cloudy", "Overcast"]) & loss.isin(["High", "Extreme"])] *= 1.35
-    mult.loc[event_cls.isin(["weekday_core_highimpact_solar_loss", "weekday_core_solar_loss", "weekday_core_hour14_solar_loss"])] *= 1.20
+    mult.loc[
+        cloud.isin(["Mostly Cloudy", "Overcast"]) & loss.isin(["High", "Extreme"])
+    ] *= 1.35
+    mult.loc[
+        event_cls.isin(
+            [
+                "weekday_core_highimpact_solar_loss",
+                "weekday_core_solar_loss",
+                "weekday_core_hour14_solar_loss",
+            ]
+        )
+    ] *= 1.20
     mult.loc[hour.between(16, 18) & cloud.isin(["Mostly Cloudy", "Overcast"])] *= 1.15
 
     # The 2026-06-12 diagnostic run exposed severe undercoverage in the hottest
@@ -170,9 +228,14 @@ def _hot_bucket_band_floor(out: pd.DataFrame, cfg: dict | None) -> pd.Series:
     if not bool(cfg.get("enabled", False)):
         return floor
 
-    hour = pd.to_numeric(out.get("Hour", pd.Series(np.nan, index=out.index)), errors="coerce")
+    hour = pd.to_numeric(
+        out.get("Hour", pd.Series(np.nan, index=out.index)), errors="coerce"
+    )
     hour_group = out.get("HourGroup", pd.Series("", index=out.index)).astype(str)
-    temp_max = pd.to_numeric(out.get("Temperature_DailyMax", pd.Series(np.nan, index=out.index)), errors="coerce")
+    temp_max = pd.to_numeric(
+        out.get("Temperature_DailyMax", pd.Series(np.nan, index=out.index)),
+        errors="coerce",
+    )
 
     for rule in cfg.get("rules", []) or []:
         if not isinstance(rule, dict):
@@ -223,12 +286,19 @@ def _append_reason(reason: pd.Series, mask: pd.Series, token: str) -> pd.Series:
         return reason
     empty = mask & reason.eq("none")
     reason.loc[empty] = token
-    add = mask & ~reason.eq(token) & ~reason.eq("none") & ~reason.astype(str).str.contains(token, regex=False, na=False)
+    add = (
+        mask
+        & ~reason.eq(token)
+        & ~reason.eq("none")
+        & ~reason.astype(str).str.contains(token, regex=False, na=False)
+    )
     reason.loc[add] = reason.loc[add].astype(str) + "+" + token
     return reason
 
 
-def _weather_input_risk_multiplier(out: pd.DataFrame, cfg: dict | None) -> tuple[pd.Series, pd.Series]:
+def _weather_input_risk_multiplier(
+    out: pd.DataFrame, cfg: dict | None
+) -> tuple[pd.Series, pd.Series]:
     cfg = cfg or {}
     mult = pd.Series(1.0, index=out.index, dtype=float)
     reason = pd.Series("none", index=out.index, dtype="object")
@@ -251,7 +321,9 @@ def _weather_input_risk_multiplier(out: pd.DataFrame, cfg: dict | None) -> tuple
     mult.loc[d1] *= float(cfg.get("day1_multiplier", 1.20))
     mult.loc[d23] *= float(cfg.get("days2to3_multiplier", 1.40))
     mult.loc[d47] *= float(cfg.get("days4to7_multiplier", 1.60))
-    mult.loc[d8p] *= float(cfg.get("days8to16_multiplier", cfg.get("days4to7_multiplier", 1.60)))
+    mult.loc[d8p] *= float(
+        cfg.get("days8to16_multiplier", cfg.get("days4to7_multiplier", 1.60))
+    )
     reason.loc[d1] = "weather_day1"
     reason.loc[d23] = "weather_days2to3"
     reason.loc[d47] = "weather_days4to7"
@@ -261,20 +333,40 @@ def _weather_input_risk_multiplier(out: pd.DataFrame, cfg: dict | None) -> tuple
     risk_class.loc[d47] = "days4to7_weather_error"
     risk_class.loc[d8p] = "days8to16_weather_error"
 
-    hour = pd.to_numeric(out.get("Hour", pd.Series(np.nan, index=out.index)), errors="coerce").fillna(-1).astype(int)
-    temp_max = pd.to_numeric(out.get("Temperature_DailyMax", pd.Series(np.nan, index=out.index)), errors="coerce")
+    hour = (
+        pd.to_numeric(
+            out.get("Hour", pd.Series(np.nan, index=out.index)), errors="coerce"
+        )
+        .fillna(-1)
+        .astype(int)
+    )
+    temp_max = pd.to_numeric(
+        out.get("Temperature_DailyMax", pd.Series(np.nan, index=out.index)),
+        errors="coerce",
+    )
     season = out.get("Season", pd.Series("", index=out.index)).astype(str)
     cloud = out.get("CloudCoverBucket", pd.Series("", index=out.index)).astype(str)
     loss = out.get("SolarLossBucket", pd.Series("", index=out.index)).astype(str)
-    event_cls = out.get("CloudSolarEventClass", pd.Series("", index=out.index)).astype(str)
+    event_cls = out.get("CloudSolarEventClass", pd.Series("", index=out.index)).astype(
+        str
+    )
 
-    cloudy_solar = in_scope & hour.between(10, 16) & (
-        cloud.isin(["Mostly Cloudy", "Overcast"])
-        | loss.isin(["High", "Extreme"])
-        | event_cls.str.contains("solar_loss", case=False, na=False)
+    cloudy_solar = (
+        in_scope
+        & hour.between(10, 16)
+        & (
+            cloud.isin(["Mostly Cloudy", "Overcast"])
+            | loss.isin(["High", "Extreme"])
+            | event_cls.str.contains("solar_loss", case=False, na=False)
+        )
     )
     hot_peak = in_scope & hour.between(16, 20) & temp_max.ge(90.0)
-    shoulder_heat = in_scope & season.isin(["Spring", "Fall"]) & hour.between(12, 22) & temp_max.between(75.0, 93.0)
+    shoulder_heat = (
+        in_scope
+        & season.isin(["Spring", "Fall"])
+        & hour.between(12, 22)
+        & temp_max.between(75.0, 93.0)
+    )
     high_temp = in_scope & temp_max.ge(float(cfg.get("high_temp_min_maxtemp_f", 95.0)))
 
     mult.loc[cloudy_solar] *= float(cfg.get("cloudy_solar_multiplier", 1.15))
@@ -292,10 +384,16 @@ def _weather_input_risk_multiplier(out: pd.DataFrame, cfg: dict | None) -> tuple
     risk_class.loc[hot_peak] = "hot_peak_weather_error"
     risk_class.loc[high_temp & ~hot_peak] = "high_temp_weather_error"
     risk_class.loc[(d47 & (cloudy_solar | hot_peak | shoulder_heat | high_temp))] = (
-        "days4to7_" + risk_class.loc[(d47 & (cloudy_solar | hot_peak | shoulder_heat | high_temp))].astype(str)
+        "days4to7_"
+        + risk_class.loc[
+            (d47 & (cloudy_solar | hot_peak | shoulder_heat | high_temp))
+        ].astype(str)
     )
     risk_class.loc[(d8p & (cloudy_solar | hot_peak | shoulder_heat | high_temp))] = (
-        "days8to16_" + risk_class.loc[(d8p & (cloudy_solar | hot_peak | shoulder_heat | high_temp))].astype(str)
+        "days8to16_"
+        + risk_class.loc[
+            (d8p & (cloudy_solar | hot_peak | shoulder_heat | high_temp))
+        ].astype(str)
     )
 
     cap = float(cfg.get("cap_multiplier", 2.25))
@@ -303,14 +401,32 @@ def _weather_input_risk_multiplier(out: pd.DataFrame, cfg: dict | None) -> tuple
     return mult.clip(lower=1.0, upper=cap), reason
 
 
-def _apply_production_caution_labels(out: pd.DataFrame, forecast_day: pd.Series) -> pd.DataFrame:
-    hour = pd.to_numeric(out.get("Hour", pd.Series(np.nan, index=out.index)), errors="coerce").fillna(-1).astype(int)
-    temp_max = pd.to_numeric(out.get("Temperature_DailyMax", pd.Series(np.nan, index=out.index)), errors="coerce")
-    risk_class = out.get("Weather_Input_Risk_Class", pd.Series("none", index=out.index)).astype(str)
-    risk_mult = pd.to_numeric(out.get("Weather_Input_Risk_Multiplier", pd.Series(1.0, index=out.index)), errors="coerce").fillna(1.0)
+def _apply_production_caution_labels(
+    out: pd.DataFrame, forecast_day: pd.Series
+) -> pd.DataFrame:
+    hour = (
+        pd.to_numeric(
+            out.get("Hour", pd.Series(np.nan, index=out.index)), errors="coerce"
+        )
+        .fillna(-1)
+        .astype(int)
+    )
+    temp_max = pd.to_numeric(
+        out.get("Temperature_DailyMax", pd.Series(np.nan, index=out.index)),
+        errors="coerce",
+    )
+    risk_class = out.get(
+        "Weather_Input_Risk_Class", pd.Series("none", index=out.index)
+    ).astype(str)
+    risk_mult = pd.to_numeric(
+        out.get("Weather_Input_Risk_Multiplier", pd.Series(1.0, index=out.index)),
+        errors="coerce",
+    ).fillna(1.0)
     cloud = out.get("CloudCoverBucket", pd.Series("", index=out.index)).astype(str)
     loss = out.get("SolarLossBucket", pd.Series("", index=out.index)).astype(str)
-    event_cls = out.get("CloudSolarEventClass", pd.Series("", index=out.index)).astype(str)
+    event_cls = out.get("CloudSolarEventClass", pd.Series("", index=out.index)).astype(
+        str
+    )
 
     reason = pd.Series("none", index=out.index, dtype="object")
     hot_peak = hour.between(16, 20) & temp_max.ge(90.0)
@@ -322,10 +438,14 @@ def _apply_production_caution_labels(out: pd.DataFrame, forecast_day: pd.Series)
     )
     weather_risk = risk_mult.gt(1.0) | ~risk_class.eq("none")
     long_horizon = forecast_day.between(8, 16)
-    recent_corr = pd.to_numeric(
-        out.get("Recent_Level_Correction_MWH", pd.Series(0.0, index=out.index)),
-        errors="coerce",
-    ).fillna(0.0).abs()
+    recent_corr = (
+        pd.to_numeric(
+            out.get("Recent_Level_Correction_MWH", pd.Series(0.0, index=out.index)),
+            errors="coerce",
+        )
+        .fillna(0.0)
+        .abs()
+    )
     recent_bias_risk = recent_corr.ge(4.0)
 
     reason = _append_reason(reason, peak_window, "peak_window_data_limited")
@@ -342,7 +462,9 @@ def _apply_production_caution_labels(out: pd.DataFrame, forecast_day: pd.Series)
     label.loc[hot_peak] = "Caution: hot peak"
     label.loc[recent_bias_risk] = "Caution: recent bias"
     label.loc[long_horizon] = "Low confidence"
-    label.loc[long_horizon & (peak_window | hot_peak | cloudy_solar | weather_risk)] = "Low confidence caution"
+    label.loc[long_horizon & (peak_window | hot_peak | cloudy_solar | weather_risk)] = (
+        "Low confidence caution"
+    )
 
     risk_code = pd.Series("NORMAL", index=out.index, dtype="object")
     risk_code.loc[recent_bias_risk] = "RECENT_BIAS_RISK"
@@ -351,8 +473,12 @@ def _apply_production_caution_labels(out: pd.DataFrame, forecast_day: pd.Series)
     risk_code.loc[peak_window] = "PEAK_WINDOW_RISK"
     risk_code.loc[cloudy_solar] = "SOLAR_CLOUD_RISK"
     risk_code.loc[hot_peak] = "HOT_PEAK_RISK"
-    risk_code.loc[long_horizon & (weather_risk | peak_window | hot_peak | cloudy_solar)] = (
-        risk_code.loc[long_horizon & (weather_risk | peak_window | hot_peak | cloudy_solar)].astype(str)
+    risk_code.loc[
+        long_horizon & (weather_risk | peak_window | hot_peak | cloudy_solar)
+    ] = (
+        risk_code.loc[
+            long_horizon & (weather_risk | peak_window | hot_peak | cloudy_solar)
+        ].astype(str)
         + "+LONG_HORIZON_RISK"
     )
 
@@ -382,42 +508,62 @@ def apply_bands(
 
     if residual_lookup and residual_lookup.get("ordered_levels"):
         # Start from the conditional global residual band; do not force the percent band to dominate.
-        out["Band"] = np.maximum(float(floor_mwh), float(residual_lookup.get("global_band_mwh", floor_mwh)))
+        out["Band"] = np.maximum(
+            float(floor_mwh), float(residual_lookup.get("global_band_mwh", floor_mwh))
+        )
         unresolved = pd.Series(True, index=out.index)
         for level in residual_lookup["ordered_levels"]:
             keys = level["keys"]
             lookup = level["lookup"]
-            if lookup is None or lookup.empty or not all(k in out.columns for k in keys):
+            if (
+                lookup is None
+                or lookup.empty
+                or not all(k in out.columns for k in keys)
+            ):
                 continue
-            tmp = out.loc[unresolved, keys].reset_index().merge(lookup[keys + ["band_mwh"]], on=keys, how="left")
+            tmp = (
+                out.loc[unresolved, keys]
+                .reset_index()
+                .merge(lookup[keys + ["band_mwh"]], on=keys, how="left")
+            )
             matched = tmp["band_mwh"].notna()
             if matched.any():
                 idx = tmp.loc[matched, "index"]
-                out.loc[idx, "Band"] = np.maximum(float(floor_mwh), tmp.loc[matched, "band_mwh"].to_numpy(dtype=float))
+                out.loc[idx, "Band"] = np.maximum(
+                    float(floor_mwh), tmp.loc[matched, "band_mwh"].to_numpy(dtype=float)
+                )
                 out.loc[idx, "Band_Method"] = "+".join(keys)
                 unresolved.loc[idx] = False
         out["Band"] = out["Band"].astype(float) * _band_risk_multiplier(out) * scale
         # Keep an absolute lower bound and a light percent guard for very high-load hours.
         out["Band"] = np.maximum(
             out["Band"].astype(float),
-            np.maximum(effective_floor, np.abs(base) * float(percent_band) * 0.65 * scale),
+            np.maximum(
+                effective_floor, np.abs(base) * float(percent_band) * 0.65 * scale
+            ),
         )
 
-    weather_mult, weather_reason = _weather_input_risk_multiplier(out, weather_input_risk)
+    weather_mult, weather_reason = _weather_input_risk_multiplier(
+        out, weather_input_risk
+    )
     out["Weather_Input_Risk_Multiplier"] = weather_mult
     out["Weather_Input_Risk_Reason"] = weather_reason
     out["Band"] = out["Band"].astype(float) * weather_mult
     hot_floor = _hot_bucket_band_floor(out, hot_bucket_band_floor)
     hot_floor_mask = hot_floor.notna() & out["Band"].astype(float).lt(hot_floor)
     if hot_floor_mask.any():
-        out.loc[hot_floor_mask, "Band_Method"] = out.loc[hot_floor_mask, "Band_Method"].astype(str) + "+hot_bucket_floor"
+        out.loc[hot_floor_mask, "Band_Method"] = (
+            out.loc[hot_floor_mask, "Band_Method"].astype(str) + "+hot_bucket_floor"
+        )
         out.loc[hot_floor_mask, "Band"] = hot_floor.loc[hot_floor_mask].astype(float)
     forecast_day = _forecast_day_index(out)
     out["Operational_Horizon_Label"] = "Informational"
     out.loc[forecast_day.eq(1), "Operational_Horizon_Label"] = "Day1"
     out.loc[forecast_day.between(2, 3), "Operational_Horizon_Label"] = "Days2to3"
     out.loc[forecast_day.between(4, 7), "Operational_Horizon_Label"] = "Days4to7"
-    out.loc[forecast_day.between(8, 16), "Operational_Horizon_Label"] = "Days8to16_low_confidence"
+    out.loc[forecast_day.between(8, 16), "Operational_Horizon_Label"] = (
+        "Days8to16_low_confidence"
+    )
     out = _apply_production_caution_labels(out, forecast_day)
 
     out["Upper_Band"] = base + out["Band"].astype(float)
@@ -435,5 +581,8 @@ def apply_bands(
         "percent_floor_central80",
         "conditional_residual_central80",
     )
-    out.loc[weather_mult.gt(1.0), "Quantile_Method"] = out.loc[weather_mult.gt(1.0), "Quantile_Method"].astype(str) + "+weather_input_risk"
+    out.loc[weather_mult.gt(1.0), "Quantile_Method"] = (
+        out.loc[weather_mult.gt(1.0), "Quantile_Method"].astype(str)
+        + "+weather_input_risk"
+    )
     return out

@@ -8,7 +8,6 @@ from typing import Any
 
 import yaml
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 DEFAULT_LOCAL_CONFIG_PATH = Path(__file__).resolve().parent / "config.local.yaml"
@@ -48,13 +47,13 @@ def load_forecast_config(config_path: str | Path | None = None) -> dict[str, Any
     _load_dotenv(PROJECT_ROOT / ".env.local")
 
     base_path = Path(
-        os.environ.get("FORECAST_CONFIG")
-        or config_path
-        or DEFAULT_CONFIG_PATH
+        os.environ.get("FORECAST_CONFIG") or config_path or DEFAULT_CONFIG_PATH
     )
     config = _read_yaml(base_path)
 
-    local_path = Path(os.environ.get("FORECAST_CONFIG_LOCAL") or DEFAULT_LOCAL_CONFIG_PATH)
+    local_path = Path(
+        os.environ.get("FORECAST_CONFIG_LOCAL") or DEFAULT_LOCAL_CONFIG_PATH
+    )
     if local_path.exists():
         config = deep_merge(config, _read_yaml(local_path))
 
@@ -154,7 +153,9 @@ def _apply_env_overrides(config: dict[str, Any]) -> None:
         parent[key_path[-1]] = value
 
 
-def _get_parent(config: dict[str, Any], key_path: tuple[str, ...], *, create: bool) -> dict[str, Any] | None:
+def _get_parent(
+    config: dict[str, Any], key_path: tuple[str, ...], *, create: bool
+) -> dict[str, Any] | None:
     node: dict[str, Any] = config
     for key in key_path[:-1]:
         child = node.get(key)

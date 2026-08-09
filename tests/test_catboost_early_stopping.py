@@ -5,7 +5,10 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from forecasting.model.catboost_model import get_last_catboost_training_info, train_catboost
+from forecasting.model.catboost_model import (
+    get_last_catboost_training_info,
+    train_catboost,
+)
 
 
 def _synthetic_frame(n_days: int = 90) -> pd.DataFrame:
@@ -15,9 +18,18 @@ def _synthetic_frame(n_days: int = 90) -> pd.DataFrame:
     rng = np.random.default_rng(11)
     dt = pd.date_range("2026-01-01", periods=24 * n_days, freq="h")
     hour = dt.hour.values.astype(float)
-    temperature = 70 + 15 * np.sin((hour - 6) / 24 * 2 * np.pi) + rng.normal(0, 1, len(dt))
-    mwh = 500 + 4 * temperature + 10 * np.sin(hour / 24 * 2 * np.pi) + rng.normal(0, 1, len(dt))
-    return pd.DataFrame({"DT": dt, "MWH": mwh, "Temperature": temperature, "Hour": hour})
+    temperature = (
+        70 + 15 * np.sin((hour - 6) / 24 * 2 * np.pi) + rng.normal(0, 1, len(dt))
+    )
+    mwh = (
+        500
+        + 4 * temperature
+        + 10 * np.sin(hour / 24 * 2 * np.pi)
+        + rng.normal(0, 1, len(dt))
+    )
+    return pd.DataFrame(
+        {"DT": dt, "MWH": mwh, "Temperature": temperature, "Hour": hour}
+    )
 
 
 class CatBoostEarlyStoppingTests(unittest.TestCase):
@@ -28,8 +40,19 @@ class CatBoostEarlyStoppingTests(unittest.TestCase):
     def test_early_stopping_enabled_stops_before_iterations_cap(self):
         config = {
             "model": {
-                "early_stopping": {"enabled": True, "validation_days": 14, "min_train_rows": 200, "rounds": 20, "metric": "mae"},
-                "catboost": {"enabled": True, "iterations": 2000, "depth": 6, "task_type": "CPU"},
+                "early_stopping": {
+                    "enabled": True,
+                    "validation_days": 14,
+                    "min_train_rows": 200,
+                    "rounds": 20,
+                    "metric": "mae",
+                },
+                "catboost": {
+                    "enabled": True,
+                    "iterations": 2000,
+                    "depth": 6,
+                    "task_type": "CPU",
+                },
             },
             "hardware": {"use_gpu": False},
         }
@@ -46,7 +69,12 @@ class CatBoostEarlyStoppingTests(unittest.TestCase):
         config = {
             "model": {
                 "early_stopping": {"enabled": False},
-                "catboost": {"enabled": True, "iterations": 60, "depth": 4, "task_type": "CPU"},
+                "catboost": {
+                    "enabled": True,
+                    "iterations": 60,
+                    "depth": 4,
+                    "task_type": "CPU",
+                },
             },
             "hardware": {"use_gpu": False},
         }
@@ -61,8 +89,18 @@ class CatBoostEarlyStoppingTests(unittest.TestCase):
         small_df = self.df.iloc[:100].copy()
         config = {
             "model": {
-                "early_stopping": {"enabled": True, "validation_days": 45, "min_train_rows": 2000, "rounds": 10},
-                "catboost": {"enabled": True, "iterations": 40, "depth": 3, "task_type": "CPU"},
+                "early_stopping": {
+                    "enabled": True,
+                    "validation_days": 45,
+                    "min_train_rows": 2000,
+                    "rounds": 10,
+                },
+                "catboost": {
+                    "enabled": True,
+                    "iterations": 40,
+                    "depth": 3,
+                    "task_type": "CPU",
+                },
             },
             "hardware": {"use_gpu": False},
         }

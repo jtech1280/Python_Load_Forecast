@@ -67,19 +67,57 @@ def add_load_decay_shape_features(df: pd.DataFrame) -> pd.DataFrame:
     if post_peak.isna().all():
         post_peak = hour.between(18, 23).astype(float)
     post_peak = post_peak.fillna(0.0).clip(lower=0.0, upper=1.0)
-    peak_window = _num(out, "IsPeakWindow14to18", 0.0).fillna(0.0).clip(lower=0.0, upper=1.0)
-    peak_window_16_18 = _num(out, "IsPeakWindow16to18", 0.0).fillna(0.0).clip(lower=0.0, upper=1.0)
-    hot_peak = _num(out, "IsHotPeakWindow16to20", 0.0).fillna(0.0).clip(lower=0.0, upper=1.0)
-    clear_hot_peak = _num(out, "ClearHotPeakWindow16to20", 0.0).fillna(0.0).clip(lower=0.0, upper=1.0)
-    clear_peak_16_18 = _num(out, "ClearPeakWindow16to18", 0.0).fillna(0.0).clip(lower=0.0, upper=1.0)
-    overcast_peak_16_18 = _num(out, "OvercastPeakWindow16to18", 0.0).fillna(0.0).clip(lower=0.0, upper=1.0)
-    clear_hot_peak_16_18 = _num(out, "ClearHotPeakWindow16to18", 0.0).fillna(0.0).clip(lower=0.0, upper=1.0)
-    overcast_cool_peak_16_18 = _num(out, "OvercastCoolPeakWindow16to18", 0.0).fillna(0.0).clip(lower=0.0, upper=1.0)
-    clear_hot = _num(out, "ClearHotEvening_Flag", 0.0).fillna(0.0).clip(lower=0.0, upper=1.0)
+    peak_window = (
+        _num(out, "IsPeakWindow14to18", 0.0).fillna(0.0).clip(lower=0.0, upper=1.0)
+    )
+    peak_window_16_18 = (
+        _num(out, "IsPeakWindow16to18", 0.0).fillna(0.0).clip(lower=0.0, upper=1.0)
+    )
+    hot_peak = (
+        _num(out, "IsHotPeakWindow16to20", 0.0).fillna(0.0).clip(lower=0.0, upper=1.0)
+    )
+    clear_hot_peak = (
+        _num(out, "ClearHotPeakWindow16to20", 0.0)
+        .fillna(0.0)
+        .clip(lower=0.0, upper=1.0)
+    )
+    clear_peak_16_18 = (
+        _num(out, "ClearPeakWindow16to18", 0.0).fillna(0.0).clip(lower=0.0, upper=1.0)
+    )
+    overcast_peak_16_18 = (
+        _num(out, "OvercastPeakWindow16to18", 0.0)
+        .fillna(0.0)
+        .clip(lower=0.0, upper=1.0)
+    )
+    clear_hot_peak_16_18 = (
+        _num(out, "ClearHotPeakWindow16to18", 0.0)
+        .fillna(0.0)
+        .clip(lower=0.0, upper=1.0)
+    )
+    overcast_cool_peak_16_18 = (
+        _num(out, "OvercastCoolPeakWindow16to18", 0.0)
+        .fillna(0.0)
+        .clip(lower=0.0, upper=1.0)
+    )
+    clear_hot = (
+        _num(out, "ClearHotEvening_Flag", 0.0).fillna(0.0).clip(lower=0.0, upper=1.0)
+    )
     delta_breeze_flag = (
-        _num(out, "DeltaBreeze_Cooling_Flag", 0.0).fillna(0.0).clip(lower=0.0, upper=1.0)
-        .combine(_num(out, "DeltaBreeze_Westerly_Flow_Flag", 0.0).fillna(0.0).clip(lower=0.0, upper=1.0), max)
-        .combine(_num(out, "DeltaBreeze_EveningWindRamp_Flag", 0.0).fillna(0.0).clip(lower=0.0, upper=1.0), max)
+        _num(out, "DeltaBreeze_Cooling_Flag", 0.0)
+        .fillna(0.0)
+        .clip(lower=0.0, upper=1.0)
+        .combine(
+            _num(out, "DeltaBreeze_Westerly_Flow_Flag", 0.0)
+            .fillna(0.0)
+            .clip(lower=0.0, upper=1.0),
+            max,
+        )
+        .combine(
+            _num(out, "DeltaBreeze_EveningWindRamp_Flag", 0.0)
+            .fillna(0.0)
+            .clip(lower=0.0, upper=1.0),
+            max,
+        )
     )
 
     # Positive values mean the most recent load memory is already decaying / running below
@@ -89,20 +127,36 @@ def add_load_decay_shape_features(df: pd.DataFrame) -> pd.DataFrame:
     out["Lag1_Minus_SameHourYesterday_MWH"] = lag1 - lag24
     out["Lag1_Minus_SameHour7DayMean_MWH"] = lag1 - same_hour_7day
     out["Lag24_Minus_SameHour7DayMean_MWH"] = lag24 - same_hour_7day
-    out["PeakWindow_Lag1_Minus_SameHour7DayMean_MWH"] = peak_window * out["Lag1_Minus_SameHour7DayMean_MWH"]
-    out["PeakWindow_Lag24_Minus_SameHour7DayMean_MWH"] = peak_window * out["Lag24_Minus_SameHour7DayMean_MWH"]
+    out["PeakWindow_Lag1_Minus_SameHour7DayMean_MWH"] = (
+        peak_window * out["Lag1_Minus_SameHour7DayMean_MWH"]
+    )
+    out["PeakWindow_Lag24_Minus_SameHour7DayMean_MWH"] = (
+        peak_window * out["Lag24_Minus_SameHour7DayMean_MWH"]
+    )
     out["PeakWindow16to18_Lag1_Minus_SameHour7DayMean_MWH"] = (
         peak_window_16_18 * out["Lag1_Minus_SameHour7DayMean_MWH"]
     )
     out["PeakWindow16to18_Lag24_Minus_SameHour7DayMean_MWH"] = (
         peak_window_16_18 * out["Lag24_Minus_SameHour7DayMean_MWH"]
     )
-    out["HotPeak_Lag1_Minus_SameHourYesterday_MWH"] = hot_peak * out["Lag1_Minus_SameHourYesterday_MWH"]
-    out["HotPeak_Lag1_Minus_SameHour7DayMean_MWH"] = hot_peak * out["Lag1_Minus_SameHour7DayMean_MWH"]
-    out["HotPeak_Lag24_Minus_SameHour7DayMean_MWH"] = hot_peak * out["Lag24_Minus_SameHour7DayMean_MWH"]
-    out["ClearHotPeak_Lag1_Minus_SameHourYesterday_MWH"] = clear_hot_peak * out["Lag1_Minus_SameHourYesterday_MWH"]
-    out["ClearHotPeak_Lag1_Minus_SameHour7DayMean_MWH"] = clear_hot_peak * out["Lag1_Minus_SameHour7DayMean_MWH"]
-    out["ClearHotPeak_Lag24_Minus_SameHour7DayMean_MWH"] = clear_hot_peak * out["Lag24_Minus_SameHour7DayMean_MWH"]
+    out["HotPeak_Lag1_Minus_SameHourYesterday_MWH"] = (
+        hot_peak * out["Lag1_Minus_SameHourYesterday_MWH"]
+    )
+    out["HotPeak_Lag1_Minus_SameHour7DayMean_MWH"] = (
+        hot_peak * out["Lag1_Minus_SameHour7DayMean_MWH"]
+    )
+    out["HotPeak_Lag24_Minus_SameHour7DayMean_MWH"] = (
+        hot_peak * out["Lag24_Minus_SameHour7DayMean_MWH"]
+    )
+    out["ClearHotPeak_Lag1_Minus_SameHourYesterday_MWH"] = (
+        clear_hot_peak * out["Lag1_Minus_SameHourYesterday_MWH"]
+    )
+    out["ClearHotPeak_Lag1_Minus_SameHour7DayMean_MWH"] = (
+        clear_hot_peak * out["Lag1_Minus_SameHour7DayMean_MWH"]
+    )
+    out["ClearHotPeak_Lag24_Minus_SameHour7DayMean_MWH"] = (
+        clear_hot_peak * out["Lag24_Minus_SameHour7DayMean_MWH"]
+    )
     out["ClearPeak16to18_Lag24_Minus_SameHour7DayMean_MWH"] = (
         clear_peak_16_18 * out["Lag24_Minus_SameHour7DayMean_MWH"]
     )
@@ -121,14 +175,15 @@ def add_load_decay_shape_features(df: pd.DataFrame) -> pd.DataFrame:
     out["PostPeak_LoadDecay_1Hr_MWH"] = post_peak * out["Load_Decay_1Hr_MWH"]
     out["PostPeak_LoadDecay_2Hr_MWH"] = post_peak * out["Load_Decay_2Hr_MWH"]
     out["PostPeak_LoadDecay_VsSameHourYesterday_MWH"] = post_peak * (lag24 - lag1)
-    out["PostPeak_LoadDecay_VsSameHour7DayMean_MWH"] = post_peak * (same_hour_7day - lag1)
-    out["ClearHotEvening_LoadDecay_Vs7Day_MWH"] = clear_hot * out["PostPeak_LoadDecay_VsSameHour7DayMean_MWH"]
-    out["DeltaBreeze_PostPeak_LoadDecay_Signal"] = (
-        delta_breeze_flag
-        * (
-            out["PostPeak_LoadDecay_1Hr_MWH"].clip(lower=0.0).fillna(0.0)
-            + out["PostPeak_LoadDecay_VsSameHour7DayMean_MWH"].clip(lower=0.0).fillna(0.0)
-        )
+    out["PostPeak_LoadDecay_VsSameHour7DayMean_MWH"] = post_peak * (
+        same_hour_7day - lag1
+    )
+    out["ClearHotEvening_LoadDecay_Vs7Day_MWH"] = (
+        clear_hot * out["PostPeak_LoadDecay_VsSameHour7DayMean_MWH"]
+    )
+    out["DeltaBreeze_PostPeak_LoadDecay_Signal"] = delta_breeze_flag * (
+        out["PostPeak_LoadDecay_1Hr_MWH"].clip(lower=0.0).fillna(0.0)
+        + out["PostPeak_LoadDecay_VsSameHour7DayMean_MWH"].clip(lower=0.0).fillna(0.0)
     )
     return out
 
@@ -144,9 +199,13 @@ def add_basic_lags(df: pd.DataFrame) -> pd.DataFrame:
 
     for window in [3, 6, 12, 24, 48, 168]:
         min_periods = max(2, min(window, int(window * 0.5)))
-        out[f"MWH_Rolling{window}"] = shifted.rolling(window=window, min_periods=min_periods).mean()
+        out[f"MWH_Rolling{window}"] = shifted.rolling(
+            window=window, min_periods=min_periods
+        ).mean()
 
-    out["MWH_Rolling24Std"] = shifted.rolling(window=24, min_periods=12).std().fillna(0.0)
+    out["MWH_Rolling24Std"] = (
+        shifted.rolling(window=24, min_periods=12).std().fillna(0.0)
+    )
     same_hour_lags = [y.shift(24 * i) for i in range(1, 8)]
     out["MWH_SameHour7DayMean"] = pd.concat(same_hour_lags, axis=1).mean(axis=1)
     out = add_load_decay_shape_features(out)

@@ -14,7 +14,6 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
 
-
 DAILY_PEAK_SHADOW_COLUMNS = [
     "Daily_Peak_Model_Version",
     "Daily_Peak_Shadow_Mode",
@@ -43,11 +42,13 @@ def _cfg(config: dict | None) -> dict:
     cal = raw.get("calibration", {}) or {}
     if "daily_peak_shadow_model" in cal:
         return cal.get("daily_peak_shadow_model", {}) or {}
-    stage_selector = (cal.get("stage_selector", {}) or {})
+    stage_selector = cal.get("stage_selector", {}) or {}
     return stage_selector.get("daily_peak_shadow_model", {}) or {}
 
 
-def _as_num(value: Any, index: pd.Index | None = None, default: float = np.nan) -> pd.Series:
+def _as_num(
+    value: Any, index: pd.Index | None = None, default: float = np.nan
+) -> pd.Series:
     if isinstance(value, pd.Series):
         raw = value
     else:
@@ -55,7 +56,9 @@ def _as_num(value: Any, index: pd.Index | None = None, default: float = np.nan) 
     return pd.to_numeric(raw, errors="coerce")
 
 
-def _optional_num(values: pd.DataFrame, *cols: str, default: float = np.nan) -> pd.Series:
+def _optional_num(
+    values: pd.DataFrame, *cols: str, default: float = np.nan
+) -> pd.Series:
     for col in cols:
         if col in values.columns:
             return _as_num(values[col], values.index).fillna(default)
@@ -67,7 +70,11 @@ def _local_datetime(values: pd.DataFrame) -> pd.Series:
     try:
         return pd.to_datetime(raw, errors="coerce")
     except ValueError:
-        cleaned = raw.astype(str).str.strip().str.replace(r"(?:[+-]\d{2}:?\d{2}|Z)$", "", regex=True)
+        cleaned = (
+            raw.astype(str)
+            .str.strip()
+            .str.replace(r"(?:[+-]\d{2}:?\d{2}|Z)$", "", regex=True)
+        )
         return pd.to_datetime(cleaned, errors="coerce")
 
 
@@ -82,19 +89,25 @@ def _date(values: pd.DataFrame, dt: pd.Series | None = None) -> pd.Series:
 
 def _hour(values: pd.DataFrame, dt: pd.Series | None = None) -> pd.Series:
     dt = dt if dt is not None else _local_datetime(values)
-    hour = _as_num(values.get("Hour", pd.Series(np.nan, index=values.index)), values.index)
+    hour = _as_num(
+        values.get("Hour", pd.Series(np.nan, index=values.index)), values.index
+    )
     return hour.where(hour.notna(), dt.dt.hour).fillna(0.0)
 
 
 def _month(values: pd.DataFrame, dt: pd.Series | None = None) -> pd.Series:
     dt = dt if dt is not None else _local_datetime(values)
-    month = _as_num(values.get("Month", pd.Series(np.nan, index=values.index)), values.index)
+    month = _as_num(
+        values.get("Month", pd.Series(np.nan, index=values.index)), values.index
+    )
     return month.where(month.notna(), dt.dt.month).fillna(1.0)
 
 
 def _dow(values: pd.DataFrame, dt: pd.Series | None = None) -> pd.Series:
     dt = dt if dt is not None else _local_datetime(values)
-    dow = _as_num(values.get("DOW", pd.Series(np.nan, index=values.index)), values.index)
+    dow = _as_num(
+        values.get("DOW", pd.Series(np.nan, index=values.index)), values.index
+    )
     return dow.where(dow.notna(), dt.dt.dayofweek).fillna(0.0)
 
 
@@ -108,7 +121,9 @@ def _forecast_day(values: pd.DataFrame, dt: pd.Series | None = None) -> pd.Serie
     out = pd.Series(np.nan, index=values.index, dtype=float)
     if valid.any():
         first_day = dt.loc[valid].min().normalize()
-        out.loc[valid] = (dt.loc[valid].dt.normalize() - first_day).dt.days.astype(float) + 1.0
+        out.loc[valid] = (dt.loc[valid].dt.normalize() - first_day).dt.days.astype(
+            float
+        ) + 1.0
     return out
 
 
@@ -170,10 +185,14 @@ def _component_peak(group: pd.DataFrame, col: str) -> float:
     return _max_valid(group[col]) if col in group.columns else np.nan
 
 
-def _model_frame(values: pd.DataFrame, forecast_col: str, config: dict | None) -> pd.DataFrame:
+def _model_frame(
+    values: pd.DataFrame, forecast_col: str, config: dict | None
+) -> pd.DataFrame:
     """Collapse hourly rows to one model row per forecast date."""
     cfg = _cfg(config)
-    peak_hours = {int(h) for h in cfg.get("peak_hours", [14, 15, 16, 17, 18, 19, 20, 21])}
+    peak_hours = {
+        int(h) for h in cfg.get("peak_hours", [14, 15, 16, 17, 18, 19, 20, 21])
+    }
     min_peak_rows = int(cfg.get("min_peak_window_rows_per_day", 3))
 
     work = values.copy()
@@ -182,9 +201,15 @@ def _model_frame(values: pd.DataFrame, forecast_col: str, config: dict | None) -
     work["_DailyPeak_Date"] = _date(work, dt=dt)
     work["_DailyPeak_Hour"] = _hour(work, dt=dt)
     work["_DailyPeak_Base"] = _base_forecast(work, forecast_col=forecast_col)
-    actual_col = "Actual_MWH" if "Actual_MWH" in work.columns else ("Actual" if "Actual" in work.columns else None)
+    actual_col = (
+        "Actual_MWH"
+        if "Actual_MWH" in work.columns
+        else ("Actual" if "Actual" in work.columns else None)
+    )
     work["_DailyPeak_Actual"] = (
-        _as_num(work[actual_col], work.index) if actual_col is not None else pd.Series(np.nan, index=work.index)
+        _as_num(work[actual_col], work.index)
+        if actual_col is not None
+        else pd.Series(np.nan, index=work.index)
     )
     work["_DailyPeak_Cloud"] = _cloud_norm(work)
 
@@ -193,7 +218,9 @@ def _model_frame(values: pd.DataFrame, forecast_col: str, config: dict | None) -
         group = group[group["_DailyPeak_DT"].notna()].copy()
         if group.empty:
             continue
-        peak_group = group[group["_DailyPeak_Hour"].astype("Int64").isin(peak_hours).fillna(False)].copy()
+        peak_group = group[
+            group["_DailyPeak_Hour"].astype("Int64").isin(peak_hours).fillna(False)
+        ].copy()
         if peak_group.empty:
             peak_group = group.copy()
         base_peak_idx = _peak_idx(peak_group, "_DailyPeak_Base")
@@ -201,12 +228,22 @@ def _model_frame(values: pd.DataFrame, forecast_col: str, config: dict | None) -
             continue
         actual_peak_idx = _peak_idx(peak_group, "_DailyPeak_Actual")
         base_peak_row = group.loc[base_peak_idx]
-        actual_peak_row = group.loc[actual_peak_idx] if actual_peak_idx is not None else None
+        actual_peak_row = (
+            group.loc[actual_peak_idx] if actual_peak_idx is not None else None
+        )
 
         base_peak = float(base_peak_row["_DailyPeak_Base"])
-        actual_peak = float(actual_peak_row["_DailyPeak_Actual"]) if actual_peak_row is not None else np.nan
+        actual_peak = (
+            float(actual_peak_row["_DailyPeak_Actual"])
+            if actual_peak_row is not None
+            else np.nan
+        )
         base_peak_hour = float(base_peak_row["_DailyPeak_Hour"])
-        actual_peak_hour = float(actual_peak_row["_DailyPeak_Hour"]) if actual_peak_row is not None else np.nan
+        actual_peak_hour = (
+            float(actual_peak_row["_DailyPeak_Hour"])
+            if actual_peak_row is not None
+            else np.nan
+        )
 
         forecast_day = _forecast_day(group, dt=group["_DailyPeak_DT"])
         month = _month(group, dt=group["_DailyPeak_DT"])
@@ -217,8 +254,15 @@ def _model_frame(values: pd.DataFrame, forecast_col: str, config: dict | None) -
             daily_max = temp.groupby(group["_DailyPeak_Date"]).transform("max")
 
         raw = _optional_num(group, "Raw_Forecast_MWH", default=np.nan)
-        same7 = _optional_num(group, "MWH_SameHour7DayMean", "Baseline_Rolling7DaySameHourAvg_MWH", default=np.nan)
-        lag24 = _optional_num(group, "MWH_Lag24", "Baseline_SameHourYesterday_MWH", default=np.nan)
+        same7 = _optional_num(
+            group,
+            "MWH_SameHour7DayMean",
+            "Baseline_Rolling7DaySameHourAvg_MWH",
+            default=np.nan,
+        )
+        lag24 = _optional_num(
+            group, "MWH_Lag24", "Baseline_SameHourYesterday_MWH", default=np.nan
+        )
         xgb = _optional_num(group, "XGB_Pred_MWH", default=np.nan)
         lgb = _optional_num(group, "LGB_Pred_MWH", default=np.nan)
         cat = _optional_num(group, "CatBoost_Pred_MWH", default=np.nan)
@@ -230,8 +274,12 @@ def _model_frame(values: pd.DataFrame, forecast_col: str, config: dict | None) -
             [
                 _first_valid(base_peak_features.get("XGB_Pred_MWH", pd.Series(np.nan))),
                 _first_valid(base_peak_features.get("LGB_Pred_MWH", pd.Series(np.nan))),
-                _first_valid(base_peak_features.get("CatBoost_Pred_MWH", pd.Series(np.nan))),
-                _first_valid(base_peak_features.get("Prophet_Pred_MWH", pd.Series(np.nan))),
+                _first_valid(
+                    base_peak_features.get("CatBoost_Pred_MWH", pd.Series(np.nan))
+                ),
+                _first_valid(
+                    base_peak_features.get("Prophet_Pred_MWH", pd.Series(np.nan))
+                ),
             ],
             dtype=float,
         )
@@ -239,11 +287,17 @@ def _model_frame(values: pd.DataFrame, forecast_col: str, config: dict | None) -
         row = {
             "Date": date,
             "Forecast_Day": _mean_valid(forecast_day),
-            "Forecast_Lead_Hour_Mean": _mean_valid(_optional_num(group, "Forecast_Lead_Hour", default=np.nan)),
+            "Forecast_Lead_Hour_Mean": _mean_valid(
+                _optional_num(group, "Forecast_Lead_Hour", default=np.nan)
+            ),
             "Month": _first_valid(month),
             "DOW": _first_valid(dow),
-            "IsWeekend": _max_valid(_optional_num(group, "IsWeekend", default=0.0), default=0.0),
-            "IsHoliday": _max_valid(_optional_num(group, "IsHoliday", default=0.0), default=0.0),
+            "IsWeekend": _max_valid(
+                _optional_num(group, "IsWeekend", default=0.0), default=0.0
+            ),
+            "IsHoliday": _max_valid(
+                _optional_num(group, "IsHoliday", default=0.0), default=0.0
+            ),
             "Peak_Window_Row_Count": int(len(peak_group)),
             "Peak_Window_Complete_Flag": int(len(peak_group) >= min_peak_rows),
             "Base_DailyPeak_MWH": base_peak,
@@ -251,68 +305,143 @@ def _model_frame(values: pd.DataFrame, forecast_col: str, config: dict | None) -
             "Base_PeakHour_Sin": float(np.sin(2.0 * np.pi * base_peak_hour / 24.0)),
             "Base_PeakHour_Cos": float(np.cos(2.0 * np.pi * base_peak_hour / 24.0)),
             "Base_DailyEnergy_MWH": _sum_valid(group["_DailyPeak_Base"]),
-            "Base_PeakMinusDailyMean_MWH": base_peak - _mean_valid(group["_DailyPeak_Base"]),
-            "Base_PeakMinusSameHour7DayPeak_MWH": base_peak - _component_peak(peak_group, "MWH_SameHour7DayMean"),
-            "Base_PeakMinusLag24Peak_MWH": base_peak - _component_peak(peak_group, "MWH_Lag24"),
+            "Base_PeakMinusDailyMean_MWH": base_peak
+            - _mean_valid(group["_DailyPeak_Base"]),
+            "Base_PeakMinusSameHour7DayPeak_MWH": base_peak
+            - _component_peak(peak_group, "MWH_SameHour7DayMean"),
+            "Base_PeakMinusLag24Peak_MWH": base_peak
+            - _component_peak(peak_group, "MWH_Lag24"),
             "Raw_DailyPeak_MWH": _component_peak(peak_group, "Raw_Forecast_MWH"),
             "XGB_DailyPeak_MWH": _component_peak(peak_group, "XGB_Pred_MWH"),
             "LGB_DailyPeak_MWH": _component_peak(peak_group, "LGB_Pred_MWH"),
             "CatBoost_DailyPeak_MWH": _component_peak(peak_group, "CatBoost_Pred_MWH"),
             "Prophet_DailyPeak_MWH": _component_peak(peak_group, "Prophet_Pred_MWH"),
-            "ModelSpread_AtBasePeak_MWH": _max_valid(peak_components) - _mean_valid(peak_components, default=0.0),
-            "ComponentSpread_DailyPeak_MWH": _max_valid(components.max(axis=0, skipna=True))
+            "ModelSpread_AtBasePeak_MWH": _max_valid(peak_components)
+            - _mean_valid(peak_components, default=0.0),
+            "ComponentSpread_DailyPeak_MWH": _max_valid(
+                components.max(axis=0, skipna=True)
+            )
             - _max_valid(components.min(axis=0, skipna=True)),
             "Temperature_DailyMax": _max_valid(daily_max),
-            "Temperature_AtBasePeak": _first_valid(base_peak_features.get("Temperature", pd.Series(np.nan))),
-            "TempDrop_FromDailyMax_AtBasePeak_F": _first_valid(
-                base_peak_features.get("Temperature_Drop_From_DailyMax_F", pd.Series(np.nan)),
-                default=_max_valid(daily_max) - _first_valid(base_peak_features.get("Temperature", pd.Series(np.nan))),
+            "Temperature_AtBasePeak": _first_valid(
+                base_peak_features.get("Temperature", pd.Series(np.nan))
             ),
-            "TempDrop_Next1Hr_AtBasePeak_F": _first_valid(base_peak_features.get("TempDrop_Next1Hr_F", pd.Series(np.nan))),
-            "TempDrop_Next2Hr_AtBasePeak_F": _first_valid(base_peak_features.get("TempDrop_Next2Hr_F", pd.Series(np.nan))),
-            "TempDrop_Next3Hr_AtBasePeak_F": _first_valid(base_peak_features.get("TempDrop_Next3Hr_F", pd.Series(np.nan))),
+            "TempDrop_FromDailyMax_AtBasePeak_F": _first_valid(
+                base_peak_features.get(
+                    "Temperature_Drop_From_DailyMax_F", pd.Series(np.nan)
+                ),
+                default=_max_valid(daily_max)
+                - _first_valid(
+                    base_peak_features.get("Temperature", pd.Series(np.nan))
+                ),
+            ),
+            "TempDrop_Next1Hr_AtBasePeak_F": _first_valid(
+                base_peak_features.get("TempDrop_Next1Hr_F", pd.Series(np.nan))
+            ),
+            "TempDrop_Next2Hr_AtBasePeak_F": _first_valid(
+                base_peak_features.get("TempDrop_Next2Hr_F", pd.Series(np.nan))
+            ),
+            "TempDrop_Next3Hr_AtBasePeak_F": _first_valid(
+                base_peak_features.get("TempDrop_Next3Hr_F", pd.Series(np.nan))
+            ),
             "CloudCover_Max": _max_valid(group["_DailyPeak_Cloud"]),
             "CloudCover_MeanPeakWindow": _mean_valid(peak_group["_DailyPeak_Cloud"]),
-            "ClearSkyIndex_MinPeakWindow": _max_valid(-_optional_num(peak_group, "ClearSky_Index", default=np.nan)) * -1.0,
+            "ClearSkyIndex_MinPeakWindow": _max_valid(
+                -_optional_num(peak_group, "ClearSky_Index", default=np.nan)
+            )
+            * -1.0,
             "BTM_Solar_Loss_Max_MW": _max_valid(
-                _optional_num(peak_group, "BTM_Solar_Loss_From_ClearSky_MW", "Midday_Overcast_Solar_Loss_MW", default=0.0),
+                _optional_num(
+                    peak_group,
+                    "BTM_Solar_Loss_From_ClearSky_MW",
+                    "Midday_Overcast_Solar_Loss_MW",
+                    default=0.0,
+                ),
                 default=0.0,
             ),
-            "BTM_Solar_Proxy_Max_MW": _max_valid(_optional_num(peak_group, "BTM_Solar_Proxy_MW", default=0.0), default=0.0),
-            "WindSpeed_Max_Mph": _max_valid(_optional_num(peak_group, "WindSpeed_Mph", default=np.nan)),
-            "Westerly_Flow_Max_Mph": _max_valid(_optional_num(peak_group, "Westerly_Flow_Mph", default=0.0), default=0.0),
+            "BTM_Solar_Proxy_Max_MW": _max_valid(
+                _optional_num(peak_group, "BTM_Solar_Proxy_MW", default=0.0),
+                default=0.0,
+            ),
+            "WindSpeed_Max_Mph": _max_valid(
+                _optional_num(peak_group, "WindSpeed_Mph", default=np.nan)
+            ),
+            "Westerly_Flow_Max_Mph": _max_valid(
+                _optional_num(peak_group, "Westerly_Flow_Mph", default=0.0), default=0.0
+            ),
             "WesterlyFlow_Next3Hr_Ramp_Max_Mph": _max_valid(
-                _optional_num(peak_group, "WesterlyFlow_Next3Hr_Ramp_Mph", default=np.nan)
+                _optional_num(
+                    peak_group, "WesterlyFlow_Next3Hr_Ramp_Mph", default=np.nan
+                )
             ),
-            "WindRamp_Next3Hr_Max_Mph": _max_valid(_optional_num(peak_group, "WindRamp_Next3Hr_Mph", default=np.nan)),
-            "DeltaBreeze_Cooling_Flag_Max": _max_valid(_optional_num(peak_group, "DeltaBreeze_Cooling_Flag", default=0.0), default=0.0),
+            "WindRamp_Next3Hr_Max_Mph": _max_valid(
+                _optional_num(peak_group, "WindRamp_Next3Hr_Mph", default=np.nan)
+            ),
+            "DeltaBreeze_Cooling_Flag_Max": _max_valid(
+                _optional_num(peak_group, "DeltaBreeze_Cooling_Flag", default=0.0),
+                default=0.0,
+            ),
             "DeltaBreeze_Westerly_Flow_Flag_Max": _max_valid(
-                _optional_num(peak_group, "DeltaBreeze_Westerly_Flow_Flag", "Westerly_Flow_Flag", default=0.0),
+                _optional_num(
+                    peak_group,
+                    "DeltaBreeze_Westerly_Flow_Flag",
+                    "Westerly_Flow_Flag",
+                    default=0.0,
+                ),
                 default=0.0,
             ),
-            "DeltaBreeze_Cooling_Signal_Max": _max_valid(_optional_num(peak_group, "DeltaBreeze_Cooling_Signal", default=0.0), default=0.0),
+            "DeltaBreeze_Cooling_Signal_Max": _max_valid(
+                _optional_num(peak_group, "DeltaBreeze_Cooling_Signal", default=0.0),
+                default=0.0,
+            ),
             "DeltaBreeze_PostPeak_LoadDecay_Signal_Max": _max_valid(
-                _optional_num(peak_group, "DeltaBreeze_PostPeak_LoadDecay_Signal", default=0.0),
+                _optional_num(
+                    peak_group, "DeltaBreeze_PostPeak_LoadDecay_Signal", default=0.0
+                ),
                 default=0.0,
             ),
-            "PostPeak_LoadDecay_1Hr_Min_MWH": _max_valid(-_optional_num(peak_group, "PostPeak_LoadDecay_1Hr_MWH", default=np.nan)) * -1.0,
-            "PostPeak_LoadDecay_2Hr_Min_MWH": _max_valid(-_optional_num(peak_group, "PostPeak_LoadDecay_2Hr_MWH", default=np.nan)) * -1.0,
+            "PostPeak_LoadDecay_1Hr_Min_MWH": _max_valid(
+                -_optional_num(peak_group, "PostPeak_LoadDecay_1Hr_MWH", default=np.nan)
+            )
+            * -1.0,
+            "PostPeak_LoadDecay_2Hr_Min_MWH": _max_valid(
+                -_optional_num(peak_group, "PostPeak_LoadDecay_2Hr_MWH", default=np.nan)
+            )
+            * -1.0,
             "PostPeak_DecayVs7Day_Min_MWH": _max_valid(
-                -_optional_num(peak_group, "PostPeak_LoadDecay_VsSameHour7DayMean_MWH", default=np.nan)
-            ) * -1.0,
-            "Recent_Level_Correction_Max_MWH": _max_valid(_optional_num(peak_group, "Recent_Level_Correction_MWH", default=0.0), default=0.0),
-            "Focused_Guard_Max_MWH": _max_valid(_optional_num(peak_group, "Focused_Scorecard_Guard_MWH", default=0.0), default=0.0),
-            "Auto_Residual_Max_MWH": _max_valid(_optional_num(peak_group, "Auto_Residual_Correction_MWH", default=0.0), default=0.0),
+                -_optional_num(
+                    peak_group,
+                    "PostPeak_LoadDecay_VsSameHour7DayMean_MWH",
+                    default=np.nan,
+                )
+            )
+            * -1.0,
+            "Recent_Level_Correction_Max_MWH": _max_valid(
+                _optional_num(peak_group, "Recent_Level_Correction_MWH", default=0.0),
+                default=0.0,
+            ),
+            "Focused_Guard_Max_MWH": _max_valid(
+                _optional_num(peak_group, "Focused_Scorecard_Guard_MWH", default=0.0),
+                default=0.0,
+            ),
+            "Auto_Residual_Max_MWH": _max_valid(
+                _optional_num(peak_group, "Auto_Residual_Correction_MWH", default=0.0),
+                default=0.0,
+            ),
             "Weather_Robustness_Hedge_Max_MWH": _max_valid(
                 _optional_num(peak_group, "Weather_Robustness_Hedge_MWH", default=0.0),
                 default=0.0,
             ),
             "Actual_DailyPeak_MWH": actual_peak,
             "Actual_PeakHour": actual_peak_hour,
-            "Target_PeakResidual_MWH": actual_peak - base_peak if np.isfinite(actual_peak) else np.nan,
-            "Target_TimingShift_Hours": actual_peak_hour - base_peak_hour
-            if np.isfinite(actual_peak_hour) and np.isfinite(base_peak_hour)
-            else np.nan,
+            "Target_PeakResidual_MWH": (
+                actual_peak - base_peak if np.isfinite(actual_peak) else np.nan
+            ),
+            "Target_TimingShift_Hours": (
+                actual_peak_hour - base_peak_hour
+                if np.isfinite(actual_peak_hour) and np.isfinite(base_peak_hour)
+                else np.nan
+            ),
         }
         rows.append(row)
 
@@ -396,7 +525,11 @@ def _fit_daily_peak_artifact(
         return None
 
     features = daily.loc[valid, _feature_columns(daily)].copy()
-    fill = features.median(numeric_only=True).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    fill = (
+        features.median(numeric_only=True)
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0.0)
+    )
     x = features.fillna(fill).replace([np.inf, -np.inf], 0.0).fillna(0.0)
     y = target.loc[valid].copy()
 
@@ -405,12 +538,24 @@ def _fit_daily_peak_artifact(
 
     timing_model = None
     if fit_timing:
-        timing_valid = _as_num(daily.loc[valid, "Target_TimingShift_Hours"], daily.loc[valid].index)
+        timing_valid = _as_num(
+            daily.loc[valid, "Target_TimingShift_Hours"], daily.loc[valid].index
+        )
         max_timing = float(cfg.get("target_timing_clip_hours", 4.0))
         timing_valid = timing_valid.clip(-max_timing, max_timing)
-        if bool(cfg.get("timing_model_enabled", True)) and timing_valid.notna().sum() >= min_days:
-            timing_model = _new_model(cfg, min_samples_leaf=int(cfg.get("timing_min_samples_leaf", cfg.get("min_samples_leaf", 10))))
-            timing_model.fit(x.loc[timing_valid.notna()], timing_valid.loc[timing_valid.notna()])
+        if (
+            bool(cfg.get("timing_model_enabled", True))
+            and timing_valid.notna().sum() >= min_days
+        ):
+            timing_model = _new_model(
+                cfg,
+                min_samples_leaf=int(
+                    cfg.get("timing_min_samples_leaf", cfg.get("min_samples_leaf", 10))
+                ),
+            )
+            timing_model.fit(
+                x.loc[timing_valid.notna()], timing_valid.loc[timing_valid.notna()]
+            )
 
     return {
         "residual_model": model,
@@ -431,13 +576,18 @@ def _fit_daily_peak_artifact(
     }
 
 
-def _predict_daily_peak_residual(daily_subset: pd.DataFrame, artifact: dict, cfg: dict) -> pd.Series:
+def _predict_daily_peak_residual(
+    daily_subset: pd.DataFrame, artifact: dict, cfg: dict
+) -> pd.Series:
     """Blend/cap/threshold a fitted artifact's raw prediction into a peak correction."""
     columns = list(artifact.get("feature_columns") or [])
     features = daily_subset.reindex(columns=columns)
     fill_values = artifact.get("fill_values", pd.Series(dtype=float))
     x = features.fillna(fill_values).replace([np.inf, -np.inf], 0.0).fillna(0.0)
-    pred = pd.Series(np.asarray(artifact["residual_model"].predict(x), dtype=float), index=daily_subset.index)
+    pred = pd.Series(
+        np.asarray(artifact["residual_model"].predict(x), dtype=float),
+        index=daily_subset.index,
+    )
     pred = (pred * float(cfg.get("blend", 0.50))).clip(
         -float(cfg.get("cap_mwh", 10.0)),
         float(cfg.get("cap_mwh", 10.0)),
@@ -461,10 +611,14 @@ def build_daily_peak_shadow_model(
     daily = _model_frame(backtest_df, forecast_col=forecast_col, config=config)
     if daily.empty:
         return None
-    return _fit_daily_peak_artifact(daily, cfg, forecast_col=forecast_col, fit_timing=True)
+    return _fit_daily_peak_artifact(
+        daily, cfg, forecast_col=forecast_col, fit_timing=True
+    )
 
 
-def walk_forward_daily_peak_eval(daily: pd.DataFrame, config: dict | None) -> pd.DataFrame:
+def walk_forward_daily_peak_eval(
+    daily: pd.DataFrame, config: dict | None
+) -> pd.DataFrame:
     """Leakage-safe expanding-window evaluation of the daily-peak learner.
 
     The daily rows are ordered by date; using an expanding origin, the residual
@@ -498,8 +652,10 @@ def walk_forward_daily_peak_eval(daily: pd.DataFrame, config: dict | None) -> pd
     start = min_days
     while start < n:
         train = work.iloc[:start]
-        test = work.iloc[start:start + step]
-        artifact = _fit_daily_peak_artifact(train, cfg, fit_timing=False, enforce_min_days=False)
+        test = work.iloc[start : start + step]
+        artifact = _fit_daily_peak_artifact(
+            train, cfg, fit_timing=False, enforce_min_days=False
+        )
         pred = (
             _predict_daily_peak_residual(test, artifact, cfg)
             if artifact is not None
@@ -513,20 +669,26 @@ def walk_forward_daily_peak_eval(daily: pd.DataFrame, config: dict | None) -> pd
             correction = float(pred.loc[pos]) if pos in pred.index else 0.0
             forecast_day = float(drow.get("Forecast_Day", np.nan))
             in_horizon = True
-            if min_app is not None and (not np.isfinite(forecast_day) or forecast_day < min_app):
+            if min_app is not None and (
+                not np.isfinite(forecast_day) or forecast_day < min_app
+            ):
                 in_horizon = False
-            if max_app is not None and (not np.isfinite(forecast_day) or forecast_day > max_app):
+            if max_app is not None and (
+                not np.isfinite(forecast_day) or forecast_day > max_app
+            ):
                 in_horizon = False
             applied = bool(in_horizon and abs(correction) > 0.0)
             effective = correction if applied else 0.0
             shadow_peak = base_peak + effective
-            rows.append({
-                "Date": drow.get("Date"),
-                "Applied": int(applied),
-                "Base_DailyPeak_AbsError_MWH": abs(actual_peak - base_peak),
-                "Shadow_DailyPeak_AbsError_MWH": abs(actual_peak - shadow_peak),
-                "Correction_MWH": effective,
-            })
+            rows.append(
+                {
+                    "Date": drow.get("Date"),
+                    "Applied": int(applied),
+                    "Base_DailyPeak_AbsError_MWH": abs(actual_peak - base_peak),
+                    "Shadow_DailyPeak_AbsError_MWH": abs(actual_peak - shadow_peak),
+                    "Correction_MWH": effective,
+                }
+            )
         start += step
     return pd.DataFrame(rows)
 
@@ -554,7 +716,11 @@ def _init_columns(
     out["Daily_Peak_Base_PeakHour"] = np.nan
     out["Daily_Peak_Predicted_PeakHour"] = np.nan
     out["Daily_Peak_Timing_Shift_Hours"] = 0.0
-    actual_col = "Actual_MWH" if "Actual_MWH" in out.columns else ("Actual" if "Actual" in out.columns else None)
+    actual_col = (
+        "Actual_MWH"
+        if "Actual_MWH" in out.columns
+        else ("Actual" if "Actual" in out.columns else None)
+    )
     actual = _as_num(out.get(actual_col, pd.Series(np.nan, index=out.index)), out.index)
     residual = actual - base
     out["Daily_Peak_Residual_MWH"] = residual
@@ -563,7 +729,9 @@ def _init_columns(
     return out
 
 
-def _hour_weights(hours: pd.Series, center_hour: float, spread_hours: float) -> pd.Series:
+def _hour_weights(
+    hours: pd.Series, center_hour: float, spread_hours: float
+) -> pd.Series:
     h = _as_num(hours, hours.index)
     if spread_hours <= 0:
         weights = h.eq(round(center_hour)).astype(float)
@@ -594,7 +762,11 @@ def apply_daily_peak_shadow_model(
     """
     out = df.copy()
     cfg = _cfg(config)
-    shadow_mode = bool(cfg.get("shadow_mode", True)) if force_shadow is None else bool(force_shadow)
+    shadow_mode = (
+        bool(cfg.get("shadow_mode", True))
+        if force_shadow is None
+        else bool(force_shadow)
+    )
     model_version = str(cfg.get("model_version", "daily_peak_shadow_v1"))
     base = _base_forecast(out, forecast_col=forecast_col)
     out = _init_columns(
@@ -623,7 +795,10 @@ def apply_daily_peak_shadow_model(
     features = daily.reindex(columns=columns)
     fill_values = artifact.get("fill_values", pd.Series(dtype=float))
     x = features.fillna(fill_values).replace([np.inf, -np.inf], 0.0).fillna(0.0)
-    pred_residual = pd.Series(np.asarray(artifact["residual_model"].predict(x), dtype=float), index=daily.index)
+    pred_residual = pd.Series(
+        np.asarray(artifact["residual_model"].predict(x), dtype=float),
+        index=daily.index,
+    )
     pred_residual = (pred_residual * float(cfg.get("blend", 0.50))).clip(
         -float(cfg.get("cap_mwh", 10.0)),
         float(cfg.get("cap_mwh", 10.0)),
@@ -635,12 +810,19 @@ def apply_daily_peak_shadow_model(
     timing_shift = pd.Series(0.0, index=daily.index, dtype=float)
     timing_model = artifact.get("timing_model")
     if timing_model is not None:
-        raw_timing = pd.Series(np.asarray(timing_model.predict(x), dtype=float), index=daily.index)
+        raw_timing = pd.Series(
+            np.asarray(timing_model.predict(x), dtype=float), index=daily.index
+        )
         timing_shift = raw_timing * float(cfg.get("timing_blend", 0.50))
     max_shift = float(cfg.get("max_timing_shift_hours", 3.0))
     timing_shift = timing_shift.clip(-max_shift, max_shift)
 
-    adjustment_hours = {int(h) for h in cfg.get("adjustment_hours", cfg.get("peak_hours", [14, 15, 16, 17, 18, 19, 20, 21]))}
+    adjustment_hours = {
+        int(h)
+        for h in cfg.get(
+            "adjustment_hours", cfg.get("peak_hours", [14, 15, 16, 17, 18, 19, 20, 21])
+        )
+    }
     spread_hours = float(cfg.get("spread_hours", 1.5))
     row_dt = _local_datetime(out)
     row_date = _date(out, dt=row_dt)
@@ -656,18 +838,25 @@ def apply_daily_peak_shadow_model(
         forecast_day = float(drow.get("Forecast_Day", np.nan))
         min_application_day = _optional_cfg_float(cfg, "min_application_forecast_day")
         max_application_day = _optional_cfg_float(cfg, "max_application_forecast_day")
-        out.loc[day_mask, "Daily_Peak_Base_DailyPeak_MWH"] = float(drow.get("Base_DailyPeak_MWH", np.nan))
-        out.loc[day_mask, "Daily_Peak_Predicted_Residual_MWH"] = float(pred_residual.loc[pos])
-        out.loc[day_mask, "Daily_Peak_Predicted_DailyPeak_MWH"] = (
-            float(drow.get("Base_DailyPeak_MWH", np.nan)) + float(pred_residual.loc[pos])
+        out.loc[day_mask, "Daily_Peak_Base_DailyPeak_MWH"] = float(
+            drow.get("Base_DailyPeak_MWH", np.nan)
         )
+        out.loc[day_mask, "Daily_Peak_Predicted_Residual_MWH"] = float(
+            pred_residual.loc[pos]
+        )
+        out.loc[day_mask, "Daily_Peak_Predicted_DailyPeak_MWH"] = float(
+            drow.get("Base_DailyPeak_MWH", np.nan)
+        ) + float(pred_residual.loc[pos])
         base_peak_hour = float(drow.get("Base_PeakHour", np.nan))
         if not np.isfinite(base_peak_hour):
             source.loc[day_mask] = "invalid_base_peak"
             continue
         if (
-            (min_application_day is not None and (not np.isfinite(forecast_day) or forecast_day < min_application_day))
-            or (max_application_day is not None and (not np.isfinite(forecast_day) or forecast_day > max_application_day))
+            min_application_day is not None
+            and (not np.isfinite(forecast_day) or forecast_day < min_application_day)
+        ) or (
+            max_application_day is not None
+            and (not np.isfinite(forecast_day) or forecast_day > max_application_day)
         ):
             source.loc[day_mask] = "horizon_out_of_scope"
             out.loc[day_mask, "Daily_Peak_Base_PeakHour"] = base_peak_hour
@@ -676,20 +865,32 @@ def apply_daily_peak_shadow_model(
             continue
         center = base_peak_hour + float(timing_shift.loc[pos])
         if adjustment_hours:
-            center = float(min(max(round(center), min(adjustment_hours)), max(adjustment_hours)))
+            center = float(
+                min(max(round(center), min(adjustment_hours)), max(adjustment_hours))
+            )
         else:
             center = float(round(center))
-        candidate_mask = day_mask & row_hour.astype("Int64").isin(adjustment_hours).fillna(False)
+        candidate_mask = day_mask & row_hour.astype("Int64").isin(
+            adjustment_hours
+        ).fillna(False)
         if not candidate_mask.any():
             source.loc[day_mask] = "no_adjustment_window_rows"
             continue
-        weights = _hour_weights(row_hour.loc[candidate_mask], center, spread_hours=spread_hours)
+        weights = _hour_weights(
+            row_hour.loc[candidate_mask], center, spread_hours=spread_hours
+        )
         correction = float(pred_residual.loc[pos])
         total_correction.loc[candidate_mask] = correction * weights
-        source.loc[day_mask] = "daily_peak_shadow_zeroed" if abs(correction) <= 1e-12 else "daily_peak_shadow"
+        source.loc[day_mask] = (
+            "daily_peak_shadow_zeroed"
+            if abs(correction) <= 1e-12
+            else "daily_peak_shadow"
+        )
         out.loc[day_mask, "Daily_Peak_Base_PeakHour"] = base_peak_hour
         out.loc[day_mask, "Daily_Peak_Predicted_PeakHour"] = center
-        out.loc[day_mask, "Daily_Peak_Timing_Shift_Hours"] = float(timing_shift.loc[pos])
+        out.loc[day_mask, "Daily_Peak_Timing_Shift_Hours"] = float(
+            timing_shift.loc[pos]
+        )
 
     valid = base.notna()
     total_correction = total_correction.where(valid, 0.0)
@@ -701,7 +902,11 @@ def apply_daily_peak_shadow_model(
     out["Daily_Peak_Correction_Applied_Flag"] = total_correction.ne(0.0).astype(int)
     out["Daily_Peak_Source"] = source
 
-    actual_col = "Actual_MWH" if "Actual_MWH" in out.columns else ("Actual" if "Actual" in out.columns else None)
+    actual_col = (
+        "Actual_MWH"
+        if "Actual_MWH" in out.columns
+        else ("Actual" if "Actual" in out.columns else None)
+    )
     actual = _as_num(out.get(actual_col, pd.Series(np.nan, index=out.index)), out.index)
     base_residual = actual - base
     shadow_residual = actual - adjusted
@@ -711,12 +916,18 @@ def apply_daily_peak_shadow_model(
 
     if not shadow_mode and forecast_col in out.columns:
         out[forecast_col] = adjusted
-        if forecast_col == "Final_Backtest_Forecast_MWH" and "Final_Forecast_MWH" in out.columns:
+        if (
+            forecast_col == "Final_Backtest_Forecast_MWH"
+            and "Final_Forecast_MWH" in out.columns
+        ):
             out["Final_Forecast_MWH"] = adjusted
         for col in also_update_cols:
             if col in out.columns and col != forecast_col:
                 out[col] = adjusted
-        if forecast_col in {"Final_Backtest_Forecast_MWH", "Final_Forecast_MWH"} and actual.notna().any():
+        if (
+            forecast_col in {"Final_Backtest_Forecast_MWH", "Final_Forecast_MWH"}
+            and actual.notna().any()
+        ):
             out["Final_Residual_MWH"] = actual - _as_num(out[forecast_col], out.index)
             out["Final_AbsError_MWH"] = out["Final_Residual_MWH"].abs()
             out["Final_APE"] = np.where(
@@ -728,7 +939,11 @@ def apply_daily_peak_shadow_model(
 
 
 def _daily_peak_eval_rows(df: pd.DataFrame, config: dict | None = None) -> pd.DataFrame:
-    if df is None or df.empty or "Daily_Peak_Shadow_Adjusted_Forecast_MWH" not in df.columns:
+    if (
+        df is None
+        or df.empty
+        or "Daily_Peak_Shadow_Adjusted_Forecast_MWH" not in df.columns
+    ):
         return pd.DataFrame()
     work = df.copy()
     dt = _local_datetime(work)
@@ -736,17 +951,31 @@ def _daily_peak_eval_rows(df: pd.DataFrame, config: dict | None = None) -> pd.Da
     # Score the daily peak on the same afternoon window used to train the learner
     # (config peak_hours), so the training target, application window, and this
     # evaluation share one peak definition instead of three.
-    peak_hours = {int(h) for h in _cfg(config).get("peak_hours", [14, 15, 16, 17, 18, 19, 20, 21])}
+    peak_hours = {
+        int(h) for h in _cfg(config).get("peak_hours", [14, 15, 16, 17, 18, 19, 20, 21])
+    }
     work["_PeakHour"] = _hour(work, dt=dt)
-    actual_col = "Actual_MWH" if "Actual_MWH" in work.columns else ("Actual" if "Actual" in work.columns else None)
+    actual_col = (
+        "Actual_MWH"
+        if "Actual_MWH" in work.columns
+        else ("Actual" if "Actual" in work.columns else None)
+    )
     if actual_col is None:
         return pd.DataFrame()
     rows = []
     for date, group in work.groupby("_Date", dropna=False):
-        group = group.dropna(subset=[actual_col, "Daily_Peak_Base_Forecast_MWH", "Daily_Peak_Shadow_Adjusted_Forecast_MWH"])
+        group = group.dropna(
+            subset=[
+                actual_col,
+                "Daily_Peak_Base_Forecast_MWH",
+                "Daily_Peak_Shadow_Adjusted_Forecast_MWH",
+            ]
+        )
         if group.empty:
             continue
-        peak_group = group[group["_PeakHour"].astype("Int64").isin(peak_hours).fillna(False)]
+        peak_group = group[
+            group["_PeakHour"].astype("Int64").isin(peak_hours).fillna(False)
+        ]
         if not peak_group.empty:
             group = peak_group
         actual = _as_num(group[actual_col], group.index)
@@ -760,21 +989,57 @@ def _daily_peak_eval_rows(df: pd.DataFrame, config: dict | None = None) -> pd.Da
             "Shadow_DailyPeak_MWH": float(shadow.max()),
             "Baseline_DailyPeak_AbsError_MWH": float(abs(actual.max() - base.max())),
             "Shadow_DailyPeak_AbsError_MWH": float(abs(actual.max() - shadow.max())),
-            "Baseline_AtActualPeak_AbsError_MWH": float(abs(actual.loc[actual_peak_idx] - base.loc[actual_peak_idx])),
-            "Shadow_AtActualPeak_AbsError_MWH": float(abs(actual.loc[actual_peak_idx] - shadow.loc[actual_peak_idx])),
-            "Daily_Peak_Correction_Applied_Flag": int(
-                _as_num(group.get("Daily_Peak_Correction_Applied_Flag", pd.Series(0, index=group.index)), group.index).eq(1).any()
+            "Baseline_AtActualPeak_AbsError_MWH": float(
+                abs(actual.loc[actual_peak_idx] - base.loc[actual_peak_idx])
             ),
-            "Mean_Correction_MWH": float(_as_num(group.get("Daily_Peak_Correction_MWH", pd.Series(0.0, index=group.index)), group.index).mean()),
-            "MaxAbs_Correction_MWH": float(_as_num(group.get("Daily_Peak_Correction_MWH", pd.Series(0.0, index=group.index)), group.index).abs().max()),
+            "Shadow_AtActualPeak_AbsError_MWH": float(
+                abs(actual.loc[actual_peak_idx] - shadow.loc[actual_peak_idx])
+            ),
+            "Daily_Peak_Correction_Applied_Flag": int(
+                _as_num(
+                    group.get(
+                        "Daily_Peak_Correction_Applied_Flag",
+                        pd.Series(0, index=group.index),
+                    ),
+                    group.index,
+                )
+                .eq(1)
+                .any()
+            ),
+            "Mean_Correction_MWH": float(
+                _as_num(
+                    group.get(
+                        "Daily_Peak_Correction_MWH", pd.Series(0.0, index=group.index)
+                    ),
+                    group.index,
+                ).mean()
+            ),
+            "MaxAbs_Correction_MWH": float(
+                _as_num(
+                    group.get(
+                        "Daily_Peak_Correction_MWH", pd.Series(0.0, index=group.index)
+                    ),
+                    group.index,
+                )
+                .abs()
+                .max()
+            ),
         }
-        row["Delta_DailyPeak_AbsError_MWH"] = row["Shadow_DailyPeak_AbsError_MWH"] - row["Baseline_DailyPeak_AbsError_MWH"]
-        row["Delta_AtActualPeak_AbsError_MWH"] = row["Shadow_AtActualPeak_AbsError_MWH"] - row["Baseline_AtActualPeak_AbsError_MWH"]
+        row["Delta_DailyPeak_AbsError_MWH"] = (
+            row["Shadow_DailyPeak_AbsError_MWH"]
+            - row["Baseline_DailyPeak_AbsError_MWH"]
+        )
+        row["Delta_AtActualPeak_AbsError_MWH"] = (
+            row["Shadow_AtActualPeak_AbsError_MWH"]
+            - row["Baseline_AtActualPeak_AbsError_MWH"]
+        )
         rows.append(row)
     return pd.DataFrame(rows)
 
 
-def daily_peak_shadow_summary(backtest_df: pd.DataFrame | None, artifact: dict | None, config: dict | None) -> dict:
+def daily_peak_shadow_summary(
+    backtest_df: pd.DataFrame | None, artifact: dict | None, config: dict | None
+) -> dict:
     cfg = _cfg(config)
     summary: dict[str, Any] = {
         "enabled": bool(cfg.get("enabled", False)),
@@ -788,12 +1053,18 @@ def daily_peak_shadow_summary(backtest_df: pd.DataFrame | None, artifact: dict |
     # learner on the same days it was trained on and is therefore optimistic; this
     # expanding walk-forward refits on earlier-only origins and scores held-out
     # later days, so the delta here is the honest number for a promote decision.
-    if bool(cfg.get("out_of_sample_eval_enabled", True)) and backtest_df is not None and not backtest_df.empty:
+    if (
+        bool(cfg.get("out_of_sample_eval_enabled", True))
+        and backtest_df is not None
+        and not backtest_df.empty
+    ):
         forecast_col = "Final_Backtest_Forecast_MWH"
         if artifact and isinstance(artifact.get("metadata"), dict):
             forecast_col = str(artifact["metadata"].get("forecast_col", forecast_col))
         try:
-            oos_daily = _model_frame(backtest_df, forecast_col=forecast_col, config=config)
+            oos_daily = _model_frame(
+                backtest_df, forecast_col=forecast_col, config=config
+            )
             oos = walk_forward_daily_peak_eval(oos_daily, config)
         except Exception:
             oos = pd.DataFrame()
@@ -803,15 +1074,26 @@ def daily_peak_shadow_summary(backtest_df: pd.DataFrame | None, artifact: dict |
             summary["out_of_sample_scored_days"] = int(len(oos))
             summary["out_of_sample_applied_days"] = int(len(applied_oos))
             if not applied_oos.empty:
-                delta = applied_oos["Shadow_DailyPeak_AbsError_MWH"] - applied_oos["Base_DailyPeak_AbsError_MWH"]
-                summary["out_of_sample_baseline_daily_peak_mae_mwh"] = float(applied_oos["Base_DailyPeak_AbsError_MWH"].mean())
-                summary["out_of_sample_daily_peak_shadow_mae_mwh"] = float(applied_oos["Shadow_DailyPeak_AbsError_MWH"].mean())
+                delta = (
+                    applied_oos["Shadow_DailyPeak_AbsError_MWH"]
+                    - applied_oos["Base_DailyPeak_AbsError_MWH"]
+                )
+                summary["out_of_sample_baseline_daily_peak_mae_mwh"] = float(
+                    applied_oos["Base_DailyPeak_AbsError_MWH"].mean()
+                )
+                summary["out_of_sample_daily_peak_shadow_mae_mwh"] = float(
+                    applied_oos["Shadow_DailyPeak_AbsError_MWH"].mean()
+                )
                 summary["out_of_sample_delta_daily_peak_mae_mwh"] = float(delta.mean())
                 summary["out_of_sample_improved_days"] = int((delta < 0.0).sum())
                 summary["out_of_sample_worsened_days"] = int((delta > 0.0).sum())
-                summary["out_of_sample_mean_abs_correction_mwh"] = float(applied_oos["Correction_MWH"].abs().mean())
+                summary["out_of_sample_mean_abs_correction_mwh"] = float(
+                    applied_oos["Correction_MWH"].abs().mean()
+                )
 
-    daily = _daily_peak_eval_rows(backtest_df if backtest_df is not None else pd.DataFrame(), config)
+    daily = _daily_peak_eval_rows(
+        backtest_df if backtest_df is not None else pd.DataFrame(), config
+    )
     if daily.empty:
         summary["evaluation_days"] = 0
         return summary
@@ -823,22 +1105,58 @@ def daily_peak_shadow_summary(backtest_df: pd.DataFrame | None, artifact: dict |
     if eval_days.empty:
         return summary
 
-    summary["baseline_daily_peak_mae_mwh"] = float(eval_days["Baseline_DailyPeak_AbsError_MWH"].mean())
-    summary["daily_peak_shadow_mae_mwh"] = float(eval_days["Shadow_DailyPeak_AbsError_MWH"].mean())
-    summary["delta_daily_peak_mae_mwh"] = float(eval_days["Delta_DailyPeak_AbsError_MWH"].mean())
-    summary["baseline_at_actual_peak_mae_mwh"] = float(eval_days["Baseline_AtActualPeak_AbsError_MWH"].mean())
-    summary["shadow_at_actual_peak_mae_mwh"] = float(eval_days["Shadow_AtActualPeak_AbsError_MWH"].mean())
-    summary["delta_at_actual_peak_mae_mwh"] = float(eval_days["Delta_AtActualPeak_AbsError_MWH"].mean())
-    summary["improved_days"] = int((eval_days["Delta_DailyPeak_AbsError_MWH"] < 0.0).sum())
-    summary["worsened_days"] = int((eval_days["Delta_DailyPeak_AbsError_MWH"] > 0.0).sum())
-    summary["mean_daily_correction_mwh"] = float(eval_days["Mean_Correction_MWH"].mean())
-    summary["mean_max_abs_correction_mwh"] = float(eval_days["MaxAbs_Correction_MWH"].mean())
+    summary["baseline_daily_peak_mae_mwh"] = float(
+        eval_days["Baseline_DailyPeak_AbsError_MWH"].mean()
+    )
+    summary["daily_peak_shadow_mae_mwh"] = float(
+        eval_days["Shadow_DailyPeak_AbsError_MWH"].mean()
+    )
+    summary["delta_daily_peak_mae_mwh"] = float(
+        eval_days["Delta_DailyPeak_AbsError_MWH"].mean()
+    )
+    summary["baseline_at_actual_peak_mae_mwh"] = float(
+        eval_days["Baseline_AtActualPeak_AbsError_MWH"].mean()
+    )
+    summary["shadow_at_actual_peak_mae_mwh"] = float(
+        eval_days["Shadow_AtActualPeak_AbsError_MWH"].mean()
+    )
+    summary["delta_at_actual_peak_mae_mwh"] = float(
+        eval_days["Delta_AtActualPeak_AbsError_MWH"].mean()
+    )
+    summary["improved_days"] = int(
+        (eval_days["Delta_DailyPeak_AbsError_MWH"] < 0.0).sum()
+    )
+    summary["worsened_days"] = int(
+        (eval_days["Delta_DailyPeak_AbsError_MWH"] > 0.0).sum()
+    )
+    summary["mean_daily_correction_mwh"] = float(
+        eval_days["Mean_Correction_MWH"].mean()
+    )
+    summary["mean_max_abs_correction_mwh"] = float(
+        eval_days["MaxAbs_Correction_MWH"].mean()
+    )
 
-    actual = _as_num(backtest_df.get("Actual_MWH", pd.Series(np.nan, index=backtest_df.index)), backtest_df.index)
-    base = _as_num(backtest_df.get("Daily_Peak_Base_Forecast_MWH", pd.Series(np.nan, index=backtest_df.index)), backtest_df.index)
-    shadow = _as_num(backtest_df.get("Daily_Peak_Shadow_Adjusted_Forecast_MWH", pd.Series(np.nan, index=backtest_df.index)), backtest_df.index)
+    actual = _as_num(
+        backtest_df.get("Actual_MWH", pd.Series(np.nan, index=backtest_df.index)),
+        backtest_df.index,
+    )
+    base = _as_num(
+        backtest_df.get(
+            "Daily_Peak_Base_Forecast_MWH", pd.Series(np.nan, index=backtest_df.index)
+        ),
+        backtest_df.index,
+    )
+    shadow = _as_num(
+        backtest_df.get(
+            "Daily_Peak_Shadow_Adjusted_Forecast_MWH",
+            pd.Series(np.nan, index=backtest_df.index),
+        ),
+        backtest_df.index,
+    )
     row_applied = _as_num(
-        backtest_df.get("Daily_Peak_Correction_Applied_Flag", pd.Series(0, index=backtest_df.index)),
+        backtest_df.get(
+            "Daily_Peak_Correction_Applied_Flag", pd.Series(0, index=backtest_df.index)
+        ),
         backtest_df.index,
     ).eq(1)
     row_valid = actual.notna() & base.notna() & shadow.notna() & row_applied
@@ -848,5 +1166,7 @@ def daily_peak_shadow_summary(backtest_df: pd.DataFrame | None, artifact: dict |
         summary["applied_hourly_rows"] = int(row_valid.sum())
         summary["baseline_hourly_mae_on_applied_rows_mwh"] = float(base_abs.mean())
         summary["shadow_hourly_mae_on_applied_rows_mwh"] = float(shadow_abs.mean())
-        summary["delta_hourly_mae_on_applied_rows_mwh"] = float((shadow_abs - base_abs).mean())
+        summary["delta_hourly_mae_on_applied_rows_mwh"] = float(
+            (shadow_abs - base_abs).mean()
+        )
     return summary

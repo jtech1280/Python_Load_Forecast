@@ -5,7 +5,11 @@ from .time_features import add_time_features
 from .weather_features import add_weather_features
 from .solar_features import add_solar_features
 from .lag_features import add_basic_lags
-from .intraday_load_features import merge_intraday_load_features, zero_intraday_load_features
+from .intraday_load_features import (
+    merge_intraday_load_features,
+    zero_intraday_load_features,
+)
+
 
 def build_training_frame(
     load_df: pd.DataFrame,
@@ -18,10 +22,13 @@ def build_training_frame(
     df = add_time_features(df)
     df = add_weather_features(df)
     df = add_solar_features(df, btm_monthly_df, solar_df)
-    df = merge_intraday_load_features(df, intraday_load_features, allow_carry_forward=False)
+    df = merge_intraday_load_features(
+        df, intraday_load_features, allow_carry_forward=False
+    )
     df = add_basic_lags(df)
     df = df.dropna(subset=["MWH", "Temperature"])  # require target + temp
     return df
+
 
 def build_forecast_frame(
     weather_df: pd.DataFrame,

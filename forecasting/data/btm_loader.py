@@ -6,7 +6,8 @@ import numpy as np
 from dateutil.relativedelta import relativedelta
 
 # --- Hardcoded TSV pasted here (shortened for brevity) ---
-HARDCODED_BTM_SOLAR_MONTHLY_TSV = r"""MONTH	YEAR	RATE	CUST_CNT	TTL_SLR_KW	TTL_SLR_KW_RT	TTL_SLR_CNT_RT	TTL_AVG_KW
+HARDCODED_BTM_SOLAR_MONTHLY_TSV = (
+    r"""MONTH	YEAR	RATE	CUST_CNT	TTL_SLR_KW	TTL_SLR_KW_RT	TTL_SLR_CNT_RT	TTL_AVG_KW
 1	2002	TOTAL	3	5.87	5.87	3	1.956666
 2	2002	TOTAL	0	0.00	5.87	3	1.956666
 3	2002	TOTAL	3	6.24	12.11	6	2.018333
@@ -300,6 +301,8 @@ HARDCODED_BTM_SOLAR_MONTHLY_TSV = r"""MONTH	YEAR	RATE	CUST_CNT	TTL_SLR_KW	TTL_SL
 3	2026	TOTAL	64	306.92	62894.59	13641	4.610702
 4	2026	TOTAL	40	281.86	63176.45	13681	4.617823
 """.strip()
+)
+
 
 def load_btm_monthly_capacity(config: dict) -> pd.DataFrame:
     """Return monthly BTM nameplate history and derived ratios."""
@@ -308,7 +311,9 @@ def load_btm_monthly_capacity(config: dict) -> pd.DataFrame:
     impact_mw = float(config["btm"]["max_observed_impact_mw"])
 
     if mode == "hardcoded":
-        df = pd.read_csv(io.StringIO(HARDCODED_BTM_SOLAR_MONTHLY_TSV), sep=r"\s+", engine="python")
+        df = pd.read_csv(
+            io.StringIO(HARDCODED_BTM_SOLAR_MONTHLY_TSV), sep=r"\s+", engine="python"
+        )
     elif mode == "csv":
         df = pd.read_csv(config["btm"]["tsv_path"])
     elif mode == "sql":
@@ -329,8 +334,15 @@ def load_btm_monthly_capacity(config: dict) -> pd.DataFrame:
         last_np = df.loc[df["DT"] == last, "TTL_SLR_KW_RT"].iloc[0]
         for i in range(1, extend_n + 1):
             ext_dt = last + relativedelta(months=i)
-            ext_rows.append({"MONTH": ext_dt.month, "YEAR": ext_dt.year, "DT": ext_dt,
-                             "TTL_SLR_KW_RT": last_np, "Nameplate_MW": last_np / 1000.0})
+            ext_rows.append(
+                {
+                    "MONTH": ext_dt.month,
+                    "YEAR": ext_dt.year,
+                    "DT": ext_dt,
+                    "TTL_SLR_KW_RT": last_np,
+                    "Nameplate_MW": last_np / 1000.0,
+                }
+            )
         df_ext = pd.DataFrame(ext_rows)
         df = pd.concat([df, df_ext], ignore_index=True)
 

@@ -25,7 +25,9 @@ def _hour_group(hour: int) -> str:
 
 
 def _cfg(config: dict | None) -> dict:
-    return ((config or {}).get("calibration", {}) or {}).get("recent_residual", {}) or {}
+    return ((config or {}).get("calibration", {}) or {}).get(
+        "recent_residual", {}
+    ) or {}
 
 
 def _season_from_month(month: int) -> str:
@@ -42,13 +44,23 @@ def _recent_hot_peak_scale(row: pd.Series, recent_cfg: dict) -> float:
     hot_cfg = recent_cfg.get("hot_peak", {}) or {}
     hours = [int(hour) for hour in hot_cfg.get("hours", [16, 17, 18, 19, 20])]
     hour = int(row.get("Hour", pd.to_datetime(row.get("DT")).hour))
-    daily_max = pd.to_numeric(pd.Series([row.get("Temperature_DailyMax")]), errors="coerce").iloc[0]
-    if hour not in hours or not np.isfinite(daily_max) or daily_max < float(hot_cfg.get("min_maxtemp_f", 90.0)):
+    daily_max = pd.to_numeric(
+        pd.Series([row.get("Temperature_DailyMax")]), errors="coerce"
+    ).iloc[0]
+    if (
+        hour not in hours
+        or not np.isfinite(daily_max)
+        or daily_max < float(hot_cfg.get("min_maxtemp_f", 90.0))
+    ):
         return 1.0
     season = row.get("Season")
     if pd.isna(season):
         season = _season_from_month(pd.to_datetime(row.get("DT")).month)
-    return float((hot_cfg.get("season_scales", {}) or {}).get(str(season), hot_cfg.get("default_scale", 1.0)))
+    return float(
+        (hot_cfg.get("season_scales", {}) or {}).get(
+            str(season), hot_cfg.get("default_scale", 1.0)
+        )
+    )
 
 
 def _forecast_day(row: pd.Series, horizon_index: int | None = None) -> int:
@@ -59,7 +71,9 @@ def _forecast_day(row: pd.Series, horizon_index: int | None = None) -> int:
     return int(math.ceil(h / 24.0))
 
 
-def _recent_horizon_regime_scale(row: pd.Series, recent_cfg: dict, horizon_index: int | None = None) -> float:
+def _recent_horizon_regime_scale(
+    row: pd.Series, recent_cfg: dict, horizon_index: int | None = None
+) -> float:
     """Dampen recent residual carryover where replay shows unstable transfer by lead/regime."""
     scale_cfg = recent_cfg.get("horizon_regime_scales", {}) or {}
     forecast_day = _forecast_day(row, horizon_index)
@@ -78,13 +92,23 @@ def _recent_horizon_regime_scale(row: pd.Series, recent_cfg: dict, horizon_index
         season = row.get("Season")
         if pd.isna(season):
             season = _season_from_month(pd.to_datetime(row.get("DT")).month)
-        daily_max = pd.to_numeric(pd.Series([row.get("Temperature_DailyMax")]), errors="coerce").iloc[0]
-        cloud = pd.to_numeric(pd.Series([row.get("CloudCover_Norm")]), errors="coerce").iloc[0]
+        daily_max = pd.to_numeric(
+            pd.Series([row.get("Temperature_DailyMax")]), errors="coerce"
+        ).iloc[0]
+        cloud = pd.to_numeric(
+            pd.Series([row.get("CloudCover_Norm")]), errors="coerce"
+        ).iloc[0]
         if np.isfinite(cloud) and cloud > 1.5:
             cloud = cloud / 100.0
         min_temp = float(hot_clear_cfg.get("min_maxtemp_f", 90.0))
         max_cloud = float(hot_clear_cfg.get("max_cloud_cover_norm", 0.20))
-        if str(season) == "Summer" and np.isfinite(daily_max) and daily_max >= min_temp and np.isfinite(cloud) and cloud <= max_cloud:
+        if (
+            str(season) == "Summer"
+            and np.isfinite(daily_max)
+            and daily_max >= min_temp
+            and np.isfinite(cloud)
+            and cloud <= max_cloud
+        ):
             scale *= float(hot_clear_cfg.get("scale", 1.0))
 
     return float(np.clip(scale, 0.0, 2.0))
@@ -112,7 +136,13 @@ def _cloud_bucket_from_values(values: pd.Series) -> pd.Series:
     return pd.cut(
         cloud,
         bins=bins,
-        labels=["Clear/Low", "Some Clouds", "Partly Cloudy", "Mostly Cloudy", "Overcast"],
+        labels=[
+            "Clear/Low",
+            "Some Clouds",
+            "Partly Cloudy",
+            "Mostly Cloudy",
+            "Overcast",
+        ],
         include_lowest=True,
     ).astype("object")
 
@@ -163,7 +193,9 @@ def _add_weather_residual_buckets(df: pd.DataFrame) -> pd.DataFrame:
         if "DailyMaxTempBin" in out.columns:
             out["DailyMaxTempBucket"] = out["DailyMaxTempBin"].astype("object")
         elif "Temperature_DailyMax" in out.columns:
-            out["DailyMaxTempBucket"] = _temp_bucket_from_values(out["Temperature_DailyMax"])
+            out["DailyMaxTempBucket"] = _temp_bucket_from_values(
+                out["Temperature_DailyMax"]
+            )
         elif "Temperature" in out.columns:
             out["DailyMaxTempBucket"] = _temp_bucket_from_values(out["Temperature"])
         else:
@@ -183,9 +215,13 @@ def _add_weather_residual_buckets(df: pd.DataFrame) -> pd.DataFrame:
 
     if "SolarLossBucket" not in out.columns:
         if "BTM_Solar_Loss_From_ClearSky_MW" in out.columns:
-            out["SolarLossBucket"] = _solar_loss_bucket_from_values(out["BTM_Solar_Loss_From_ClearSky_MW"])
+            out["SolarLossBucket"] = _solar_loss_bucket_from_values(
+                out["BTM_Solar_Loss_From_ClearSky_MW"]
+            )
         elif "Midday_Overcast_Solar_Loss_MW" in out.columns:
-            out["SolarLossBucket"] = _solar_loss_bucket_from_values(out["Midday_Overcast_Solar_Loss_MW"])
+            out["SolarLossBucket"] = _solar_loss_bucket_from_values(
+                out["Midday_Overcast_Solar_Loss_MW"]
+            )
         else:
             out["SolarLossBucket"] = np.nan
     return out
@@ -200,11 +236,17 @@ def _prep_residual_frame(backtest_df: pd.DataFrame) -> pd.DataFrame:
     if "Residual_MWH" in out.columns:
         out["Residual_MWH"] = _as_num(out["Residual_MWH"])
     elif {"Actual_MWH", "Raw_Forecast_MWH"}.issubset(out.columns):
-        out["Residual_MWH"] = _as_num(out["Actual_MWH"]) - _as_num(out["Raw_Forecast_MWH"])
+        out["Residual_MWH"] = _as_num(out["Actual_MWH"]) - _as_num(
+            out["Raw_Forecast_MWH"]
+        )
     else:
         return pd.DataFrame()
     out = out.dropna(subset=["Residual_MWH"])
-    out["Hour"] = _as_num(out.get("Hour", out["DT"].dt.hour)).fillna(out["DT"].dt.hour).astype(int)
+    out["Hour"] = (
+        _as_num(out.get("Hour", out["DT"].dt.hour))
+        .fillna(out["DT"].dt.hour)
+        .astype(int)
+    )
     out["HourGroup"] = out.get("HourGroup", out["Hour"].map(_hour_group))
     return _add_weather_residual_buckets(out)
 
@@ -212,11 +254,12 @@ def _prep_residual_frame(backtest_df: pd.DataFrame) -> pd.DataFrame:
 def _clipper(cap: float):
     def _clip(x: float) -> float:
         return float(np.clip(x, -cap, cap)) if np.isfinite(x) else 0.0
+
     return _clip
 
 
 def _ar_config(recent_cfg: dict) -> dict:
-    return (recent_cfg.get("ar_residual", {}) or {})
+    return recent_cfg.get("ar_residual", {}) or {}
 
 
 def _ar_cap(recent_cfg: dict, ar_cfg: dict) -> float:
@@ -225,18 +268,29 @@ def _ar_cap(recent_cfg: dict, ar_cfg: dict) -> float:
     return abs(float(ar_cfg.get("cap_mwh", default_cap)))
 
 
-def _build_ar_residual_state(work: pd.DataFrame, recent_cfg: dict, residual_col: str = "Residual_MWH") -> dict:
+def _build_ar_residual_state(
+    work: pd.DataFrame, recent_cfg: dict, residual_col: str = "Residual_MWH"
+) -> dict:
     """Estimate a conservative AR(1) residual carryover from pre-origin residuals."""
     ar_cfg = _ar_config(recent_cfg)
     if not bool(ar_cfg.get("enabled", False)):
         return {"enabled": False}
-    if work is None or work.empty or "DT" not in work.columns or residual_col not in work.columns:
+    if (
+        work is None
+        or work.empty
+        or "DT" not in work.columns
+        or residual_col not in work.columns
+    ):
         return {"enabled": True, "empty": True}
 
     frame = work.copy()
     frame["DT"] = pd.to_datetime(frame["DT"], errors="coerce")
     frame[residual_col] = _as_num(frame[residual_col])
-    frame = frame.dropna(subset=["DT", residual_col]).sort_values("DT").reset_index(drop=True)
+    frame = (
+        frame.dropna(subset=["DT", residual_col])
+        .sort_values("DT")
+        .reset_index(drop=True)
+    )
     if frame.empty:
         return {"enabled": True, "empty": True}
     if "Hour" not in frame.columns:
@@ -245,8 +299,12 @@ def _build_ar_residual_state(work: pd.DataFrame, recent_cfg: dict, residual_col:
         frame["Hour"] = _as_num(frame["Hour"]).fillna(frame["DT"].dt.hour).astype(int)
 
     max_dt = frame["DT"].max()
-    lookback_hours = int(ar_cfg.get("lookback_hours", ar_cfg.get("phi_window_hours", 168)))
-    recent = frame[frame["DT"] >= max_dt - pd.Timedelta(hours=max(1, lookback_hours))].copy()
+    lookback_hours = int(
+        ar_cfg.get("lookback_hours", ar_cfg.get("phi_window_hours", 168))
+    )
+    recent = frame[
+        frame["DT"] >= max_dt - pd.Timedelta(hours=max(1, lookback_hours))
+    ].copy()
     if recent.empty:
         recent = frame.copy()
 
@@ -265,7 +323,9 @@ def _build_ar_residual_state(work: pd.DataFrame, recent_cfg: dict, residual_col:
     n_pairs = int(len(pairs))
     phi_raw = 0.0
     if n_pairs >= min_pairs:
-        prev = pd.to_numeric(pairs["prev_residual"], errors="coerce").to_numpy(dtype=float)
+        prev = pd.to_numeric(pairs["prev_residual"], errors="coerce").to_numpy(
+            dtype=float
+        )
         curr = pd.to_numeric(pairs[residual_col], errors="coerce").to_numpy(dtype=float)
         denom = float(np.dot(prev, prev))
         if denom > 1e-9:
@@ -278,7 +338,9 @@ def _build_ar_residual_state(work: pd.DataFrame, recent_cfg: dict, residual_col:
     phi_cap = abs(float(ar_cfg.get("phi_cap", 0.40)))
     phi = float(np.clip(phi_raw * shrink, -phi_cap, phi_cap))
 
-    same_hour_days = int(ar_cfg.get("same_hour_days", recent_cfg.get("same_hour_days", 7)))
+    same_hour_days = int(
+        ar_cfg.get("same_hour_days", recent_cfg.get("same_hour_days", 7))
+    )
     same_start = max_dt - pd.Timedelta(days=max(1, same_hour_days))
     same_hour = frame[frame["DT"] >= same_start].copy()
     if same_hour.empty:
@@ -301,7 +363,9 @@ def _build_ar_residual_state(work: pd.DataFrame, recent_cfg: dict, residual_col:
     }
 
 
-def _ar_forecast_day_scale(row: pd.Series, ar_cfg: dict, horizon_index: int | None = None) -> float:
+def _ar_forecast_day_scale(
+    row: pd.Series, ar_cfg: dict, horizon_index: int | None = None
+) -> float:
     scales = ar_cfg.get("forecast_day_scales", ar_cfg.get("horizon_scales", {})) or {}
     forecast_day = _forecast_day(row, horizon_index)
     if forecast_day <= 1:
@@ -321,12 +385,21 @@ def _ar_residual_correction(
 ) -> tuple[float, float, float, str]:
     ar_cfg = _ar_config(recent_cfg)
     state = (profile or {}).get("ar_residual", {}) or {}
-    if not bool(ar_cfg.get("enabled", False)) or not bool(state.get("enabled", False)) or state.get("empty"):
+    if (
+        not bool(ar_cfg.get("enabled", False))
+        or not bool(state.get("enabled", False))
+        or state.get("empty")
+    ):
         return 0.0, np.nan, np.nan, "ar_disabled_or_empty"
 
     phi = float(state.get("phi", 0.0) or 0.0)
     latest_residual = float(state.get("latest_residual", 0.0) or 0.0)
-    if not np.isfinite(phi) or not np.isfinite(latest_residual) or abs(phi) <= 1e-12 or abs(latest_residual) <= 1e-12:
+    if (
+        not np.isfinite(phi)
+        or not np.isfinite(latest_residual)
+        or abs(phi) <= 1e-12
+        or abs(latest_residual) <= 1e-12
+    ):
         return 0.0, phi, latest_residual, "ar1_zero"
 
     raw = phi * latest_residual
@@ -334,7 +407,9 @@ def _ar_residual_correction(
     hour = int(row.get("Hour", pd.to_datetime(row.get("DT")).hour))
     same_lookup = state.get("same_hour_mean", {}) or {}
     same_hour_value = same_lookup.get(hour, same_lookup.get(str(hour)))
-    same_hour_blend = float(np.clip(float(ar_cfg.get("same_hour_blend", 0.0)), 0.0, 1.0))
+    same_hour_blend = float(
+        np.clip(float(ar_cfg.get("same_hour_blend", 0.0)), 0.0, 1.0)
+    )
     if same_hour_blend > 0.0 and same_hour_value is not None:
         same_hour_value = float(same_hour_value)
         if np.isfinite(same_hour_value):
@@ -355,7 +430,7 @@ def _ar_residual_correction(
 
 
 def _origin_day_config(recent_cfg: dict) -> dict:
-    return (recent_cfg.get("origin_day_state", {}) or {})
+    return recent_cfg.get("origin_day_state", {}) or {}
 
 
 def _origin_day_cap(recent_cfg: dict, origin_cfg: dict) -> float:
@@ -368,10 +443,16 @@ def _date_from_dt(dt: pd.Series) -> pd.Series:
     try:
         return pd.to_datetime(dt, errors="coerce").dt.normalize()
     except Exception:
-        return pd.to_datetime(dt, errors="coerce", utc=True).dt.tz_convert(None).dt.normalize()
+        return (
+            pd.to_datetime(dt, errors="coerce", utc=True)
+            .dt.tz_convert(None)
+            .dt.normalize()
+        )
 
 
-def _latest_same_sign_run_hours(residuals: pd.Series, target: float, threshold: float) -> int:
+def _latest_same_sign_run_hours(
+    residuals: pd.Series, target: float, threshold: float
+) -> int:
     if not np.isfinite(target) or abs(target) <= 1e-12:
         return 0
     sign = np.sign(target)
@@ -384,20 +465,39 @@ def _latest_same_sign_run_hours(residuals: pd.Series, target: float, threshold: 
     return int(run)
 
 
-def _build_origin_day_state(work: pd.DataFrame, recent_cfg: dict, residual_col: str = "Residual_MWH") -> dict:
+def _build_origin_day_state(
+    work: pd.DataFrame, recent_cfg: dict, residual_col: str = "Residual_MWH"
+) -> dict:
     """Estimate a shrunk day-level residual state from pre-origin residuals."""
     origin_cfg = _origin_day_config(recent_cfg)
     if not bool(origin_cfg.get("enabled", False)):
         return {"enabled": False}
-    if work is None or work.empty or "DT" not in work.columns or residual_col not in work.columns:
-        return {"enabled": True, "empty": True, "source": "origin_day_disabled_or_empty"}
+    if (
+        work is None
+        or work.empty
+        or "DT" not in work.columns
+        or residual_col not in work.columns
+    ):
+        return {
+            "enabled": True,
+            "empty": True,
+            "source": "origin_day_disabled_or_empty",
+        }
 
     frame = work.copy()
     frame["DT"] = pd.to_datetime(frame["DT"], errors="coerce")
     frame[residual_col] = _as_num(frame[residual_col])
-    frame = frame.dropna(subset=["DT", residual_col]).sort_values("DT").reset_index(drop=True)
+    frame = (
+        frame.dropna(subset=["DT", residual_col])
+        .sort_values("DT")
+        .reset_index(drop=True)
+    )
     if frame.empty:
-        return {"enabled": True, "empty": True, "source": "origin_day_disabled_or_empty"}
+        return {
+            "enabled": True,
+            "empty": True,
+            "source": "origin_day_disabled_or_empty",
+        }
     if "Hour" not in frame.columns:
         frame["Hour"] = frame["DT"].dt.hour.astype(int)
     else:
@@ -409,12 +509,18 @@ def _build_origin_day_state(work: pd.DataFrame, recent_cfg: dict, residual_col: 
 
     max_dt = frame["DT"].max()
     lookback_days = int(origin_cfg.get("lookback_days", 7))
-    recent = frame[frame["DT"] >= max_dt - pd.Timedelta(days=max(1, lookback_days))].copy()
+    recent = frame[
+        frame["DT"] >= max_dt - pd.Timedelta(days=max(1, lookback_days))
+    ].copy()
     if recent.empty:
         recent = frame.copy()
     recent["Date"] = _date_from_dt(recent["DT"])
 
-    day_stats = recent.groupby("Date", dropna=True)[residual_col].agg(["mean", "count"]).reset_index()
+    day_stats = (
+        recent.groupby("Date", dropna=True)[residual_col]
+        .agg(["mean", "count"])
+        .reset_index()
+    )
     min_day_hours = int(origin_cfg.get("min_day_hours", 12))
     eligible_days = day_stats[day_stats["count"] >= min_day_hours].copy()
     if eligible_days.empty:
@@ -435,13 +541,25 @@ def _build_origin_day_state(work: pd.DataFrame, recent_cfg: dict, residual_col: 
         }
 
     latest_day_mean = float(eligible_days["mean"].iloc[-1])
-    recent_day_mean = float(np.average(eligible_days["mean"], weights=np.sqrt(eligible_days["count"].clip(lower=1))))
-    latest_weight = float(np.clip(float(origin_cfg.get("latest_day_weight", 0.65)), 0.0, 1.0))
-    state_raw = latest_weight * latest_day_mean + (1.0 - latest_weight) * recent_day_mean
+    recent_day_mean = float(
+        np.average(
+            eligible_days["mean"], weights=np.sqrt(eligible_days["count"].clip(lower=1))
+        )
+    )
+    latest_weight = float(
+        np.clip(float(origin_cfg.get("latest_day_weight", 0.65)), 0.0, 1.0)
+    )
+    state_raw = (
+        latest_weight * latest_day_mean + (1.0 - latest_weight) * recent_day_mean
+    )
 
     source = "origin_day_state"
     if bool(origin_cfg.get("require_latest_recent_same_sign", True)):
-        if np.isfinite(latest_day_mean) and np.isfinite(recent_day_mean) and latest_day_mean * recent_day_mean < 0.0:
+        if (
+            np.isfinite(latest_day_mean)
+            and np.isfinite(recent_day_mean)
+            and latest_day_mean * recent_day_mean < 0.0
+        ):
             state_raw = 0.0
             source = "origin_day_sign_mismatch"
 
@@ -450,14 +568,22 @@ def _build_origin_day_state(work: pd.DataFrame, recent_cfg: dict, residual_col: 
     day_shrink = n_days / (n_days + shrink_days) if n_days > 0 else 0.0
     hour_shrink = n_hours / (n_hours + shrink_hours) if n_hours > 0 else 0.0
     shrink = float(day_shrink * hour_shrink)
-    state_cap = abs(float(origin_cfg.get("state_cap_mwh", _origin_day_cap(recent_cfg, origin_cfg) * 2.0)))
+    state_cap = abs(
+        float(
+            origin_cfg.get(
+                "state_cap_mwh", _origin_day_cap(recent_cfg, origin_cfg) * 2.0
+            )
+        )
+    )
     state_mwh = float(np.clip(state_raw * shrink, -state_cap, state_cap))
 
     clip = _clipper(_origin_day_cap(recent_cfg, origin_cfg))
     same_hour_lookup = recent.groupby("Hour")[residual_col].mean().to_dict()
     hourgroup_lookup = recent.groupby("HourGroup")[residual_col].mean().to_dict()
     run_threshold = abs(float(origin_cfg.get("same_sign_threshold_mwh", 0.25)))
-    same_sign_run_hours = _latest_same_sign_run_hours(frame[residual_col], state_raw, run_threshold)
+    same_sign_run_hours = _latest_same_sign_run_hours(
+        frame[residual_col], state_raw, run_threshold
+    )
 
     return {
         "enabled": True,
@@ -487,7 +613,9 @@ def _origin_day_bucket(forecast_day: int) -> str:
     return "days8plus"
 
 
-def _origin_day_forecast_day_scale(row: pd.Series, origin_cfg: dict, horizon_index: int | None = None) -> float:
+def _origin_day_forecast_day_scale(
+    row: pd.Series, origin_cfg: dict, horizon_index: int | None = None
+) -> float:
     scales = origin_cfg.get("forecast_day_scales", {}) or {}
     bucket = _origin_day_bucket(_forecast_day(row, horizon_index))
     defaults = {"day1": 0.35, "days2to3": 0.45, "days4to7": 0.25, "days8plus": 0.08}
@@ -515,7 +643,11 @@ def _same_signed_component(base: float, value: Any, origin_cfg: dict) -> float |
         return None
     if not np.isfinite(v):
         return None
-    if bool(origin_cfg.get("require_component_same_sign", True)) and abs(base) > 1e-12 and abs(v) > 1e-12:
+    if (
+        bool(origin_cfg.get("require_component_same_sign", True))
+        and abs(base) > 1e-12
+        and abs(v) > 1e-12
+    ):
         if np.sign(base) != np.sign(v):
             return None
     return v
@@ -529,8 +661,17 @@ def _origin_day_residual_correction(
 ) -> tuple[float, float, float, str]:
     origin_cfg = _origin_day_config(recent_cfg)
     state = (profile or {}).get("origin_day_state", {}) or {}
-    if not bool(origin_cfg.get("enabled", False)) or not bool(state.get("enabled", False)) or state.get("empty"):
-        return 0.0, np.nan, np.nan, str(state.get("source", "origin_day_disabled_or_empty"))
+    if (
+        not bool(origin_cfg.get("enabled", False))
+        or not bool(state.get("enabled", False))
+        or state.get("empty")
+    ):
+        return (
+            0.0,
+            np.nan,
+            np.nan,
+            str(state.get("source", "origin_day_disabled_or_empty")),
+        )
 
     state_mwh = float(state.get("state_mwh", 0.0) or 0.0)
     latest_day_mean = float(state.get("latest_day_mean", np.nan))
@@ -543,15 +684,23 @@ def _origin_day_residual_correction(
     hour = int(row.get("Hour", pd.to_datetime(row.get("DT")).hour))
     hourgroup = str(row.get("HourGroup", _hour_group(hour)))
 
-    hourgroup_blend = float(np.clip(float(origin_cfg.get("hourgroup_blend", 0.15)), 0.0, 1.0))
-    hourgroup_value = _same_signed_component(raw, (state.get("hourgroup_mean", {}) or {}).get(hourgroup), origin_cfg)
+    hourgroup_blend = float(
+        np.clip(float(origin_cfg.get("hourgroup_blend", 0.15)), 0.0, 1.0)
+    )
+    hourgroup_value = _same_signed_component(
+        raw, (state.get("hourgroup_mean", {}) or {}).get(hourgroup), origin_cfg
+    )
     if hourgroup_blend > 0.0 and hourgroup_value is not None:
         raw = (1.0 - hourgroup_blend) * raw + hourgroup_blend * hourgroup_value
         source_parts.append("hourgroup")
 
-    same_hour_blend = float(np.clip(float(origin_cfg.get("same_hour_blend", 0.10)), 0.0, 1.0))
+    same_hour_blend = float(
+        np.clip(float(origin_cfg.get("same_hour_blend", 0.10)), 0.0, 1.0)
+    )
     same_lookup = state.get("same_hour_mean", {}) or {}
-    same_hour_value = _same_signed_component(raw, same_lookup.get(hour, same_lookup.get(str(hour))), origin_cfg)
+    same_hour_value = _same_signed_component(
+        raw, same_lookup.get(hour, same_lookup.get(str(hour))), origin_cfg
+    )
     if same_hour_blend > 0.0 and same_hour_value is not None:
         raw = (1.0 - same_hour_blend) * raw + same_hour_blend * same_hour_value
         source_parts.append("same_hour")
@@ -560,7 +709,9 @@ def _origin_day_residual_correction(
     min_run = int(origin_cfg.get("min_same_sign_run_hours", 4))
     run_scale = 1.0
     if min_run > 0 and same_sign_run < min_run:
-        run_scale = float(np.clip(float(origin_cfg.get("short_run_scale", 0.50)), 0.0, 1.0))
+        run_scale = float(
+            np.clip(float(origin_cfg.get("short_run_scale", 0.50)), 0.0, 1.0)
+        )
         source_parts.append("short_run_scaled")
 
     forecast_day = _forecast_day(row, horizon_index)
@@ -584,34 +735,60 @@ def _combine_recent_and_ar_corrections(
     recent_cfg: dict,
     horizon_index: int | None = None,
 ) -> tuple[float, str, float, float, float, str, float, float, float, str]:
-    ar_correction, ar_phi, ar_latest, ar_source = _ar_residual_correction(row, profile, recent_cfg, horizon_index)
+    ar_correction, ar_phi, ar_latest, ar_source = _ar_residual_correction(
+        row, profile, recent_cfg, horizon_index
+    )
     cap = float(recent_cfg.get("cap_mwh", 10.0))
     total_after_ar = float(np.clip(base_correction + ar_correction, -cap, cap))
     ar_applied = float(total_after_ar - base_correction)
-    origin_correction, origin_state, origin_latest_day, origin_source = _origin_day_residual_correction(
-        row,
-        profile,
-        recent_cfg,
-        horizon_index,
+    origin_correction, origin_state, origin_latest_day, origin_source = (
+        _origin_day_residual_correction(
+            row,
+            profile,
+            recent_cfg,
+            horizon_index,
+        )
     )
     total = float(np.clip(total_after_ar + origin_correction, -cap, cap))
     origin_applied = float(total - total_after_ar)
 
     source_parts: list[str] = []
-    if base_source not in {"no_match", "disabled_or_empty", "insufficient_prior_residuals"} or abs(base_correction) > 1e-12:
+    if (
+        base_source
+        not in {"no_match", "disabled_or_empty", "insufficient_prior_residuals"}
+        or abs(base_correction) > 1e-12
+    ):
         source_parts.append(base_source)
     if abs(ar_applied) > 1e-12:
         source_parts.append(ar_source)
     if abs(origin_applied) > 1e-12:
         source_parts.append(origin_source)
     source = "+".join(source_parts) if source_parts else base_source
-    return total, source, ar_applied, ar_phi, ar_latest, ar_source, origin_applied, origin_state, origin_latest_day, origin_source
+    return (
+        total,
+        source,
+        ar_applied,
+        ar_phi,
+        ar_latest,
+        ar_source,
+        origin_applied,
+        origin_state,
+        origin_latest_day,
+        origin_source,
+    )
 
 
-def _group_lookup(work: pd.DataFrame, keys: list[str], cap: float, min_count: int) -> dict[str, float]:
+def _group_lookup(
+    work: pd.DataFrame, keys: list[str], cap: float, min_count: int
+) -> dict[str, float]:
     if not all(k in work.columns for k in keys):
         return {}
-    g = work.dropna(subset=keys).groupby(keys, dropna=False)["Residual_MWH"].agg(["mean", "count"]).reset_index()
+    g = (
+        work.dropna(subset=keys)
+        .groupby(keys, dropna=False)["Residual_MWH"]
+        .agg(["mean", "count"])
+        .reset_index()
+    )
     g = g[g["count"] >= int(min_count)].copy()
     clip = _clipper(cap)
     if g.empty:
@@ -623,7 +800,9 @@ def _group_lookup(work: pd.DataFrame, keys: list[str], cap: float, min_count: in
     return out
 
 
-def build_recent_residual_profile(backtest_df: pd.DataFrame, config: dict | None = None) -> dict:
+def build_recent_residual_profile(
+    backtest_df: pd.DataFrame, config: dict | None = None
+) -> dict:
     """Build a compact, weather-aware correction profile from leakage-safe residuals.
 
     Residual convention is Actual - Forecast. Positive means the model is low.
@@ -642,7 +821,9 @@ def build_recent_residual_profile(backtest_df: pd.DataFrame, config: dict | None
     same_hour_days = int(c.get("same_hour_days", 7))
     min_bucket_count = int(c.get("min_weather_bucket_count", 6))
     max_dt = work["DT"].max()
-    recent = work[work["DT"] >= max_dt - pd.Timedelta(hours=max(1, recent_hours))].copy()
+    recent = work[
+        work["DT"] >= max_dt - pd.Timedelta(hours=max(1, recent_hours))
+    ].copy()
     if recent.empty:
         recent = work.tail(min(len(work), max(24, recent_hours))).copy()
 
@@ -665,11 +846,24 @@ def build_recent_residual_profile(backtest_df: pd.DataFrame, config: dict | None
         "global_mean": clip(work["Residual_MWH"].mean()),
         "same_hour_mean": {int(k): clip(v) for k, v in hour_lookup.items()},
         "hourgroup_mean": {str(k): clip(v) for k, v in hourgroup_lookup.items()},
-        "temp_hourgroup_mean": _group_lookup(same_hour, ["DailyMaxTempBucket", "HourGroup"], cap, min_bucket_count),
-        "cloud_hourgroup_mean": _group_lookup(same_hour, ["CloudCoverBucket", "HourGroup"], cap, min_bucket_count),
-        "solar_hourgroup_mean": _group_lookup(same_hour, ["BTMSolarBucket", "HourGroup"], cap, min_bucket_count),
-        "solar_loss_hourgroup_mean": _group_lookup(same_hour, ["SolarLossBucket", "HourGroup"], cap, min_bucket_count),
-        "temp_cloud_hourgroup_mean": _group_lookup(same_hour, ["DailyMaxTempBucket", "CloudCoverBucket", "HourGroup"], cap, min_bucket_count),
+        "temp_hourgroup_mean": _group_lookup(
+            same_hour, ["DailyMaxTempBucket", "HourGroup"], cap, min_bucket_count
+        ),
+        "cloud_hourgroup_mean": _group_lookup(
+            same_hour, ["CloudCoverBucket", "HourGroup"], cap, min_bucket_count
+        ),
+        "solar_hourgroup_mean": _group_lookup(
+            same_hour, ["BTMSolarBucket", "HourGroup"], cap, min_bucket_count
+        ),
+        "solar_loss_hourgroup_mean": _group_lookup(
+            same_hour, ["SolarLossBucket", "HourGroup"], cap, min_bucket_count
+        ),
+        "temp_cloud_hourgroup_mean": _group_lookup(
+            same_hour,
+            ["DailyMaxTempBucket", "CloudCoverBucket", "HourGroup"],
+            cap,
+            min_bucket_count,
+        ),
         "ar_residual": _build_ar_residual_state(work, c),
         "origin_day_state": _build_origin_day_state(work, c),
         "metadata": {
@@ -726,10 +920,24 @@ def _weighted_recent_correction(
     row = _row_with_buckets(row)
     hour = int(row.get("Hour", pd.to_datetime(row.get("DT")).hour))
     hourgroup = str(row.get("HourGroup", _hour_group(hour)))
-    temp_bucket = str(row.get("DailyMaxTempBucket")) if pd.notna(row.get("DailyMaxTempBucket")) else None
-    cloud_bucket = str(row.get("CloudCoverBucket")) if pd.notna(row.get("CloudCoverBucket")) else None
-    solar_bucket = str(row.get("BTMSolarBucket")) if pd.notna(row.get("BTMSolarBucket")) else None
-    loss_bucket = str(row.get("SolarLossBucket")) if pd.notna(row.get("SolarLossBucket")) else None
+    temp_bucket = (
+        str(row.get("DailyMaxTempBucket"))
+        if pd.notna(row.get("DailyMaxTempBucket"))
+        else None
+    )
+    cloud_bucket = (
+        str(row.get("CloudCoverBucket"))
+        if pd.notna(row.get("CloudCoverBucket"))
+        else None
+    )
+    solar_bucket = (
+        str(row.get("BTMSolarBucket")) if pd.notna(row.get("BTMSolarBucket")) else None
+    )
+    loss_bucket = (
+        str(row.get("SolarLossBucket"))
+        if pd.notna(row.get("SolarLossBucket"))
+        else None
+    )
 
     vals: list[tuple[str, float, float]] = []
 
@@ -749,13 +957,47 @@ def _weighted_recent_correction(
     add("recent_mean", profile.get("recent_mean"), w_recent)
     add("last24_mean", profile.get("last24_mean"), w_last24)
     add("same_hour", (profile.get("same_hour_mean", {}) or {}).get(hour), w_same)
-    add("hourgroup", (profile.get("hourgroup_mean", {}) or {}).get(hourgroup), w_hourgroup)
+    add(
+        "hourgroup",
+        (profile.get("hourgroup_mean", {}) or {}).get(hourgroup),
+        w_hourgroup,
+    )
     add("global", profile.get("global_mean"), w_global)
-    add("temp_hourgroup", (profile.get("temp_hourgroup_mean", {}) or {}).get(lookup_key([temp_bucket, hourgroup])), w_temp_hg)
-    add("cloud_hourgroup", (profile.get("cloud_hourgroup_mean", {}) or {}).get(lookup_key([cloud_bucket, hourgroup])), w_cloud_hg)
-    add("solar_hourgroup", (profile.get("solar_hourgroup_mean", {}) or {}).get(lookup_key([solar_bucket, hourgroup])), w_solar_hg)
-    add("solar_loss_hourgroup", (profile.get("solar_loss_hourgroup_mean", {}) or {}).get(lookup_key([loss_bucket, hourgroup])), w_loss_hg)
-    add("temp_cloud_hourgroup", (profile.get("temp_cloud_hourgroup_mean", {}) or {}).get(lookup_key([temp_bucket, cloud_bucket, hourgroup])), w_temp_cloud_hg)
+    add(
+        "temp_hourgroup",
+        (profile.get("temp_hourgroup_mean", {}) or {}).get(
+            lookup_key([temp_bucket, hourgroup])
+        ),
+        w_temp_hg,
+    )
+    add(
+        "cloud_hourgroup",
+        (profile.get("cloud_hourgroup_mean", {}) or {}).get(
+            lookup_key([cloud_bucket, hourgroup])
+        ),
+        w_cloud_hg,
+    )
+    add(
+        "solar_hourgroup",
+        (profile.get("solar_hourgroup_mean", {}) or {}).get(
+            lookup_key([solar_bucket, hourgroup])
+        ),
+        w_solar_hg,
+    )
+    add(
+        "solar_loss_hourgroup",
+        (profile.get("solar_loss_hourgroup_mean", {}) or {}).get(
+            lookup_key([loss_bucket, hourgroup])
+        ),
+        w_loss_hg,
+    )
+    add(
+        "temp_cloud_hourgroup",
+        (profile.get("temp_cloud_hourgroup_mean", {}) or {}).get(
+            lookup_key([temp_bucket, cloud_bucket, hourgroup])
+        ),
+        w_temp_cloud_hg,
+    )
 
     if vals:
         numerator = sum(v * w for _, v, w in vals)
@@ -770,14 +1012,20 @@ def _weighted_recent_correction(
         decay = max(min_decay, math.exp(-(h - 1) / max(1.0, decay_hours)))
         if h <= 24:
             decay *= float(c.get("day1_scale", 1.0))
-        correction_scale = _recent_hot_peak_scale(row, c) * _recent_horizon_regime_scale(row, c, horizon_index)
-        base_correction = float(np.clip(raw * blend * decay * correction_scale, -cap, cap))
+        correction_scale = _recent_hot_peak_scale(
+            row, c
+        ) * _recent_horizon_regime_scale(row, c, horizon_index)
+        base_correction = float(
+            np.clip(raw * blend * decay * correction_scale, -cap, cap)
+        )
         base_source = "+".join(name for name, _, _ in vals)
     else:
         base_correction = 0.0
         base_source = "no_match"
 
-    return _combine_recent_and_ar_corrections(base_correction, base_source, row, profile, c, horizon_index)
+    return _combine_recent_and_ar_corrections(
+        base_correction, base_source, row, profile, c, horizon_index
+    )
 
 
 def apply_recent_residual_correction(
@@ -845,7 +1093,9 @@ def apply_recent_residual_correction(
     out["OriginDay_Latest_Day_MWH"] = origin_day_latest_days
     out["OriginDay_State_Source"] = origin_day_sources
     out["Pre_Recent_Forecast_MWH"] = pd.to_numeric(out[base_col], errors="coerce")
-    out["Recent_Corrected_Forecast_MWH"] = (out["Pre_Recent_Forecast_MWH"] + out["Recent_Level_Correction_MWH"]).clip(lower=0.0)
+    out["Recent_Corrected_Forecast_MWH"] = (
+        out["Pre_Recent_Forecast_MWH"] + out["Recent_Level_Correction_MWH"]
+    ).clip(lower=0.0)
     out["Final_Forecast_MWH"] = out["Recent_Corrected_Forecast_MWH"]
     # Preserve the existing dashboard/output contract: Calibrated_Forecast_MWH is the final production forecast.
     out["Calibrated_Forecast_MWH"] = out["Final_Forecast_MWH"]
@@ -865,7 +1115,11 @@ def simulate_recent_residual_correction_backtest(
     """
     c = _cfg(config)
     out = backtest_df.copy().sort_values("DT").reset_index(drop=True)
-    if out.empty or not bool(c.get("enabled", True)) or not {"Actual_MWH", base_col}.issubset(out.columns):
+    if (
+        out.empty
+        or not bool(c.get("enabled", True))
+        or not {"Actual_MWH", base_col}.issubset(out.columns)
+    ):
         out["Recent_Level_Correction_MWH"] = 0.0
         out["Recent_Correction_Source"] = "disabled_or_empty"
         out["AR_Residual_Correction_MWH"] = 0.0
@@ -876,12 +1130,18 @@ def simulate_recent_residual_correction_backtest(
         out["OriginDay_State_MWH"] = np.nan
         out["OriginDay_Latest_Day_MWH"] = np.nan
         out["OriginDay_State_Source"] = "origin_day_disabled_or_empty"
-        out["Recent_Corrected_Forecast_MWH"] = pd.to_numeric(out.get(base_col, out.get("Raw_Forecast_MWH", 0.0)), errors="coerce")
+        out["Recent_Corrected_Forecast_MWH"] = pd.to_numeric(
+            out.get(base_col, out.get("Raw_Forecast_MWH", 0.0)), errors="coerce"
+        )
         out["Final_Backtest_Forecast_MWH"] = out["Recent_Corrected_Forecast_MWH"]
         return out
 
     out["DT"] = pd.to_datetime(out["DT"], errors="coerce")
-    out["Hour"] = _as_num(out.get("Hour", out["DT"].dt.hour)).fillna(out["DT"].dt.hour).astype(int)
+    out["Hour"] = (
+        _as_num(out.get("Hour", out["DT"].dt.hour))
+        .fillna(out["DT"].dt.hour)
+        .astype(int)
+    )
     out["HourGroup"] = out.get("HourGroup", out["Hour"].map(_hour_group))
     out = _add_weather_residual_buckets(out)
     out["_RecentBasisResidual"] = _as_num(out["Actual_MWH"]) - _as_num(out[base_col])
@@ -914,7 +1174,12 @@ def simulate_recent_residual_correction_backtest(
     origin_day_latest_days: list[float] = []
     origin_day_sources: list[str] = []
 
-    def add(vals: list[tuple[str, float, float]], name: str, series: pd.Series, weight: float):
+    def add(
+        vals: list[tuple[str, float, float]],
+        name: str,
+        series: pd.Series,
+        weight: float,
+    ):
         if weight <= 0 or series.empty:
             return
         v = pd.to_numeric(series, errors="coerce").mean()
@@ -923,7 +1188,9 @@ def simulate_recent_residual_correction_backtest(
 
     for i, row in out.iterrows():
         hist = out.iloc[:i]
-        hist = hist[pd.to_numeric(hist["_RecentBasisResidual"], errors="coerce").notna()]
+        hist = hist[
+            pd.to_numeric(hist["_RecentBasisResidual"], errors="coerce").notna()
+        ]
         if hist.empty:
             corrections.append(0.0)
             sources.append("insufficient_prior_residuals")
@@ -943,37 +1210,99 @@ def simulate_recent_residual_correction_backtest(
         if same_window.empty:
             same_window = hist
 
-        add(vals, "recent_mean", hist.tail(max(1, recent_hours))["_RecentBasisResidual"], w_recent)
-        add(vals, "last24_mean", hist.tail(min(24, len(hist)))["_RecentBasisResidual"], w_last24)
-        add(vals, "same_hour", same_window.loc[same_window["Hour"].eq(row["Hour"]), "_RecentBasisResidual"], w_same)
-        add(vals, "hourgroup", same_window.loc[same_window["HourGroup"].eq(row["HourGroup"]), "_RecentBasisResidual"], w_hourgroup)
+        add(
+            vals,
+            "recent_mean",
+            hist.tail(max(1, recent_hours))["_RecentBasisResidual"],
+            w_recent,
+        )
+        add(
+            vals,
+            "last24_mean",
+            hist.tail(min(24, len(hist)))["_RecentBasisResidual"],
+            w_last24,
+        )
+        add(
+            vals,
+            "same_hour",
+            same_window.loc[
+                same_window["Hour"].eq(row["Hour"]), "_RecentBasisResidual"
+            ],
+            w_same,
+        )
+        add(
+            vals,
+            "hourgroup",
+            same_window.loc[
+                same_window["HourGroup"].eq(row["HourGroup"]), "_RecentBasisResidual"
+            ],
+            w_hourgroup,
+        )
         add(vals, "global", hist["_RecentBasisResidual"], w_global)
         if pd.notna(row.get("DailyMaxTempBucket")):
-            add(vals, "temp_hourgroup", same_window.loc[
-                same_window["DailyMaxTempBucket"].eq(row.get("DailyMaxTempBucket")) & same_window["HourGroup"].eq(row["HourGroup"]), "_RecentBasisResidual"
-            ], w_temp_hg)
+            add(
+                vals,
+                "temp_hourgroup",
+                same_window.loc[
+                    same_window["DailyMaxTempBucket"].eq(row.get("DailyMaxTempBucket"))
+                    & same_window["HourGroup"].eq(row["HourGroup"]),
+                    "_RecentBasisResidual",
+                ],
+                w_temp_hg,
+            )
         if pd.notna(row.get("CloudCoverBucket")):
-            add(vals, "cloud_hourgroup", same_window.loc[
-                same_window["CloudCoverBucket"].eq(row.get("CloudCoverBucket")) & same_window["HourGroup"].eq(row["HourGroup"]), "_RecentBasisResidual"
-            ], w_cloud_hg)
+            add(
+                vals,
+                "cloud_hourgroup",
+                same_window.loc[
+                    same_window["CloudCoverBucket"].eq(row.get("CloudCoverBucket"))
+                    & same_window["HourGroup"].eq(row["HourGroup"]),
+                    "_RecentBasisResidual",
+                ],
+                w_cloud_hg,
+            )
         if pd.notna(row.get("BTMSolarBucket")):
-            add(vals, "solar_hourgroup", same_window.loc[
-                same_window["BTMSolarBucket"].eq(row.get("BTMSolarBucket")) & same_window["HourGroup"].eq(row["HourGroup"]), "_RecentBasisResidual"
-            ], w_solar_hg)
+            add(
+                vals,
+                "solar_hourgroup",
+                same_window.loc[
+                    same_window["BTMSolarBucket"].eq(row.get("BTMSolarBucket"))
+                    & same_window["HourGroup"].eq(row["HourGroup"]),
+                    "_RecentBasisResidual",
+                ],
+                w_solar_hg,
+            )
         if pd.notna(row.get("SolarLossBucket")):
-            add(vals, "solar_loss_hourgroup", same_window.loc[
-                same_window["SolarLossBucket"].eq(row.get("SolarLossBucket")) & same_window["HourGroup"].eq(row["HourGroup"]), "_RecentBasisResidual"
-            ], w_loss_hg)
-        if pd.notna(row.get("DailyMaxTempBucket")) and pd.notna(row.get("CloudCoverBucket")):
-            add(vals, "temp_cloud_hourgroup", same_window.loc[
-                same_window["DailyMaxTempBucket"].eq(row.get("DailyMaxTempBucket"))
-                & same_window["CloudCoverBucket"].eq(row.get("CloudCoverBucket"))
-                & same_window["HourGroup"].eq(row["HourGroup"]), "_RecentBasisResidual"
-            ], w_temp_cloud_hg)
+            add(
+                vals,
+                "solar_loss_hourgroup",
+                same_window.loc[
+                    same_window["SolarLossBucket"].eq(row.get("SolarLossBucket"))
+                    & same_window["HourGroup"].eq(row["HourGroup"]),
+                    "_RecentBasisResidual",
+                ],
+                w_loss_hg,
+            )
+        if pd.notna(row.get("DailyMaxTempBucket")) and pd.notna(
+            row.get("CloudCoverBucket")
+        ):
+            add(
+                vals,
+                "temp_cloud_hourgroup",
+                same_window.loc[
+                    same_window["DailyMaxTempBucket"].eq(row.get("DailyMaxTempBucket"))
+                    & same_window["CloudCoverBucket"].eq(row.get("CloudCoverBucket"))
+                    & same_window["HourGroup"].eq(row["HourGroup"]),
+                    "_RecentBasisResidual",
+                ],
+                w_temp_cloud_hg,
+            )
 
         if vals:
             raw = sum(v * w for _, v, w in vals) / sum(w for _, _, w in vals)
-            correction_scale = _recent_hot_peak_scale(row, c) * _recent_horizon_regime_scale(row, c)
+            correction_scale = _recent_hot_peak_scale(
+                row, c
+            ) * _recent_horizon_regime_scale(row, c)
             base_correction = float(np.clip(raw * blend * correction_scale, -cap, cap))
             base_source = "+".join(name for name, _, _ in vals)
         else:
@@ -982,8 +1311,12 @@ def simulate_recent_residual_correction_backtest(
 
         residual_state_profile = {
             "enabled": True,
-            "ar_residual": _build_ar_residual_state(hist, c, residual_col="_RecentBasisResidual"),
-            "origin_day_state": _build_origin_day_state(hist, c, residual_col="_RecentBasisResidual"),
+            "ar_residual": _build_ar_residual_state(
+                hist, c, residual_col="_RecentBasisResidual"
+            ),
+            "origin_day_state": _build_origin_day_state(
+                hist, c, residual_col="_RecentBasisResidual"
+            ),
         }
         (
             correction,
@@ -1026,10 +1359,14 @@ def simulate_recent_residual_correction_backtest(
     out["OriginDay_Latest_Day_MWH"] = origin_day_latest_days
     out["OriginDay_State_Source"] = origin_day_sources
     out["Pre_Recent_Forecast_MWH"] = _as_num(out[base_col])
-    out["Recent_Corrected_Forecast_MWH"] = (out["Pre_Recent_Forecast_MWH"] + out["Recent_Level_Correction_MWH"]).clip(lower=0.0)
+    out["Recent_Corrected_Forecast_MWH"] = (
+        out["Pre_Recent_Forecast_MWH"] + out["Recent_Level_Correction_MWH"]
+    ).clip(lower=0.0)
     out["Final_Backtest_Forecast_MWH"] = out["Recent_Corrected_Forecast_MWH"]
     out["Final_Forecast_MWH"] = out["Recent_Corrected_Forecast_MWH"]
-    out["Recent_Corrected_Residual_MWH"] = _as_num(out["Actual_MWH"]) - _as_num(out["Recent_Corrected_Forecast_MWH"])
+    out["Recent_Corrected_Residual_MWH"] = _as_num(out["Actual_MWH"]) - _as_num(
+        out["Recent_Corrected_Forecast_MWH"]
+    )
     out["Recent_Corrected_AbsError_MWH"] = out["Recent_Corrected_Residual_MWH"].abs()
     out["Recent_Corrected_APE"] = np.where(
         _as_num(out["Actual_MWH"]).abs() > 1e-9,

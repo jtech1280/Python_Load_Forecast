@@ -11,7 +11,9 @@ import pandas as pd
 try:
     import lightgbm as lgb
 except Exception as exc:
-    raise RuntimeError("LightGBM is required. Install with `pip install lightgbm`.") from exc
+    raise RuntimeError(
+        "LightGBM is required. Install with `pip install lightgbm`."
+    ) from exc
 
 from forecasting.model.xgb_model import DEFAULT_FEATURES, build_sample_weights
 from forecasting.utils.performance import resolve_n_jobs
@@ -87,7 +89,9 @@ def _early_stopping_callback(rounds: int):
         if hasattr(lgb, "early_stopping"):
             return lgb.early_stopping(stopping_rounds=int(rounds), verbose=False)
         if hasattr(lgb, "callback") and hasattr(lgb.callback, "early_stopping"):
-            return lgb.callback.early_stopping(stopping_rounds=int(rounds), verbose=False)
+            return lgb.callback.early_stopping(
+                stopping_rounds=int(rounds), verbose=False
+            )
     except Exception:
         return None
     return None
@@ -122,14 +126,18 @@ def _lgb_attempts(config: dict | None) -> list[tuple[str, dict[str, Any]]]:
     hw = _cfg(config, "hardware", default={}) or {}
     p = _cfg(config, "model", "lgb", default={}) or {}
     base = _base_lgb_params(config)
-    fallback_to_cpu = _as_bool(hw.get("fallback_to_cpu", p.get("fallback_to_cpu", True)), default=True)
+    fallback_to_cpu = _as_bool(
+        hw.get("fallback_to_cpu", p.get("fallback_to_cpu", True)), default=True
+    )
 
     cpu_params = dict(base)
     attempts: list[tuple[str, dict[str, Any]]] = []
 
     if _lgb_gpu_requested(config):
         gpu_params = dict(base)
-        gpu_params["device_type"] = str(p.get("device_type", hw.get("lgb_device_type", "gpu")))
+        gpu_params["device_type"] = str(
+            p.get("device_type", hw.get("lgb_device_type", "gpu"))
+        )
         gpu_platform_id = p.get("gpu_platform_id", hw.get("lgb_gpu_platform_id", None))
         gpu_device_id = p.get("gpu_device_id", hw.get("lgb_gpu_device_id", None))
         if gpu_platform_id is not None:
@@ -143,7 +151,9 @@ def _lgb_attempts(config: dict | None) -> list[tuple[str, dict[str, Any]]]:
     return attempts
 
 
-def make_lgb_model(config: dict | None, params_override: dict[str, Any] | None = None) -> lgb.LGBMRegressor:
+def make_lgb_model(
+    config: dict | None, params_override: dict[str, Any] | None = None
+) -> lgb.LGBMRegressor:
     params = params_override or _lgb_attempts(config)[0][1]
     return lgb.LGBMRegressor(**params)
 
@@ -154,7 +164,9 @@ def get_last_lgb_training_info() -> dict[str, Any]:
 
 def write_lgb_training_info(config: dict | None) -> None:
     try:
-        out_dir = Path(_cfg(config, "project", "output_dir", default="forecast_outputs"))
+        out_dir = Path(
+            _cfg(config, "project", "output_dir", default="forecast_outputs")
+        )
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "lgb_training_backend.json").write_text(
             json.dumps(get_last_lgb_training_info(), indent=2, default=str),
@@ -164,7 +176,9 @@ def write_lgb_training_info(config: dict | None) -> None:
         pass
 
 
-def train_lgb(df: pd.DataFrame, features: list[str] | None = None, config: dict | None = None):
+def train_lgb(
+    df: pd.DataFrame, features: list[str] | None = None, config: dict | None = None
+):
     global _LAST_LGB_TRAINING_INFO
 
     cfg = config or {}
@@ -208,7 +222,12 @@ def train_lgb(df: pd.DataFrame, features: list[str] | None = None, config: dict 
 
             fit_kwargs: dict[str, Any] = {"sample_weight": sample_weight}
             callbacks = []
-            if X_valid is not None and y_valid is not None and len(X_valid) and len(y_valid):
+            if (
+                X_valid is not None
+                and y_valid is not None
+                and len(X_valid)
+                and len(y_valid)
+            ):
                 fit_kwargs["eval_set"] = [(X_valid, y_valid)]
                 try:
                     fit_sig_params = inspect.signature(model.fit).parameters
@@ -217,7 +236,9 @@ def train_lgb(df: pd.DataFrame, features: list[str] | None = None, config: dict 
                 if "eval_metric" in fit_sig_params:
                     fit_kwargs["eval_metric"] = str(es_cfg.get("metric", "mae"))
                 if "eval_sample_weight" in fit_sig_params:
-                    fit_kwargs["eval_sample_weight"] = [valid_weight] if valid_weight is not None else None
+                    fit_kwargs["eval_sample_weight"] = (
+                        [valid_weight] if valid_weight is not None else None
+                    )
                 cb = _early_stopping_callback(int(es_cfg.get("rounds", 75)))
                 if cb is not None:
                     callbacks.append(cb)
