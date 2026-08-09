@@ -411,6 +411,14 @@ def add_weather_features(df: pd.DataFrame) -> pd.DataFrame:
     ].lt(105.0)
     daily_max_band_105_plus = out["Temperature_DailyMax"].ge(105.0)
 
+    # Defragment: the block above already assigned dozens of columns one at a time,
+    # which fragments the DataFrame's internal block manager past pandas' warning
+    # threshold well before this function is done. Periodic `.copy()` calls (see also
+    # further down) consolidate those blocks back down; local variables computed above
+    # (peak_window_14_18, clear_hot_peak_16_20, etc.) are independent Series and are
+    # unaffected by re-pointing `out` at a fresh, consolidated frame.
+    out = out.copy()
+
     # Scorecard-aligned heat interactions. The existing IsLikelySystemPeakHour
     # excludes weekends/holidays and starts at HE16; the production gates score
     # HE14-18 peak windows and HE16-20 hot days regardless of business-day status.
@@ -554,6 +562,9 @@ def add_weather_features(df: pd.DataFrame) -> pd.DataFrame:
         overcast_hot_peak_16_20 * daily_max_excess_95
     )
     out["OvercastHotPeak_x_CDD"] = overcast_hot_peak_16_20 * out["CDD"]
+
+    out = out.copy()  # defragment again; see comment above
+
     out["Month_x_HotPeak"] = month.fillna(0.0) * hot_peak_16_20
     out["MonthSin_x_HotPeak"] = month_sin * hot_peak_16_20
     out["MonthCos_x_HotPeak"] = month_cos * hot_peak_16_20
