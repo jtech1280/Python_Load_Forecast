@@ -186,11 +186,6 @@ openmeteo:
     import_window_start_local: "06:00"
     import_window_end_local: "07:45"
     daily_cache_stem: "forecast_weather_morning"
-    # If the morning window above is missed entirely on a given local day (no
-    # snapshot captured yet today), fail loudly instead of silently reusing a
-    # stale cached forecast from a prior day. Set to false to restore the old
-    # best-effort fallback-to-stale-cache behavior.
-    fail_on_missed_window: true
   # TLS certificate verification for weather API calls. Keep true so responses are
   # authenticated. On Windows, ssl_use_os_truststore lets requests honor the machine
   # certificate store via truststore, which fixes managed/self-signed proxy chains

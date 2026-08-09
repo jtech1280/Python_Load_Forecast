@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -108,83 +107,12 @@ class DataImportPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp)
             config = self._weather_config(cache_dir)
-            cache_path = cache_dir / "forecast_weather_latest.csv"
             pd.DataFrame(
                 {
                     "DT": pd.date_range("2026-08-01 00:00", periods=2, freq="h", tz=tz),
                     "TempF": [80.0, 81.0],
                 }
-            ).to_csv(cache_path, index=False)
-            # Simulate a cache written earlier the same local day (e.g. by another
-            # process) so the "missed today's window" staleness guard does not fire.
-            written_at = pd.Timestamp("2026-08-01 05:00", tz=tz).timestamp()
-            os.utime(cache_path, (written_at, written_at))
-
-            with (
-                patch(
-                    "forecasting.data.weather_loader._now_local",
-                    return_value=pd.Timestamp("2026-08-01 13:00", tz=tz),
-                ),
-                patch(
-                    "forecasting.data.weather_loader._fetch_json",
-                    side_effect=AssertionError("unexpected API call"),
-                ),
-            ):
-                out = fetch_forecast_weather(config)
-
-            self.assertEqual(
-                out.attrs["weather_source"],
-                "forecast_weather_latest_cache_outside_morning_window",
-            )
-            self.assertEqual(out["TempF"].tolist(), [80.0, 81.0])
-
-    def test_forecast_weather_raises_when_window_missed_and_cache_is_stale(self):
-        tz = ZoneInfo("America/Los_Angeles")
-        with tempfile.TemporaryDirectory() as tmp:
-            cache_dir = Path(tmp)
-            config = self._weather_config(cache_dir)
-            cache_path = cache_dir / "forecast_weather_latest.csv"
-            pd.DataFrame(
-                {
-                    "DT": pd.date_range("2026-07-31 00:00", periods=2, freq="h", tz=tz),
-                    "TempF": [80.0, 81.0],
-                }
-            ).to_csv(cache_path, index=False)
-            # Cache is from the prior local day: today's morning window was missed
-            # entirely, so the guard should refuse to silently reuse the stale cache.
-            written_at = pd.Timestamp("2026-07-31 05:00", tz=tz).timestamp()
-            os.utime(cache_path, (written_at, written_at))
-
-            with (
-                patch(
-                    "forecasting.data.weather_loader._now_local",
-                    return_value=pd.Timestamp("2026-08-01 13:00", tz=tz),
-                ),
-                patch(
-                    "forecasting.data.weather_loader._fetch_json",
-                    side_effect=AssertionError("unexpected API call"),
-                ),
-            ):
-                with self.assertRaisesRegex(RuntimeError, "missed"):
-                    fetch_forecast_weather(config)
-
-    def test_forecast_weather_stale_cache_allowed_when_guard_disabled(self):
-        tz = ZoneInfo("America/Los_Angeles")
-        with tempfile.TemporaryDirectory() as tmp:
-            cache_dir = Path(tmp)
-            config = self._weather_config(cache_dir)
-            config["openmeteo"]["forecast_import_policy"][
-                "fail_on_missed_window"
-            ] = False
-            cache_path = cache_dir / "forecast_weather_latest.csv"
-            pd.DataFrame(
-                {
-                    "DT": pd.date_range("2026-07-31 00:00", periods=2, freq="h", tz=tz),
-                    "TempF": [80.0, 81.0],
-                }
-            ).to_csv(cache_path, index=False)
-            written_at = pd.Timestamp("2026-07-31 05:00", tz=tz).timestamp()
-            os.utime(cache_path, (written_at, written_at))
+            ).to_csv(cache_dir / "forecast_weather_latest.csv", index=False)
 
             with (
                 patch(
