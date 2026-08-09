@@ -13,12 +13,39 @@ LOAD_DECAY_SHAPE_FEATURES = [
     "Load_Decay_2Hr_MWH",
     "Lag1_Minus_SameHourYesterday_MWH",
     "Lag1_Minus_SameHour7DayMean_MWH",
+    "Lag24_Minus_SameHour7DayMean_MWH",
+    "PeakWindow_Lag1_Minus_SameHour7DayMean_MWH",
+    "PeakWindow_Lag24_Minus_SameHour7DayMean_MWH",
+    "PeakWindow16to18_Lag1_Minus_SameHour7DayMean_MWH",
+    "PeakWindow16to18_Lag24_Minus_SameHour7DayMean_MWH",
+    "HotPeak_Lag1_Minus_SameHourYesterday_MWH",
+    "HotPeak_Lag1_Minus_SameHour7DayMean_MWH",
+    "HotPeak_Lag24_Minus_SameHour7DayMean_MWH",
+    "ClearHotPeak_Lag1_Minus_SameHourYesterday_MWH",
+    "ClearHotPeak_Lag1_Minus_SameHour7DayMean_MWH",
+    "ClearHotPeak_Lag24_Minus_SameHour7DayMean_MWH",
+    "ClearPeak16to18_Lag24_Minus_SameHour7DayMean_MWH",
+    "OvercastPeak16to18_Lag24_Minus_SameHour7DayMean_MWH",
+    "ClearHotPeak16to18_Lag24_Minus_SameHour7DayMean_MWH",
+    "OvercastCoolPeak16to18_Lag1_Minus_SameHour7DayMean_MWH",
+    "OvercastCoolPeak16to18_Lag24_Minus_SameHour7DayMean_MWH",
     "PostPeak_LoadDecay_1Hr_MWH",
     "PostPeak_LoadDecay_2Hr_MWH",
     "PostPeak_LoadDecay_VsSameHourYesterday_MWH",
     "PostPeak_LoadDecay_VsSameHour7DayMean_MWH",
     "ClearHotEvening_LoadDecay_Vs7Day_MWH",
     "DeltaBreeze_PostPeak_LoadDecay_Signal",
+]
+
+RECURSIVE_LAG_OUTPUT_FEATURES = [
+    "MWH_Lag1",
+    "MWH_Lag2",
+    "MWH_Lag3",
+    "MWH_Rolling3",
+    "MWH_Rolling6",
+    "MWH_Rolling12",
+    "MWH_Rolling24",
+    "MWH_Rolling24Std",
 ]
 
 
@@ -67,6 +94,46 @@ def _load_decay_shape_values(row: pd.Series) -> dict[str, float]:
     if not np.isfinite(post_peak):
         post_peak = 1.0 if np.isfinite(hour) and 18 <= int(hour) <= 23 else 0.0
     post_peak = float(np.clip(post_peak, 0.0, 1.0))
+    peak_window = _row_float(row, "IsPeakWindow14to18", np.nan)
+    if not np.isfinite(peak_window):
+        peak_window = 1.0 if np.isfinite(hour) and 14 <= int(hour) <= 18 else 0.0
+    peak_window = float(np.clip(peak_window, 0.0, 1.0))
+    peak_window_16_18 = _row_float(row, "IsPeakWindow16to18", np.nan)
+    if not np.isfinite(peak_window_16_18):
+        peak_window_16_18 = 1.0 if np.isfinite(hour) and 16 <= int(hour) <= 18 else 0.0
+    peak_window_16_18 = float(np.clip(peak_window_16_18, 0.0, 1.0))
+    hot_peak = _row_float(row, "IsHotPeakWindow16to20", np.nan)
+    daily_max = _row_float(row, "Temperature_DailyMax", np.nan)
+    if not np.isfinite(hot_peak):
+        hot_peak = 1.0 if (
+            np.isfinite(hour)
+            and np.isfinite(daily_max)
+            and 16 <= int(hour) <= 20
+            and daily_max >= 90.0
+        ) else 0.0
+    hot_peak = float(np.clip(hot_peak, 0.0, 1.0))
+    clear_hot_peak = _row_float(row, "ClearHotPeakWindow16to20", np.nan)
+    if not np.isfinite(clear_hot_peak):
+        cloud = _row_float(row, "CloudCover_Norm", np.nan)
+        clear_hot_peak = hot_peak if np.isfinite(cloud) and cloud <= 0.10 else 0.0
+    clear_hot_peak = float(np.clip(clear_hot_peak, 0.0, 1.0))
+    cloud = _row_float(row, "CloudCover_Norm", np.nan)
+    clear_peak_16_18 = _row_float(row, "ClearPeakWindow16to18", np.nan)
+    if not np.isfinite(clear_peak_16_18):
+        clear_peak_16_18 = peak_window_16_18 if np.isfinite(cloud) and cloud <= 0.10 else 0.0
+    clear_peak_16_18 = float(np.clip(clear_peak_16_18, 0.0, 1.0))
+    overcast_peak_16_18 = _row_float(row, "OvercastPeakWindow16to18", np.nan)
+    if not np.isfinite(overcast_peak_16_18):
+        overcast_peak_16_18 = peak_window_16_18 if np.isfinite(cloud) and cloud >= 0.60 else 0.0
+    overcast_peak_16_18 = float(np.clip(overcast_peak_16_18, 0.0, 1.0))
+    clear_hot_peak_16_18 = _row_float(row, "ClearHotPeakWindow16to18", np.nan)
+    if not np.isfinite(clear_hot_peak_16_18):
+        clear_hot_peak_16_18 = clear_peak_16_18 if np.isfinite(daily_max) and daily_max >= 90.0 else 0.0
+    clear_hot_peak_16_18 = float(np.clip(clear_hot_peak_16_18, 0.0, 1.0))
+    overcast_cool_peak_16_18 = _row_float(row, "OvercastCoolPeakWindow16to18", np.nan)
+    if not np.isfinite(overcast_cool_peak_16_18):
+        overcast_cool_peak_16_18 = overcast_peak_16_18 if np.isfinite(daily_max) and daily_max < 75.0 else 0.0
+    overcast_cool_peak_16_18 = float(np.clip(overcast_cool_peak_16_18, 0.0, 1.0))
     clear_hot = float(np.clip(_row_float(row, "ClearHotEvening_Flag", 0.0), 0.0, 1.0))
     delta_flag = max(
         float(np.clip(_row_float(row, "DeltaBreeze_Cooling_Flag", 0.0), 0.0, 1.0)),
@@ -78,6 +145,7 @@ def _load_decay_shape_values(row: pd.Series) -> dict[str, float]:
     load_decay_2 = lag3 - lag1 if np.isfinite(lag3) and np.isfinite(lag1) else np.nan
     lag1_minus_yesterday = lag1 - lag24 if np.isfinite(lag1) and np.isfinite(lag24) else np.nan
     lag1_minus_7day = lag1 - same_hour_7day if np.isfinite(lag1) and np.isfinite(same_hour_7day) else np.nan
+    lag24_minus_7day = lag24 - same_hour_7day if np.isfinite(lag24) and np.isfinite(same_hour_7day) else np.nan
     vs_yesterday = lag24 - lag1 if np.isfinite(lag24) and np.isfinite(lag1) else np.nan
     vs_7day = same_hour_7day - lag1 if np.isfinite(same_hour_7day) and np.isfinite(lag1) else np.nan
     post_decay_1 = post_peak * load_decay_1 if np.isfinite(load_decay_1) else np.nan
@@ -96,6 +164,22 @@ def _load_decay_shape_values(row: pd.Series) -> dict[str, float]:
         "Load_Decay_2Hr_MWH": load_decay_2,
         "Lag1_Minus_SameHourYesterday_MWH": lag1_minus_yesterday,
         "Lag1_Minus_SameHour7DayMean_MWH": lag1_minus_7day,
+        "Lag24_Minus_SameHour7DayMean_MWH": lag24_minus_7day,
+        "PeakWindow_Lag1_Minus_SameHour7DayMean_MWH": peak_window * lag1_minus_7day if np.isfinite(lag1_minus_7day) else np.nan,
+        "PeakWindow_Lag24_Minus_SameHour7DayMean_MWH": peak_window * lag24_minus_7day if np.isfinite(lag24_minus_7day) else np.nan,
+        "PeakWindow16to18_Lag1_Minus_SameHour7DayMean_MWH": peak_window_16_18 * lag1_minus_7day if np.isfinite(lag1_minus_7day) else np.nan,
+        "PeakWindow16to18_Lag24_Minus_SameHour7DayMean_MWH": peak_window_16_18 * lag24_minus_7day if np.isfinite(lag24_minus_7day) else np.nan,
+        "HotPeak_Lag1_Minus_SameHourYesterday_MWH": hot_peak * lag1_minus_yesterday if np.isfinite(lag1_minus_yesterday) else np.nan,
+        "HotPeak_Lag1_Minus_SameHour7DayMean_MWH": hot_peak * lag1_minus_7day if np.isfinite(lag1_minus_7day) else np.nan,
+        "HotPeak_Lag24_Minus_SameHour7DayMean_MWH": hot_peak * lag24_minus_7day if np.isfinite(lag24_minus_7day) else np.nan,
+        "ClearHotPeak_Lag1_Minus_SameHourYesterday_MWH": clear_hot_peak * lag1_minus_yesterday if np.isfinite(lag1_minus_yesterday) else np.nan,
+        "ClearHotPeak_Lag1_Minus_SameHour7DayMean_MWH": clear_hot_peak * lag1_minus_7day if np.isfinite(lag1_minus_7day) else np.nan,
+        "ClearHotPeak_Lag24_Minus_SameHour7DayMean_MWH": clear_hot_peak * lag24_minus_7day if np.isfinite(lag24_minus_7day) else np.nan,
+        "ClearPeak16to18_Lag24_Minus_SameHour7DayMean_MWH": clear_peak_16_18 * lag24_minus_7day if np.isfinite(lag24_minus_7day) else np.nan,
+        "OvercastPeak16to18_Lag24_Minus_SameHour7DayMean_MWH": overcast_peak_16_18 * lag24_minus_7day if np.isfinite(lag24_minus_7day) else np.nan,
+        "ClearHotPeak16to18_Lag24_Minus_SameHour7DayMean_MWH": clear_hot_peak_16_18 * lag24_minus_7day if np.isfinite(lag24_minus_7day) else np.nan,
+        "OvercastCoolPeak16to18_Lag1_Minus_SameHour7DayMean_MWH": overcast_cool_peak_16_18 * lag1_minus_7day if np.isfinite(lag1_minus_7day) else np.nan,
+        "OvercastCoolPeak16to18_Lag24_Minus_SameHour7DayMean_MWH": overcast_cool_peak_16_18 * lag24_minus_7day if np.isfinite(lag24_minus_7day) else np.nan,
         "PostPeak_LoadDecay_1Hr_MWH": post_decay_1,
         "PostPeak_LoadDecay_2Hr_MWH": post_decay_2,
         "PostPeak_LoadDecay_VsSameHourYesterday_MWH": post_vs_yesterday,
@@ -141,6 +225,7 @@ def recursive_forecast(
     catboost_preds = []
     lag24_values = []
     same_hour_7day_values = []
+    lag_output_values = {col: [] for col in RECURSIVE_LAG_OUTPUT_FEATURES}
     load_decay_shape_values = {col: [] for col in LOAD_DECAY_SHAPE_FEATURES}
 
     for i in range(len(fut)):
@@ -163,6 +248,8 @@ def recursive_forecast(
         row["MWH_SameHour7DayMean"] = _same_hour_7day_mean(base_series)
         lag24_values.append(row["MWH_Lag24"])
         same_hour_7day_values.append(row["MWH_SameHour7DayMean"])
+        for col in RECURSIVE_LAG_OUTPUT_FEATURES:
+            lag_output_values[col].append(row[col])
         for col, value in _load_decay_shape_values(row).items():
             row[col] = value
             load_decay_shape_values[col].append(value)
@@ -215,6 +302,8 @@ def recursive_forecast(
                 fut[col] = prophet_components[col].to_numpy()
     fut["MWH_Lag24"] = lag24_values
     fut["MWH_SameHour7DayMean"] = same_hour_7day_values
+    for col, values in lag_output_values.items():
+        fut[col] = values
     for col, values in load_decay_shape_values.items():
         fut[col] = values
     fut["Raw_Forecast_MWH"] = preds

@@ -27,6 +27,20 @@ AUTO_RESIDUAL_COLUMNS = [
     "Auto_Residual_Full_Shadow_Residual_MWH",
     "Auto_Residual_Full_Shadow_AbsError_MWH",
     "Auto_Residual_Full_Shadow_Delta_AbsError_MWH",
+    "Auto_Residual_Structural_HotPeak_Correction_MWH",
+    "Auto_Residual_Structural_HotPeak_Adjusted_Forecast_MWH",
+    "Auto_Residual_Structural_HotPeak_Correction_Applied_Flag",
+    "Auto_Residual_Structural_HotPeak_Source",
+    "Auto_Residual_Structural_HotPeak_Residual_MWH",
+    "Auto_Residual_Structural_HotPeak_AbsError_MWH",
+    "Auto_Residual_Structural_HotPeak_Delta_AbsError_MWH",
+    "Auto_Residual_Broad_HotPeak_Shadow_Correction_MWH",
+    "Auto_Residual_Broad_HotPeak_Shadow_Adjusted_Forecast_MWH",
+    "Auto_Residual_Broad_HotPeak_Shadow_Correction_Applied_Flag",
+    "Auto_Residual_Broad_HotPeak_Shadow_Source",
+    "Auto_Residual_Broad_HotPeak_Shadow_Residual_MWH",
+    "Auto_Residual_Broad_HotPeak_Shadow_AbsError_MWH",
+    "Auto_Residual_Broad_HotPeak_Shadow_Delta_AbsError_MWH",
 ]
 
 
@@ -44,6 +58,9 @@ def _production_scope(cfg: dict | None) -> str:
         "": "all",
         "full": "all",
         "global_and_hot_peak": "all",
+        "bounded_full": "capped_full_shadow",
+        "bounded_full_shadow": "capped_full_shadow",
+        "capped_full": "capped_full_shadow",
         "hot": "hot_peak_only",
         "gated_hot_peak": "hot_peak_only",
         "gated_hot_peak_only": "hot_peak_only",
@@ -51,6 +68,17 @@ def _production_scope(cfg: dict | None) -> str:
         "disabled": "shadow_only",
     }
     return aliases.get(raw, raw)
+
+
+def _capped_full_shadow_cap_mwh(cfg: dict | None) -> float:
+    raw = (cfg or {}).get("capped_full_shadow_cap_mwh", 1.0)
+    try:
+        cap = float(raw)
+    except (TypeError, ValueError):
+        cap = 1.0
+    if not np.isfinite(cap):
+        cap = 1.0
+    return max(0.0, abs(cap))
 
 
 def _as_num(value: Any, index: pd.Index | None = None, default: float = np.nan) -> pd.Series:
@@ -144,16 +172,115 @@ def _hot_peak_mask(values: pd.DataFrame, config: dict | None) -> pd.Series:
     return hour.isin(hours) & daily_max.ge(min_temp)
 
 
-def _hot_peak_low_forecast_gate(values: pd.DataFrame, config: dict | None, base: pd.Series) -> pd.Series:
-    """Return hot-peak rows where an upward residual lift is operationally plausible.
+def _structural_hot_peak_cfg(config: dict | None) -> dict:
+    cfg = _cfg(config)
+    hot_cfg = cfg.get("hot_peak", {}) or {}
+    return (
+        hot_cfg.get("structural_shadow", {})
+        or hot_cfg.get("structural_residual_shadow", {})
+        or hot_cfg.get("structural_residual", {})
+        or {}
+    )
+
+
+def _broad_hot_peak_shadow_cfg(config: dict | None) -> dict:
+    cfg = _cfg(config)
+    hot_cfg = cfg.get("hot_peak", {}) or {}
+    return (
+        hot_cfg.get("broad_shadow", {})
+        or hot_cfg.get("broad_hot_peak_shadow", {})
+        or hot_cfg.get("loosened_candidate_shadow", {})
+        or hot_cfg.get("loosened_gate_shadow", {})
+        or {}
+    )
+
+
+def _structural_hot_peak_mask(values: pd.DataFrame, config: dict | None) -> pd.Series:
+    cfg = _cfg(config)
+    hot_cfg = cfg.get("hot_peak", {}) or {}
+    structural_cfg = _structural_hot_peak_cfg(config)
+    dt = _local_datetime(values)
+    hour = _hour(values, dt=dt).astype(int)
+    hours = [int(h) for h in structural_cfg.get("hours", hot_cfg.get("hours", [16, 17, 18, 19, 20]))]
+    daily_max = _as_num(values.get("Temperature_DailyMax", pd.Series(np.nan, index=values.index)), values.index)
+    forecast_day = _forecast_day(values, dt=dt)
+    min_temp = float(structural_cfg.get("min_maxtemp_f", hot_cfg.get("min_maxtemp_f", 90.0)))
+
+    mask = hour.isin(hours) & daily_max.ge(min_temp)
+    max_temp = structural_cfg.get("max_maxtemp_f")
+    if max_temp is not None:
+        mask &= daily_max.le(float(max_temp)).fillna(False)
+    min_day = structural_cfg.get("min_forecast_day")
+    if min_day is not None:
+        mask &= forecast_day.ge(float(min_day)).fillna(False)
+    max_day = structural_cfg.get("max_forecast_day")
+    if max_day is not None:
+        mask &= forecast_day.le(float(max_day)).fillna(False)
+    max_cloud = structural_cfg.get("max_cloud_cover_norm")
+    if max_cloud is not None:
+        mask &= _cloud_norm(values).le(float(max_cloud)).fillna(False)
+    min_cloud = structural_cfg.get("min_cloud_cover_norm")
+    if min_cloud is not None:
+        mask &= _cloud_norm(values).ge(float(min_cloud)).fillna(False)
+    return mask.fillna(False)
+
+
+def _broad_hot_peak_shadow_mask(values: pd.DataFrame, config: dict | None) -> pd.Series:
+    cfg = _cfg(config)
+    hot_cfg = cfg.get("hot_peak", {}) or {}
+    broad_cfg = _broad_hot_peak_shadow_cfg(config)
+    dt = _local_datetime(values)
+    hour = _hour(values, dt=dt).astype(int)
+    hours = [int(h) for h in broad_cfg.get("hours", hot_cfg.get("hours", [16, 17, 18, 19, 20]))]
+    daily_max = _as_num(values.get("Temperature_DailyMax", pd.Series(np.nan, index=values.index)), values.index)
+    forecast_day = _forecast_day(values, dt=dt)
+
+    min_temp = float(broad_cfg.get("min_maxtemp_f", hot_cfg.get("min_maxtemp_f", 90.0)))
+    mask = hour.isin(hours) & daily_max.ge(min_temp)
+
+    max_temp = broad_cfg.get("max_maxtemp_f")
+    if max_temp is not None:
+        mask &= daily_max.le(float(max_temp)).fillna(False)
+    min_day = broad_cfg.get("min_forecast_day")
+    if min_day is not None:
+        mask &= forecast_day.ge(float(min_day)).fillna(False)
+    max_day = broad_cfg.get("max_forecast_day")
+    if max_day is not None:
+        mask &= forecast_day.le(float(max_day)).fillna(False)
+    max_cloud = broad_cfg.get("max_cloud_cover_norm")
+    if max_cloud is not None:
+        mask &= _cloud_norm(values).le(float(max_cloud)).fillna(False)
+    min_cloud = broad_cfg.get("min_cloud_cover_norm")
+    if min_cloud is not None:
+        mask &= _cloud_norm(values).ge(float(min_cloud)).fillna(False)
+    months = broad_cfg.get("months")
+    if months is not None:
+        mask &= _month(values, dt=dt).astype(int).isin([int(m) for m in months]).fillna(False)
+    return mask.fillna(False)
+
+
+def _live_ramp_gate_cfg(config: dict | None) -> dict:
+    cfg = _cfg(config)
+    gate_cfg = ((cfg.get("hot_peak", {}) or {}).get("positive_gate", {}) or {})
+    return gate_cfg.get("live_ramp_gate", {}) or gate_cfg.get("same_day_ramp_gate", {}) or {}
+
+
+def _low_forecast_gate_from_cfg(
+    values: pd.DataFrame,
+    gate_cfg: dict | None,
+    base: pd.Series,
+    *,
+    disabled_default: bool = True,
+    no_criteria_default: bool = True,
+) -> pd.Series:
+    """Return rows where the original raw-vs-recent hot-peak gate passes.
 
     The gate uses only forecast-origin-available state. Missing criteria are ignored.
     If no criteria are configured, all hot-peak rows pass.
     """
-    cfg = _cfg(config)
-    gate_cfg = ((cfg.get("hot_peak", {}) or {}).get("positive_gate", {}) or {})
+    gate_cfg = gate_cfg or {}
     if not bool(gate_cfg.get("enabled", False)):
-        return pd.Series(True, index=values.index, dtype=bool)
+        return pd.Series(disabled_default, index=values.index, dtype=bool)
 
     raw = _optional_num(values, "Raw_Forecast_MWH", default=np.nan)
     same7 = _optional_num(values, "MWH_SameHour7DayMean", "Baseline_Rolling7DaySameHourAvg_MWH", default=np.nan)
@@ -208,21 +335,101 @@ def _hot_peak_low_forecast_gate(values: pd.DataFrame, config: dict | None, base:
     require_max(_forecast_day(values), "max_forecast_day")
     require_min(_forecast_day(values), "min_forecast_day")
 
-    return gate if configured else pd.Series(True, index=values.index, dtype=bool)
+    if "hours" in gate_cfg:
+        configured = True
+        gate &= _hour(values).astype(int).isin([int(h) for h in gate_cfg.get("hours", [])]).fillna(False)
+
+    return gate if configured else pd.Series(no_criteria_default, index=values.index, dtype=bool)
 
 
-def _hot_peak_cooling_underway_guard(values: pd.DataFrame, config: dict | None) -> pd.Series:
-    """Return hot-peak rows where evening cooling argues against an upward lift.
-
-    The guard is intentionally separate from the low-forecast gate: the low gate
-    asks whether an upside correction is plausible versus recent load baselines,
-    while this guard suppresses that upside when the weather shape indicates the
-    post-peak decay regime is already underway.
-    """
+def _hot_peak_primary_low_forecast_gate(values: pd.DataFrame, config: dict | None, base: pd.Series) -> pd.Series:
     cfg = _cfg(config)
-    hot_cfg = cfg.get("hot_peak", {}) or {}
-    gate_cfg = (hot_cfg.get("positive_gate", {}) or {})
-    guard_cfg = (gate_cfg.get("cooling_underway_guard", {}) or gate_cfg.get("cooling_guard", {}) or {})
+    gate_cfg = ((cfg.get("hot_peak", {}) or {}).get("positive_gate", {}) or {})
+    return _low_forecast_gate_from_cfg(values, gate_cfg, base)
+
+
+def _hot_peak_live_ramp_gate(values: pd.DataFrame, config: dict | None, base: pd.Series) -> pd.Series:
+    """Return rows where completed same-day lag/ramp evidence justifies a hot lift."""
+    live_cfg = _live_ramp_gate_cfg(config)
+    if not bool(live_cfg.get("enabled", False)):
+        return pd.Series(False, index=values.index, dtype=bool)
+
+    raw = _optional_num(values, "Raw_Forecast_MWH", default=np.nan)
+    lag1 = _optional_num(values, "MWH_Lag1", default=np.nan)
+    lag2 = _optional_num(values, "MWH_Lag2", default=np.nan)
+    lag3 = _optional_num(values, "MWH_Lag3", default=np.nan)
+    same7 = _optional_num(values, "MWH_SameHour7DayMean", "Baseline_Rolling7DaySameHourAvg_MWH", default=np.nan)
+    lag24 = _optional_num(values, "MWH_Lag24", "Baseline_SameHourYesterday_MWH", default=np.nan)
+    lag1_minus_lag24 = _optional_num(values, "Lag1_Minus_SameHourYesterday_MWH", default=np.nan)
+    lag1_minus_same7 = _optional_num(values, "Lag1_Minus_SameHour7DayMean_MWH", default=np.nan)
+    lag1 = lag1.where(lag1.notna(), lag1_minus_lag24 + lag24)
+    lag1 = lag1.where(lag1.notna(), lag1_minus_same7 + same7)
+    lag1_minus_lag24 = lag1_minus_lag24.where(lag1_minus_lag24.notna(), lag1 - lag24)
+    lag1_minus_same7 = lag1_minus_same7.where(lag1_minus_same7.notna(), lag1 - same7)
+
+    live_ramp_1hr = _optional_num(values, "Live_Ramp_1Hr_MWH", default=np.nan)
+    decay_1hr = _optional_num(values, "Load_Decay_1Hr_MWH", default=np.nan)
+    live_ramp_1hr = live_ramp_1hr.where(live_ramp_1hr.notna(), -decay_1hr)
+    live_ramp_1hr = live_ramp_1hr.where(live_ramp_1hr.notna(), lag1 - lag2)
+
+    live_ramp_2hr = _optional_num(values, "Live_Ramp_2Hr_MWH", default=np.nan)
+    decay_2hr = _optional_num(values, "Load_Decay_2Hr_MWH", default=np.nan)
+    live_ramp_2hr = live_ramp_2hr.where(live_ramp_2hr.notna(), -decay_2hr)
+    live_ramp_2hr = live_ramp_2hr.where(live_ramp_2hr.notna(), lag1 - lag3)
+
+    gate = pd.Series(True, index=values.index, dtype=bool)
+    configured = False
+
+    def require_min(series: pd.Series, key: str) -> None:
+        nonlocal gate, configured
+        if key not in live_cfg:
+            return
+        configured = True
+        gate &= series.ge(float(live_cfg[key])).fillna(False)
+
+    def require_max(series: pd.Series, key: str) -> None:
+        nonlocal gate, configured
+        if key not in live_cfg:
+            return
+        configured = True
+        gate &= series.le(float(live_cfg[key])).fillna(False)
+
+    require_min(lag1, "min_lag1_mwh")
+    require_max(lag1, "max_lag1_mwh")
+    require_min(lag1 - raw, "min_lag1_minus_raw_forecast_mwh")
+    require_max(lag1 - raw, "max_lag1_minus_raw_forecast_mwh")
+    require_min(lag1 - base, "min_lag1_minus_base_forecast_mwh")
+    require_max(lag1 - base, "max_lag1_minus_base_forecast_mwh")
+    require_min(lag1_minus_lag24, "min_lag1_minus_samehour_yesterday_mwh")
+    require_max(lag1_minus_lag24, "max_lag1_minus_samehour_yesterday_mwh")
+    require_min(lag1_minus_same7, "min_lag1_minus_samehour_7day_mean_mwh")
+    require_max(lag1_minus_same7, "max_lag1_minus_samehour_7day_mean_mwh")
+    require_min(live_ramp_1hr, "min_live_ramp_1hr_mwh")
+    require_max(live_ramp_1hr, "max_live_ramp_1hr_mwh")
+    require_min(live_ramp_2hr, "min_live_ramp_2hr_mwh")
+    require_max(live_ramp_2hr, "max_live_ramp_2hr_mwh")
+    require_min(_as_num(values.get("Temperature_DailyMax", pd.Series(np.nan, index=values.index)), values.index), "min_maxtemp_f")
+    require_max(_cloud_norm(values), "max_cloud_cover_norm")
+    require_max(_forecast_day(values), "max_forecast_day")
+    require_min(_forecast_day(values), "min_forecast_day")
+
+    if "hours" in live_cfg:
+        configured = True
+        hours = [int(h) for h in live_cfg.get("hours", [])]
+        gate &= _hour(values).astype(int).isin(hours).fillna(False)
+
+    return gate if configured else pd.Series(False, index=values.index, dtype=bool)
+
+
+def _hot_peak_low_forecast_gate(values: pd.DataFrame, config: dict | None, base: pd.Series) -> pd.Series:
+    primary_gate = _hot_peak_primary_low_forecast_gate(values, config, base)
+    live_ramp_gate = _hot_peak_live_ramp_gate(values, config, base)
+    return primary_gate | live_ramp_gate
+
+
+def _cooling_underway_guard(values: pd.DataFrame, guard_cfg: dict | None) -> pd.Series:
+    """Return rows where evening weather/load shape argues against an upward lift."""
+    guard_cfg = guard_cfg or {}
     if not bool(guard_cfg.get("enabled", False)):
         return pd.Series(False, index=values.index, dtype=bool)
 
@@ -267,6 +474,21 @@ def _hot_peak_cooling_underway_guard(values: pd.DataFrame, config: dict | None) 
     return guard.fillna(False)
 
 
+def _hot_peak_cooling_underway_guard(values: pd.DataFrame, config: dict | None) -> pd.Series:
+    """Return hot-peak rows where evening cooling argues against an upward lift.
+
+    The guard is intentionally separate from the low-forecast gate: the low gate
+    asks whether an upside correction is plausible versus recent load baselines,
+    while this guard suppresses that upside when the weather shape indicates the
+    post-peak decay regime is already underway.
+    """
+    cfg = _cfg(config)
+    hot_cfg = cfg.get("hot_peak", {}) or {}
+    gate_cfg = hot_cfg.get("positive_gate", {}) or {}
+    guard_cfg = gate_cfg.get("cooling_underway_guard", {}) or gate_cfg.get("cooling_guard", {}) or {}
+    return _cooling_underway_guard(values, guard_cfg)
+
+
 def _feature_frame(values: pd.DataFrame, forecast_col: str) -> pd.DataFrame:
     out = pd.DataFrame(index=values.index)
     dt = _local_datetime(values)
@@ -284,10 +506,28 @@ def _feature_frame(values: pd.DataFrame, forecast_col: str) -> pd.DataFrame:
     cat = _optional_num(values, "CatBoost_Pred_MWH", default=np.nan)
     components = pd.concat([xgb, lgb, cat, prophet], axis=1)
     tree_components = pd.concat([xgb, lgb, cat], axis=1)
+    lag1 = _optional_num(values, "MWH_Lag1", default=np.nan)
+    lag2 = _optional_num(values, "MWH_Lag2", default=np.nan)
+    lag3 = _optional_num(values, "MWH_Lag3", default=np.nan)
     same7 = _optional_num(values, "MWH_SameHour7DayMean", "Baseline_Rolling7DaySameHourAvg_MWH", default=np.nan)
     lag24 = _optional_num(values, "MWH_Lag24", "Baseline_SameHourYesterday_MWH", default=np.nan)
+    lag1_minus_lag24 = _optional_num(values, "Lag1_Minus_SameHourYesterday_MWH", default=np.nan)
+    lag1_minus_same7 = _optional_num(values, "Lag1_Minus_SameHour7DayMean_MWH", default=np.nan)
+    lag1 = lag1.where(lag1.notna(), lag1_minus_lag24 + lag24)
+    lag1 = lag1.where(lag1.notna(), lag1_minus_same7 + same7)
+    lag1_minus_lag24 = lag1_minus_lag24.where(lag1_minus_lag24.notna(), lag1 - lag24)
+    lag1_minus_same7 = lag1_minus_same7.where(lag1_minus_same7.notna(), lag1 - same7)
+    live_ramp_1hr = _optional_num(values, "Live_Ramp_1Hr_MWH", default=np.nan)
+    decay_1hr = _optional_num(values, "Load_Decay_1Hr_MWH", default=np.nan)
+    live_ramp_1hr = live_ramp_1hr.where(live_ramp_1hr.notna(), -decay_1hr)
+    live_ramp_1hr = live_ramp_1hr.where(live_ramp_1hr.notna(), lag1 - lag2)
+    live_ramp_2hr = _optional_num(values, "Live_Ramp_2Hr_MWH", default=np.nan)
+    decay_2hr = _optional_num(values, "Load_Decay_2Hr_MWH", default=np.nan)
+    live_ramp_2hr = live_ramp_2hr.where(live_ramp_2hr.notna(), -decay_2hr)
+    live_ramp_2hr = live_ramp_2hr.where(live_ramp_2hr.notna(), lag1 - lag3)
     solar_loss = _solar_loss(values)
     forecast_day = _forecast_day(values, dt=dt)
+    peak_hour_flag = hour.astype(int).isin([14, 15, 16, 17, 18, 19, 20]).astype(float)
 
     out["Base_Forecast_MWH"] = base
     out["Raw_Forecast_MWH"] = raw
@@ -306,11 +546,26 @@ def _feature_frame(values: pd.DataFrame, forecast_col: str) -> pd.DataFrame:
     out["Humidity_Norm"] = _optional_num(values, "Humidity_Norm", default=np.nan)
     out["WindSpeed_Mph"] = _optional_num(values, "WindSpeed_Mph", default=np.nan)
     out["PrecipIn"] = _optional_num(values, "PrecipIn", default=0.0).clip(lower=0.0)
+    out["Solar_Irradiance"] = _optional_num(values, "Solar_Irradiance", "Shortwave_Radiation", default=np.nan)
     out["BTM_Solar_Proxy_MW"] = _optional_num(values, "BTM_Solar_Proxy_MW", default=0.0).clip(lower=0.0)
     out["BTM_Solar_Loss_MW"] = solar_loss
     out["ClearSky_Index"] = _optional_num(values, "ClearSky_Index", default=np.nan)
+    out["MWH_Lag1"] = lag1
+    out["MWH_Lag2"] = lag2
+    out["MWH_Lag3"] = lag3
     out["MWH_Lag24"] = lag24
     out["MWH_SameHour7DayMean"] = same7
+    out["Lag1_Minus_SameHourYesterday_MWH"] = lag1_minus_lag24
+    out["Lag1_Minus_SameHour7DayMean_MWH"] = lag1_minus_same7
+    out["Lag1_Minus_Raw_Forecast_MWH"] = lag1 - raw
+    out["Lag1_Minus_Base_Forecast_MWH"] = lag1 - base
+    out["Live_Ramp_1Hr_MWH"] = live_ramp_1hr
+    out["Live_Ramp_2Hr_MWH"] = live_ramp_2hr
+    out["MWH_Rolling3"] = _optional_num(values, "MWH_Rolling3", default=np.nan)
+    out["MWH_Rolling6"] = _optional_num(values, "MWH_Rolling6", default=np.nan)
+    out["MWH_Rolling12"] = _optional_num(values, "MWH_Rolling12", default=np.nan)
+    out["MWH_Rolling24"] = _optional_num(values, "MWH_Rolling24", default=np.nan)
+    out["MWH_Rolling24Std"] = _optional_num(values, "MWH_Rolling24Std", default=np.nan)
     out["Raw_Minus_SameHour7DayMean_MWH"] = raw - same7
     out["Raw_Minus_SameHourYesterday_MWH"] = raw - lag24
     out["Base_Minus_SameHour7DayMean_MWH"] = base - same7
@@ -327,6 +582,33 @@ def _feature_frame(values: pd.DataFrame, forecast_col: str) -> pd.DataFrame:
     out["WeatherScenario_Spread_MWH"] = _optional_num(values, "WeatherScenario_Spread_MWH", default=0.0)
     out["WeatherScenario_MaxAbsDelta_MWH"] = _optional_num(values, "WeatherScenario_MaxAbsDelta_MWH", default=0.0)
     out["Weather_Input_Risk_Multiplier"] = _optional_num(values, "Weather_Input_Risk_Multiplier", default=1.0)
+    out["PriorDay_DailyMaxTemp"] = _optional_num(values, "PriorDay_DailyMaxTemp", default=np.nan)
+    out["PriorDay_DailyMinTemp"] = _optional_num(values, "PriorDay_DailyMinTemp", default=np.nan)
+    out["DailyMaxTemp_Ramp_1Day"] = _optional_num(values, "DailyMaxTemp_Ramp_1Day", default=np.nan)
+    out["DailyMinTemp_Ramp_1Day"] = _optional_num(values, "DailyMinTemp_Ramp_1Day", default=np.nan)
+    out["DailyMaxTemp_2DayMean"] = _optional_num(values, "DailyMaxTemp_2DayMean", default=np.nan)
+    out["DailyMaxTemp_3DayMean"] = _optional_num(values, "DailyMaxTemp_3DayMean", default=np.nan)
+    out["DailyMinTemp_2DayMean"] = _optional_num(values, "DailyMinTemp_2DayMean", default=np.nan)
+    out["DailyMinTemp_3DayMean"] = _optional_num(values, "DailyMinTemp_3DayMean", default=np.nan)
+    out["DailyMeanTemp_3DayMean"] = _optional_num(values, "DailyMeanTemp_3DayMean", default=np.nan)
+    out["ConsecutiveHotDays90"] = _optional_num(values, "ConsecutiveHotDays90", default=0.0)
+    out["ConsecutiveVeryHotDays95"] = _optional_num(values, "ConsecutiveVeryHotDays95", default=0.0)
+    out["ConsecutiveExtremeHotDays100"] = _optional_num(values, "ConsecutiveExtremeHotDays100", default=0.0)
+    out["HeatPersistenceStress90"] = _optional_num(values, "HeatPersistenceStress90", default=0.0)
+    out["HeatPersistenceStress95"] = _optional_num(values, "HeatPersistenceStress95", default=0.0)
+    out["DailyMax3DayMean_x_PeakHour"] = _optional_num(values, "DailyMax3DayMean_x_PeakHour", default=np.nan)
+    if out["DailyMax3DayMean_x_PeakHour"].isna().all():
+        out["DailyMax3DayMean_x_PeakHour"] = out["DailyMaxTemp_3DayMean"] * peak_hour_flag
+    out["OvernightHeatStress"] = _optional_num(values, "OvernightHeatStress", default=0.0)
+    out["OvernightHeatStress_x_PeakHour"] = _optional_num(values, "OvernightHeatStress_x_PeakHour", default=np.nan)
+    if out["OvernightHeatStress_x_PeakHour"].isna().all():
+        out["OvernightHeatStress_x_PeakHour"] = out["OvernightHeatStress"] * peak_hour_flag
+    out["Temperature_Drop_From_DailyMax_F"] = _optional_num(values, "Temperature_Drop_From_DailyMax_F", default=np.nan)
+    if out["Temperature_Drop_From_DailyMax_F"].isna().all():
+        out["Temperature_Drop_From_DailyMax_F"] = daily_max - temp
+    out["TempDrop_Next1Hr_F"] = _optional_num(values, "TempDrop_Next1Hr_F", default=np.nan)
+    out["TempDrop_Next2Hr_F"] = _optional_num(values, "TempDrop_Next2Hr_F", default=np.nan)
+    out["TempDrop_Next3Hr_F"] = _optional_num(values, "TempDrop_Next3Hr_F", default=np.nan)
     out["Hour_Sin"] = np.sin(2.0 * np.pi * hour / 24.0)
     out["Hour_Cos"] = np.cos(2.0 * np.pi * hour / 24.0)
     out["Month_Sin"] = np.sin(2.0 * np.pi * month / 12.0)
@@ -373,6 +655,229 @@ def _predict_model(model, fill_values: pd.Series, columns: list[str], values: pd
     x = features.loc[valid].fillna(fill_values).replace([np.inf, -np.inf], 0.0).fillna(0.0)
     out.loc[valid] = np.asarray(model.predict(x), dtype=float)
     return out
+
+
+def _structural_hot_peak_shadow(
+    values: pd.DataFrame,
+    artifact: dict,
+    config: dict | None,
+    *,
+    base: pd.Series,
+    global_corr: pd.Series,
+    columns: list[str],
+    forecast_col: str,
+) -> tuple[pd.Series, pd.Series]:
+    structural_cfg = _structural_hot_peak_cfg(config)
+    corr = pd.Series(0.0, index=values.index, dtype=float)
+    source = pd.Series("hot_peak_structural_shadow_disabled", index=values.index, dtype="object")
+    if not bool(structural_cfg.get("enabled", False)):
+        return corr, source
+
+    valid = base.notna()
+    structural_mask = _structural_hot_peak_mask(values, config) & valid
+    source.loc[valid & ~structural_mask] = "hot_peak_structural_out_of_scope"
+    source.loc[~valid] = "invalid_base_forecast"
+    if not structural_mask.any():
+        return corr, source
+
+    model = artifact.get("structural_hot_peak_model")
+    if model is None:
+        source.loc[structural_mask] = "hot_peak_structural_insufficient_history"
+        return corr, source
+
+    hot_cfg = (_cfg(config).get("hot_peak", {}) or {})
+    pred = _predict_model(
+        model,
+        artifact.get("structural_hot_peak_fill_values", pd.Series(dtype=float)),
+        columns,
+        values.loc[structural_mask],
+        forecast_col=forecast_col,
+    )
+    hot_cap = float(structural_cfg.get("cap_mwh", 5.0))
+    hot_corr = pd.Series(0.0, index=values.index, dtype=float)
+    hot_corr.loc[structural_mask] = (
+        pred * float(structural_cfg.get("blend", hot_cfg.get("blend", 0.35)))
+    ).clip(-hot_cap, hot_cap)
+
+    total_cap = float(structural_cfg.get("total_cap_mwh", structural_cfg.get("cap_mwh", 5.0)))
+    total = (global_corr + hot_corr).clip(-total_cap, total_cap)
+    allow_negative = bool(structural_cfg.get("allow_negative_correction", False))
+    if not allow_negative:
+        total = total.clip(lower=0.0)
+
+    source.loc[structural_mask] = str(structural_cfg.get("source", "global+hot_peak_structural_residual"))
+
+    min_positive = float(structural_cfg.get("min_positive_correction_mwh", 0.0))
+    if min_positive > 0:
+        below_min = structural_mask & total.gt(0.0) & total.lt(min_positive)
+        if below_min.any():
+            total.loc[below_min] = 0.0
+            source.loc[below_min] = str(
+                structural_cfg.get("below_min_source", "hot_peak_structural_below_min_correction")
+            )
+
+    if not allow_negative:
+        non_positive = structural_mask & total.le(0.0)
+        if non_positive.any():
+            structural_source = str(structural_cfg.get("source", "global+hot_peak_structural_residual"))
+            non_positive &= source.eq(structural_source)
+            source.loc[non_positive] = str(
+                structural_cfg.get("no_positive_source", "hot_peak_structural_no_positive_correction")
+            )
+
+    guard_cfg = (
+        structural_cfg.get("cooling_underway_guard", {})
+        or structural_cfg.get("cooling_guard", {})
+        or {}
+    )
+    if not guard_cfg and bool(structural_cfg.get("respect_cooling_underway_guard", True)):
+        gate_cfg = hot_cfg.get("positive_gate", {}) or {}
+        guard_cfg = gate_cfg.get("cooling_underway_guard", {}) or gate_cfg.get("cooling_guard", {}) or {}
+    if bool((guard_cfg or {}).get("enabled", False)):
+        cooling_underway = _cooling_underway_guard(values, guard_cfg)
+        guard_positive = structural_mask & total.gt(0.0) & cooling_underway
+        if guard_positive.any():
+            cap = float(guard_cfg.get("cap_positive_correction_mwh", 0.0))
+            if cap <= 0.0:
+                total.loc[guard_positive] = 0.0
+                source.loc[guard_positive] = str(
+                    guard_cfg.get(
+                        "blocked_source",
+                        "hot_peak_structural_cooling_underway_guard_blocked",
+                    )
+                )
+            else:
+                over_cap = guard_positive & total.gt(cap)
+                if over_cap.any():
+                    total.loc[over_cap] = cap
+                    source.loc[over_cap] = str(
+                        guard_cfg.get(
+                            "capped_source",
+                            "global+hot_peak_structural_cooling_underway_guard_capped",
+                        )
+                    )
+
+    corr = total.where(structural_mask, 0.0)
+    return corr.where(valid, 0.0), source
+
+
+def _broad_hot_peak_shadow(
+    values: pd.DataFrame,
+    artifact: dict,
+    config: dict | None,
+    *,
+    base: pd.Series,
+    global_corr: pd.Series,
+    columns: list[str],
+    forecast_col: str,
+) -> tuple[pd.Series, pd.Series]:
+    """Run a looser hot-peak ORL candidate as shadow-only diagnostics."""
+    broad_cfg = _broad_hot_peak_shadow_cfg(config)
+    corr = pd.Series(0.0, index=values.index, dtype=float)
+    source = pd.Series("hot_peak_broad_shadow_disabled", index=values.index, dtype="object")
+    if not bool(broad_cfg.get("enabled", False)):
+        return corr, source
+
+    valid = base.notna()
+    broad_mask = _broad_hot_peak_shadow_mask(values, config) & valid
+    source.loc[valid & ~broad_mask] = "hot_peak_broad_out_of_scope"
+    source.loc[~valid] = "invalid_base_forecast"
+    if not broad_mask.any():
+        return corr, source
+
+    model = artifact.get("hot_peak_model")
+    if model is None:
+        source.loc[broad_mask] = "hot_peak_broad_insufficient_history"
+        return corr, source
+
+    cfg = _cfg(config)
+    hot_cfg = cfg.get("hot_peak", {}) or {}
+    hot_pred = _predict_model(
+        model,
+        artifact.get("hot_peak_fill_values", pd.Series(dtype=float)),
+        columns,
+        values.loc[broad_mask],
+        forecast_col=forecast_col,
+    )
+    hot_cap = float(broad_cfg.get("cap_mwh", hot_cfg.get("cap_mwh", 6.0)))
+    hot_corr = pd.Series(0.0, index=values.index, dtype=float)
+    hot_corr.loc[broad_mask] = (
+        hot_pred * float(broad_cfg.get("blend", hot_cfg.get("blend", 0.45)))
+    ).clip(-hot_cap, hot_cap)
+
+    total_cap = float(broad_cfg.get("total_cap_mwh", cfg.get("total_cap_mwh", 8.0)))
+    total = (global_corr + hot_corr).clip(-total_cap, total_cap)
+    branch_source = str(broad_cfg.get("source", "global+hot_peak_broad_shadow"))
+    source.loc[broad_mask] = branch_source
+
+    gate_cfg = broad_cfg.get("positive_gate", {}) or broad_cfg.get("candidate_gate", {}) or {}
+    allow_negative = bool(gate_cfg.get("allow_negative_correction", broad_cfg.get("allow_negative_correction", False)))
+    if bool(gate_cfg.get("enabled", False)):
+        low_forecast_gate = _low_forecast_gate_from_cfg(values, gate_cfg, base)
+        block_positive = broad_mask & total.gt(0.0) & ~low_forecast_gate
+        block_negative = (
+            pd.Series(False, index=values.index, dtype=bool)
+            if allow_negative
+            else broad_mask & total.lt(0.0)
+        )
+        blocked = block_positive | block_negative
+        if blocked.any():
+            total.loc[blocked] = 0.0
+            source.loc[blocked] = str(
+                gate_cfg.get("blocked_source", "hot_peak_broad_low_forecast_gate_blocked")
+            )
+    elif not allow_negative:
+        total = total.clip(lower=0.0)
+
+    if not allow_negative:
+        non_positive = broad_mask & total.le(0.0) & source.eq(branch_source)
+        if non_positive.any():
+            source.loc[non_positive] = str(
+                broad_cfg.get("no_positive_source", "hot_peak_broad_no_positive_correction")
+            )
+
+    min_abs = float(broad_cfg.get("min_abs_correction_mwh", broad_cfg.get("min_positive_correction_mwh", 0.0)))
+    if min_abs > 0:
+        below_min = broad_mask & total.abs().gt(0.0) & total.abs().lt(min_abs)
+        if below_min.any():
+            total.loc[below_min] = 0.0
+            source.loc[below_min] = str(
+                broad_cfg.get("below_min_source", "hot_peak_broad_below_min_correction")
+            )
+
+    guard_cfg = (
+        broad_cfg.get("cooling_underway_guard", {})
+        or broad_cfg.get("cooling_guard", {})
+        or gate_cfg.get("cooling_underway_guard", {})
+        or gate_cfg.get("cooling_guard", {})
+        or {}
+    )
+    if bool((guard_cfg or {}).get("enabled", False)):
+        cooling_underway = _cooling_underway_guard(values, guard_cfg)
+        guard_positive = broad_mask & total.gt(0.0) & cooling_underway
+        if guard_positive.any():
+            cap = float(guard_cfg.get("cap_positive_correction_mwh", 0.0))
+            if cap <= 0.0:
+                total.loc[guard_positive] = 0.0
+                source.loc[guard_positive] = str(
+                    guard_cfg.get(
+                        "blocked_source",
+                        "hot_peak_broad_cooling_underway_guard_blocked",
+                    )
+                )
+            else:
+                over_cap = guard_positive & total.gt(cap)
+                if over_cap.any():
+                    total.loc[over_cap] = cap
+                    source.loc[over_cap] = str(
+                        guard_cfg.get(
+                            "capped_source",
+                            "global+hot_peak_broad_cooling_underway_guard_capped",
+                        )
+                    )
+
+    corr = total.where(broad_mask, 0.0)
+    return corr.where(valid, 0.0), source
 
 
 def _target_residual(values: pd.DataFrame, forecast_col: str) -> pd.Series:
@@ -422,6 +927,10 @@ def build_operational_residual_learner(
     hot_model = None
     fill_hot = pd.Series(dtype=float)
     hot_training_rows = 0
+    structural_cfg = _structural_hot_peak_cfg(config)
+    structural_hot_model = None
+    fill_structural_hot = pd.Series(dtype=float)
+    structural_hot_training_rows = 0
     if bool(hot_cfg.get("enabled", True)):
         hot_mask = _hot_peak_mask(work, config).reindex(x_global.index).fillna(False)
         hot_target = y_global - global_train_corr
@@ -432,22 +941,43 @@ def build_operational_residual_learner(
             fill_hot = x_hot.median(numeric_only=True).replace([np.inf, -np.inf], np.nan).fillna(0.0)
             hot_model = _new_model(cfg | hot_cfg, min_samples_leaf=int(hot_cfg.get("min_samples_leaf", 12)))
             hot_model.fit(x_hot.fillna(fill_hot).replace([np.inf, -np.inf], 0.0).fillna(0.0), y_hot)
+        if bool(structural_cfg.get("enabled", False)):
+            structural_mask = _structural_hot_peak_mask(work, config).reindex(x_global.index).fillna(False)
+            structural_hot_training_rows = int(structural_mask.sum())
+            if structural_hot_training_rows >= int(structural_cfg.get("min_rows", hot_cfg.get("min_rows", 48))):
+                x_structural = x_global.loc[structural_mask].copy()
+                y_structural = hot_target.loc[structural_mask].copy()
+                fill_structural_hot = (
+                    x_structural.median(numeric_only=True).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+                )
+                structural_hot_model = _new_model(
+                    cfg | hot_cfg | structural_cfg,
+                    min_samples_leaf=int(structural_cfg.get("min_samples_leaf", hot_cfg.get("min_samples_leaf", 12))),
+                )
+                structural_hot_model.fit(
+                    x_structural.fillna(fill_structural_hot).replace([np.inf, -np.inf], 0.0).fillna(0.0),
+                    y_structural,
+                )
 
     return {
         "global_model": global_model,
         "global_fill_values": fill_global,
         "hot_peak_model": hot_model,
         "hot_peak_fill_values": fill_hot,
+        "structural_hot_peak_model": structural_hot_model,
+        "structural_hot_peak_fill_values": fill_structural_hot,
         "feature_columns": feature_columns,
         "metadata": {
             "model_version": str(cfg.get("model_version", "operational_residual_shadow_v1")),
             "training_rows": int(len(x_global)),
             "hot_peak_training_rows": int(hot_training_rows),
+            "structural_hot_peak_training_rows": int(structural_hot_training_rows),
             "target_residual_mean_mwh": float(y_global.mean()),
             "target_residual_mae_mwh": float(y_global.abs().mean()),
             "forecast_col": forecast_col,
             "shadow_mode": bool(cfg.get("shadow_mode", True)),
             "production_scope": _production_scope(cfg),
+            "capped_full_shadow_cap_mwh": _capped_full_shadow_cap_mwh(cfg),
         },
     }
 
@@ -485,6 +1015,20 @@ def _init_auto_columns(
     out["Auto_Residual_Full_Shadow_Residual_MWH"] = auto_residual
     out["Auto_Residual_Full_Shadow_AbsError_MWH"] = auto_residual.abs()
     out["Auto_Residual_Full_Shadow_Delta_AbsError_MWH"] = auto_residual.abs() - base_residual.abs()
+    out["Auto_Residual_Structural_HotPeak_Correction_MWH"] = 0.0
+    out["Auto_Residual_Structural_HotPeak_Adjusted_Forecast_MWH"] = base
+    out["Auto_Residual_Structural_HotPeak_Correction_Applied_Flag"] = 0
+    out["Auto_Residual_Structural_HotPeak_Source"] = source
+    out["Auto_Residual_Structural_HotPeak_Residual_MWH"] = auto_residual
+    out["Auto_Residual_Structural_HotPeak_AbsError_MWH"] = auto_residual.abs()
+    out["Auto_Residual_Structural_HotPeak_Delta_AbsError_MWH"] = auto_residual.abs() - base_residual.abs()
+    out["Auto_Residual_Broad_HotPeak_Shadow_Correction_MWH"] = 0.0
+    out["Auto_Residual_Broad_HotPeak_Shadow_Adjusted_Forecast_MWH"] = base
+    out["Auto_Residual_Broad_HotPeak_Shadow_Correction_Applied_Flag"] = 0
+    out["Auto_Residual_Broad_HotPeak_Shadow_Source"] = source
+    out["Auto_Residual_Broad_HotPeak_Shadow_Residual_MWH"] = auto_residual
+    out["Auto_Residual_Broad_HotPeak_Shadow_AbsError_MWH"] = auto_residual.abs()
+    out["Auto_Residual_Broad_HotPeak_Shadow_Delta_AbsError_MWH"] = auto_residual.abs() - base_residual.abs()
     return out
 
 
@@ -523,12 +1067,16 @@ def apply_operational_residual_learner(
     if not artifact or artifact.get("global_model") is None:
         out["Auto_Residual_Source"] = "insufficient_history"
         out["Auto_Residual_Full_Shadow_Source"] = "insufficient_history"
+        out["Auto_Residual_Structural_HotPeak_Source"] = "insufficient_history"
+        out["Auto_Residual_Broad_HotPeak_Shadow_Source"] = "insufficient_history"
         return out
 
     columns = list(artifact.get("feature_columns") or [])
     if not columns:
         out["Auto_Residual_Source"] = "no_feature_columns"
         out["Auto_Residual_Full_Shadow_Source"] = "no_feature_columns"
+        out["Auto_Residual_Structural_HotPeak_Source"] = "no_feature_columns"
+        out["Auto_Residual_Broad_HotPeak_Shadow_Source"] = "no_feature_columns"
         return out
 
     global_cap = float(cfg.get("cap_mwh", 6.0))
@@ -562,7 +1110,15 @@ def apply_operational_residual_learner(
     if hot_mask.any():
         hot_gate_cfg = (hot_cfg.get("positive_gate", {}) or {})
         if bool(hot_gate_cfg.get("enabled", False)):
-            low_forecast_gate = _hot_peak_low_forecast_gate(out, config, base)
+            primary_low_forecast_gate = _hot_peak_primary_low_forecast_gate(out, config, base)
+            live_ramp_gate = _hot_peak_live_ramp_gate(out, config, base)
+            low_forecast_gate = primary_low_forecast_gate | live_ramp_gate
+            live_ramp_source = str(
+                _live_ramp_gate_cfg(config).get("source", "global+hot_peak_live_ramp_gate")
+            )
+            live_ramp_pass = hot_mask & total_corr.gt(0.0) & live_ramp_gate & ~primary_low_forecast_gate
+            if live_ramp_pass.any():
+                source.loc[live_ramp_pass] = live_ramp_source
             block_positive = hot_mask & total_corr.gt(0.0) & ~low_forecast_gate
             allow_negative = bool(hot_gate_cfg.get("allow_negative_correction", False))
             block_negative = (
@@ -608,10 +1164,49 @@ def apply_operational_residual_learner(
     full_corr = total_corr.where(valid, 0.0)
     full_adjusted = (base + full_corr).clip(lower=0.0)
     full_source = pd.Series(np.where(valid, source, "invalid_base_forecast"), index=out.index, dtype="object")
+    structural_corr, structural_source = _structural_hot_peak_shadow(
+        out,
+        artifact,
+        config,
+        base=base,
+        global_corr=global_corr,
+        columns=columns,
+        forecast_col=forecast_col,
+    )
+    structural_adjusted = (base + structural_corr).clip(lower=0.0)
+    broad_corr, broad_source = _broad_hot_peak_shadow(
+        out,
+        artifact,
+        config,
+        base=base,
+        global_corr=global_corr,
+        columns=columns,
+        forecast_col=forecast_col,
+    )
+    broad_adjusted = (base + broad_corr).clip(lower=0.0)
 
     applied_corr = full_corr.copy()
     applied_source = full_source.copy()
-    if production_scope == "hot_peak_only":
+    if production_scope == "capped_full_shadow":
+        production_cap = _capped_full_shadow_cap_mwh(cfg)
+        if production_cap <= 0.0:
+            scoped_out = valid & full_corr.ne(0.0)
+            applied_corr = pd.Series(0.0, index=out.index, dtype=float)
+            applied_source.loc[scoped_out] = (
+                full_source.loc[scoped_out].astype(str) + "_capped_full_shadow_zero_cap"
+            )
+        else:
+            capped_corr = full_corr.clip(-production_cap, production_cap).where(valid, 0.0)
+            capped_rows = valid & full_corr.ne(0.0) & full_corr.ne(capped_corr)
+            applied_rows = valid & capped_corr.ne(0.0)
+            applied_corr = capped_corr
+            applied_source.loc[applied_rows & ~capped_rows] = (
+                full_source.loc[applied_rows & ~capped_rows].astype(str) + "+capped_full_shadow"
+            )
+            applied_source.loc[capped_rows] = (
+                full_source.loc[capped_rows].astype(str) + "+capped_full_shadow_cap"
+            )
+    elif production_scope == "hot_peak_only":
         allow_applied = full_source.astype(str).str.startswith("global+hot_peak")
         scoped_out = valid & full_corr.ne(0.0) & ~allow_applied
         applied_corr = full_corr.where(allow_applied, 0.0)
@@ -639,11 +1234,21 @@ def apply_operational_residual_learner(
     out["Auto_Residual_Full_Shadow_Adjusted_Forecast_MWH"] = full_adjusted
     out["Auto_Residual_Full_Shadow_Correction_Applied_Flag"] = full_corr.ne(0.0).astype(int)
     out["Auto_Residual_Full_Shadow_Source"] = full_source
+    out["Auto_Residual_Structural_HotPeak_Correction_MWH"] = structural_corr
+    out["Auto_Residual_Structural_HotPeak_Adjusted_Forecast_MWH"] = structural_adjusted
+    out["Auto_Residual_Structural_HotPeak_Correction_Applied_Flag"] = structural_corr.ne(0.0).astype(int)
+    out["Auto_Residual_Structural_HotPeak_Source"] = structural_source
+    out["Auto_Residual_Broad_HotPeak_Shadow_Correction_MWH"] = broad_corr
+    out["Auto_Residual_Broad_HotPeak_Shadow_Adjusted_Forecast_MWH"] = broad_adjusted
+    out["Auto_Residual_Broad_HotPeak_Shadow_Correction_Applied_Flag"] = broad_corr.ne(0.0).astype(int)
+    out["Auto_Residual_Broad_HotPeak_Shadow_Source"] = broad_source
 
     actual_col = "Actual_MWH" if "Actual_MWH" in out.columns else "Actual"
     actual = _as_num(out.get(actual_col, pd.Series(np.nan, index=out.index)), out.index)
     auto_residual = actual - adjusted
     full_shadow_residual = actual - full_adjusted
+    structural_residual = actual - structural_adjusted
+    broad_residual = actual - broad_adjusted
     base_residual = actual - base
     out["Auto_Residual_Residual_MWH"] = auto_residual
     out["Auto_Residual_AbsError_MWH"] = auto_residual.abs()
@@ -651,6 +1256,12 @@ def apply_operational_residual_learner(
     out["Auto_Residual_Full_Shadow_Residual_MWH"] = full_shadow_residual
     out["Auto_Residual_Full_Shadow_AbsError_MWH"] = full_shadow_residual.abs()
     out["Auto_Residual_Full_Shadow_Delta_AbsError_MWH"] = full_shadow_residual.abs() - base_residual.abs()
+    out["Auto_Residual_Structural_HotPeak_Residual_MWH"] = structural_residual
+    out["Auto_Residual_Structural_HotPeak_AbsError_MWH"] = structural_residual.abs()
+    out["Auto_Residual_Structural_HotPeak_Delta_AbsError_MWH"] = structural_residual.abs() - base_residual.abs()
+    out["Auto_Residual_Broad_HotPeak_Shadow_Residual_MWH"] = broad_residual
+    out["Auto_Residual_Broad_HotPeak_Shadow_AbsError_MWH"] = broad_residual.abs()
+    out["Auto_Residual_Broad_HotPeak_Shadow_Delta_AbsError_MWH"] = broad_residual.abs() - base_residual.abs()
 
     if not shadow_mode and forecast_col in out.columns:
         out[forecast_col] = adjusted
@@ -702,6 +1313,8 @@ def simulate_operational_residual_learner_backtest(
     if dt.notna().sum() == 0:
         out["Auto_Residual_Source"] = "no_datetime"
         out["Auto_Residual_Full_Shadow_Source"] = "no_datetime"
+        out["Auto_Residual_Structural_HotPeak_Source"] = "no_datetime"
+        out["Auto_Residual_Broad_HotPeak_Shadow_Source"] = "no_datetime"
         return out
 
     min_train_rows = int(cfg.get("backtest_min_train_rows", cfg.get("min_rows", 336)))
@@ -713,6 +1326,8 @@ def simulate_operational_residual_learner_backtest(
             group = out.loc[day_mask].copy()
             group["Auto_Residual_Source"] = "insufficient_walk_forward_history"
             group["Auto_Residual_Full_Shadow_Source"] = "insufficient_walk_forward_history"
+            group["Auto_Residual_Structural_HotPeak_Source"] = "insufficient_walk_forward_history"
+            group["Auto_Residual_Broad_HotPeak_Shadow_Source"] = "insufficient_walk_forward_history"
             pieces.append(group)
             continue
         artifact = build_operational_residual_learner(prior, config, forecast_col=forecast_col)
@@ -760,29 +1375,29 @@ def operational_residual_learner_summary(backtest_df: pd.DataFrame | None, artif
     applied = _as_num(backtest_df.get("Auto_Residual_Correction_Applied_Flag", pd.Series(0, index=backtest_df.index)), backtest_df.index).eq(1)
     valid = actual.notna() & base.notna() & auto.notna() & applied
     summary["evaluation_rows"] = int(valid.sum())
-    if not valid.any():
-        return summary
+    if valid.any():
+        base_abs = (actual[valid] - base[valid]).abs()
+        auto_abs = (actual[valid] - auto[valid]).abs()
+        delta = auto_abs - base_abs
+        summary["baseline_mae_mwh"] = float(base_abs.mean())
+        summary["auto_shadow_mae_mwh"] = float(auto_abs.mean())
+        summary["delta_mae_mwh"] = float(delta.mean())
+        summary["improved_rows"] = int((delta < 0).sum())
+        summary["worsened_rows"] = int((delta > 0).sum())
+        summary["mean_correction_mwh"] = float(
+            _as_num(backtest_df.loc[valid, "Auto_Residual_Correction_MWH"], backtest_df.loc[valid].index).mean()
+        )
 
-    base_abs = (actual[valid] - base[valid]).abs()
-    auto_abs = (actual[valid] - auto[valid]).abs()
-    delta = auto_abs - base_abs
-    summary["baseline_mae_mwh"] = float(base_abs.mean())
-    summary["auto_shadow_mae_mwh"] = float(auto_abs.mean())
-    summary["delta_mae_mwh"] = float(delta.mean())
-    summary["improved_rows"] = int((delta < 0).sum())
-    summary["worsened_rows"] = int((delta > 0).sum())
-    summary["mean_correction_mwh"] = float(
-        _as_num(backtest_df.loc[valid, "Auto_Residual_Correction_MWH"], backtest_df.loc[valid].index).mean()
-    )
-
-    hot = _hot_peak_mask(backtest_df, config).reindex(backtest_df.index).fillna(False) & valid
-    summary["hot_peak_evaluation_rows"] = int(hot.sum())
-    if hot.any():
-        hot_base_abs = (actual[hot] - base[hot]).abs()
-        hot_auto_abs = (actual[hot] - auto[hot]).abs()
-        summary["hot_peak_baseline_mae_mwh"] = float(hot_base_abs.mean())
-        summary["hot_peak_auto_shadow_mae_mwh"] = float(hot_auto_abs.mean())
-        summary["hot_peak_delta_mae_mwh"] = float((hot_auto_abs - hot_base_abs).mean())
+        hot = _hot_peak_mask(backtest_df, config).reindex(backtest_df.index).fillna(False) & valid
+        summary["hot_peak_evaluation_rows"] = int(hot.sum())
+        if hot.any():
+            hot_base_abs = (actual[hot] - base[hot]).abs()
+            hot_auto_abs = (actual[hot] - auto[hot]).abs()
+            summary["hot_peak_baseline_mae_mwh"] = float(hot_base_abs.mean())
+            summary["hot_peak_auto_shadow_mae_mwh"] = float(hot_auto_abs.mean())
+            summary["hot_peak_delta_mae_mwh"] = float((hot_auto_abs - hot_base_abs).mean())
+    else:
+        summary["hot_peak_evaluation_rows"] = 0
 
     if "Auto_Residual_Full_Shadow_Adjusted_Forecast_MWH" in backtest_df.columns:
         full_shadow = _as_num(backtest_df["Auto_Residual_Full_Shadow_Adjusted_Forecast_MWH"], backtest_df.index)
@@ -798,4 +1413,56 @@ def operational_residual_learner_summary(backtest_df: pd.DataFrame | None, artif
             summary["full_shadow_baseline_mae_mwh"] = float(full_base_abs.mean())
             summary["full_shadow_auto_mae_mwh"] = float(full_auto_abs.mean())
             summary["full_shadow_delta_mae_mwh"] = float((full_auto_abs - full_base_abs).mean())
+
+    if "Auto_Residual_Structural_HotPeak_Adjusted_Forecast_MWH" in backtest_df.columns:
+        structural = _as_num(backtest_df["Auto_Residual_Structural_HotPeak_Adjusted_Forecast_MWH"], backtest_df.index)
+        structural_applied = _as_num(
+            backtest_df.get(
+                "Auto_Residual_Structural_HotPeak_Correction_Applied_Flag",
+                pd.Series(0, index=backtest_df.index),
+            ),
+            backtest_df.index,
+        ).eq(1)
+        structural_valid = actual.notna() & base.notna() & structural.notna() & structural_applied
+        summary["structural_hot_peak_evaluation_rows"] = int(structural_valid.sum())
+        if structural_valid.any():
+            structural_base_abs = (actual[structural_valid] - base[structural_valid]).abs()
+            structural_auto_abs = (actual[structural_valid] - structural[structural_valid]).abs()
+            summary["structural_hot_peak_baseline_mae_mwh"] = float(structural_base_abs.mean())
+            summary["structural_hot_peak_auto_mae_mwh"] = float(structural_auto_abs.mean())
+            summary["structural_hot_peak_delta_mae_mwh"] = float(
+                (structural_auto_abs - structural_base_abs).mean()
+            )
+
+    if "Auto_Residual_Broad_HotPeak_Shadow_Adjusted_Forecast_MWH" in backtest_df.columns:
+        broad = _as_num(backtest_df["Auto_Residual_Broad_HotPeak_Shadow_Adjusted_Forecast_MWH"], backtest_df.index)
+        broad_applied = _as_num(
+            backtest_df.get(
+                "Auto_Residual_Broad_HotPeak_Shadow_Correction_Applied_Flag",
+                pd.Series(0, index=backtest_df.index),
+            ),
+            backtest_df.index,
+        ).eq(1)
+        broad_valid = actual.notna() & base.notna() & broad.notna() & broad_applied
+        summary["broad_hot_peak_shadow_evaluation_rows"] = int(broad_valid.sum())
+        if broad_valid.any():
+            broad_base_abs = (actual[broad_valid] - base[broad_valid]).abs()
+            broad_auto_abs = (actual[broad_valid] - broad[broad_valid]).abs()
+            broad_delta = broad_auto_abs - broad_base_abs
+            summary["broad_hot_peak_shadow_baseline_mae_mwh"] = float(broad_base_abs.mean())
+            summary["broad_hot_peak_shadow_auto_mae_mwh"] = float(broad_auto_abs.mean())
+            summary["broad_hot_peak_shadow_delta_mae_mwh"] = float(broad_delta.mean())
+            summary["broad_hot_peak_shadow_improved_rows"] = int((broad_delta < 0).sum())
+            summary["broad_hot_peak_shadow_worsened_rows"] = int((broad_delta > 0).sum())
+            summary["broad_hot_peak_shadow_mean_correction_mwh"] = float(
+                _as_num(
+                    backtest_df.loc[broad_valid, "Auto_Residual_Broad_HotPeak_Shadow_Correction_MWH"],
+                    backtest_df.loc[broad_valid].index,
+                ).mean()
+            )
+        if "Auto_Residual_Broad_HotPeak_Shadow_Source" in backtest_df.columns:
+            summary["broad_hot_peak_shadow_source_counts"] = {
+                str(k): int(v)
+                for k, v in backtest_df["Auto_Residual_Broad_HotPeak_Shadow_Source"].value_counts(dropna=False).head(20).items()
+            }
     return summary

@@ -501,9 +501,15 @@ def apply_focused_shape_residual_learner(
     if min_abs > 0:
         correction.loc[correction.abs().lt(min_abs)] = 0.0
 
-    adjusted = (base + correction).clip(lower=0.0)
-    delta_guard_capped = pd.Series(False, index=out.index, dtype=bool)
     guard_cfg = cfg.get("promotion_delta_guard", {}) or {}
+    application_base = base
+    if bool(cfg.get("apply_correction_to_reference_forecast", False)):
+        reference_base = _promotion_reference_forecast(out, forecast_col, guard_cfg)
+        application_base = reference_base.where(reference_base.notna(), base)
+        out["Focused_Shape_Base_Forecast_MWH"] = application_base
+
+    adjusted = (application_base + correction).clip(lower=0.0)
+    delta_guard_capped = pd.Series(False, index=out.index, dtype=bool)
     if not shadow_mode and bool(guard_cfg.get("enabled", False)):
         reference = _promotion_reference_forecast(out, forecast_col, guard_cfg)
         ref_valid = valid & reference.notna() & adjusted.notna()
@@ -523,7 +529,7 @@ def apply_focused_shape_residual_learner(
             guarded.loc[ref_valid] = reference.loc[ref_valid] + delta_vs_reference
             delta_guard_capped = ref_valid & (adjusted - guarded).abs().gt(1e-9)
             adjusted = guarded.clip(lower=0.0)
-            correction = (adjusted - base).where(valid, 0.0).fillna(0.0)
+            correction = (adjusted - application_base).where(valid, 0.0).fillna(0.0)
 
     source_label = "focused_shape_shadow" if shadow_mode else "focused_shape_production"
     source = pd.Series("out_of_scope", index=out.index, dtype="object")
@@ -540,7 +546,7 @@ def apply_focused_shape_residual_learner(
 
     actual_col = "Actual_MWH" if "Actual_MWH" in out.columns else "Actual"
     actual = _as_num(out.get(actual_col, pd.Series(np.nan, index=out.index)), out.index)
-    base_residual = actual - base
+    base_residual = actual - application_base
     shadow_residual = actual - adjusted
     out["Focused_Shape_Residual_MWH"] = shadow_residual
     out["Focused_Shape_AbsError_MWH"] = shadow_residual.abs()

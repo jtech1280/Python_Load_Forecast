@@ -1,4 +1,7 @@
 import unittest
+from pathlib import Path
+
+import yaml
 
 from forecasting.main import _disable_windows_platform_wmi_probe
 
@@ -20,13 +23,27 @@ from forecasting.forecast.focused_shape_residual_learner import (
 )
 from forecasting.diagnostics.forecast_diagnostics import (
     _diagnostic_band_for_row,
+    apply_multisummer_heat_analog_shadow,
+    build_daily_peak_window_miss_by_stage,
     build_daily_peak_shadow_window_scorecard,
+    build_extreme_heat_peak_metrics_by_stage,
+    build_extreme_heat_peak_scorecard,
+    build_future_peak_muting_audit,
+    build_heat_persistence_peak_candidate_scorecard,
+    build_hot_ramp_peak_candidate_scorecard,
+    build_hot_peak_shadow_candidate_scorecard,
+    build_peak_window_expansion_scorecard,
     build_shadow_stage_promotion_audit,
     metrics_summary,
     prep_backtest,
 )
-from forecasting.forecast.forecast_pipeline import apply_operational_stage_selector
-from forecasting.forecast.peak_risk_correction import apply_peak_risk_correction
+from forecasting.forecast.forecast_pipeline import apply_operational_stage_selector, build_display_df
+from forecasting.forecast.peak_risk_correction import (
+    apply_day1_live_ramp_override,
+    apply_hot_ramp_scenario_override,
+    apply_multiday_live_heat_anchor_override,
+    apply_peak_risk_correction,
+)
 from forecasting.forecast.recursive_engine import recursive_forecast
 from forecasting.forecast.recent_residual_correction import (
     apply_recent_residual_correction,
@@ -45,11 +62,124 @@ from forecasting.forecast.daily_peak_shadow_model import (
     build_daily_peak_shadow_model,
     daily_peak_shadow_summary,
 )
+from forecasting.forecast.hot_ramp_peak_capture import (
+    apply_heat_persistence_peak_capture,
+    apply_hot_ramp_peak_capture,
+    build_heat_persistence_peak_capture_artifact,
+    build_hot_ramp_peak_capture_artifact,
+)
 from forecasting.model.ensemble import blend_predictions
 from forecasting.data.local_weather_loader import apply_dynamic_temperature_calibration
 
 
 class ForecastControlTests(unittest.TestCase):
+    def test_config_targeted_missing_slices_are_bounded_production_rules(self):
+        config_path = Path(__file__).resolve().parents[1] / "forecasting" / "config.yaml"
+        with config_path.open("r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle) or {}
+
+        rules = (
+            config.get("calibration", {})
+            .get("hot_ramp_peak_capture", {})
+            .get("targeted_missing_slices", [])
+        )
+        enabled = [str(rule.get("name", "")) for rule in rules if bool(rule.get("enabled", True))]
+        expected_enabled = [
+            "july_long_98_100_clear_moderate_state_peak_capture",
+            "july_long_100_105_clear_high_state_peak_capture",
+            "july_days2to3_90_92_clear_neutral_state_peak_capture",
+            "june_days4to7_92_95_clear_moderate_state_peak_capture",
+            "july_days4to7_90_92_overcast_deep_low_state_peak_capture",
+            "july_days4to7_90_92_overcast_deep_low_state_he14_15_peak_capture",
+            "july_days2to3_85_90_clear_deep_low_state_peak_capture",
+            "july_days2to3_90_92_clear_negative_state_peak_capture",
+            "july_days4to7_95_98_clear_neutral_state_peak_capture",
+            "july_days4to7_95_98_clear_mild_negative_state_peak_capture",
+            "july_days4to7_95_100_clear_high_state_peak_capture",
+            "july_long_98_100_clear_negative_state_peak_capture",
+            "july_long_90_92_clear_negative_state_peak_capture",
+        ]
+
+        self.assertTrue(rules)
+        self.assertEqual(enabled, expected_enabled)
+        disabled = [str(rule.get("name", "")) for rule in rules if not bool(rule.get("enabled", True))]
+        self.assertIn("july_long_95_98_clear_positive_state_peak_capture", disabled)
+        self.assertIn("june_long_100_105_clear_very_high_state_peak_capture", disabled)
+        rule_by_name = {str(rule.get("name", "")): rule for rule in rules}
+        july_98_100 = rule_by_name["july_long_98_100_clear_moderate_state_peak_capture"]
+        self.assertEqual([int(hour) for hour in july_98_100.get("hours", [])], [17, 18])
+        self.assertGreaterEqual(float(july_98_100.get("min_raw_minus_samehour7_mwh", 0.0)), 20.0)
+        self.assertLessEqual(
+            float(july_98_100.get("max_raw_minus_samehour7_mwh_exclusive", 999.0)),
+            25.0,
+        )
+        july_100_105 = rule_by_name["july_long_100_105_clear_high_state_peak_capture"]
+        self.assertEqual([int(hour) for hour in july_100_105.get("hours", [])], [16, 17])
+        self.assertGreaterEqual(float(july_100_105.get("min_forecast_day", 0.0)), 15.0)
+        self.assertLessEqual(float(july_100_105.get("max_forecast_day", 999.0)), 16.0)
+        july_95_98_neutral = rule_by_name["july_days4to7_95_98_clear_neutral_state_peak_capture"]
+        self.assertEqual(float(july_95_98_neutral.get("correction_mwh", 0.0)), 7.0)
+        july_overcast_he14_15 = rule_by_name[
+            "july_days4to7_90_92_overcast_deep_low_state_he14_15_peak_capture"
+        ]
+        self.assertEqual([int(hour) for hour in july_overcast_he14_15.get("hours", [])], [14, 15])
+        self.assertEqual(float(july_overcast_he14_15.get("correction_mwh", 0.0)), 6.0)
+        july_95_98_mild_negative = rule_by_name[
+            "july_days4to7_95_98_clear_mild_negative_state_peak_capture"
+        ]
+        self.assertGreaterEqual(float(july_95_98_mild_negative.get("min_raw_minus_samehour7_mwh", 0.0)), -15.0)
+        self.assertLessEqual(
+            float(july_95_98_mild_negative.get("max_raw_minus_samehour7_mwh_exclusive", 999.0)),
+            -10.0,
+        )
+        self.assertLessEqual(float(july_95_98_mild_negative.get("correction_mwh", 0.0)), 4.0)
+        for rule in rules:
+            if not bool(rule.get("enabled", True)):
+                continue
+            months = {int(month) for month in rule.get("months", [])}
+            hours = {int(hour) for hour in rule.get("hours", [])}
+            self.assertTrue(months.issubset({6, 7}))
+            self.assertTrue(hours.issubset(set(range(14, 21))))
+            self.assertIn("min_forecast_day", rule)
+            self.assertLessEqual(float(rule.get("max_forecast_day", 999.0)), 16.0)
+            self.assertTrue("min_maxtemp_f" in rule or "max_maxtemp_f_exclusive" in rule)
+            self.assertTrue(
+                "min_raw_minus_samehour7_mwh" in rule
+                or "max_raw_minus_samehour7_mwh_exclusive" in rule
+            )
+            self.assertLessEqual(float(rule.get("correction_mwh", 0.0)), 14.0)
+
+    def test_config_keeps_current_learned_candidates_guarded_for_production(self):
+        config_path = Path(__file__).resolve().parents[1] / "forecasting" / "config.yaml"
+        with config_path.open("r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle) or {}
+        cal = config.get("calibration", {})
+        stage_selector = cal.get("stage_selector", {})
+
+        focused_shape = stage_selector.get("focused_shape_residual_learner", {})
+        self.assertFalse(focused_shape.get("shadow_mode", True))
+        self.assertTrue(focused_shape.get("apply_correction_to_reference_forecast", False))
+        focused_shape_guard = focused_shape.get("promotion_delta_guard", {})
+        self.assertTrue(focused_shape_guard.get("enabled", False))
+        self.assertLessEqual(float(focused_shape_guard.get("risk_slice_max_abs_delta_vs_reference_mwh", 999.0)), 5.0)
+        self.assertFalse((focused_shape.get("scope", {}) or {}).get("use_focused_guard_rule_union", True))
+        self.assertTrue(stage_selector.get("daily_peak_shadow_model", {}).get("shadow_mode", False))
+        self.assertTrue(cal.get("heat_persistence_peak_capture", {}).get("shadow_mode", False))
+
+        orl = cal.get("operational_residual_learner", {})
+        self.assertEqual(orl.get("production_scope"), "capped_full_shadow")
+        self.assertNotEqual(orl.get("production_scope"), "all")
+        self.assertLessEqual(float(orl.get("capped_full_shadow_cap_mwh", 999.0)), 1.0)
+        hot_peak = orl.get("hot_peak", {})
+        self.assertTrue(hot_peak.get("structural_shadow", {}).get("enabled", False))
+        self.assertTrue(hot_peak.get("broad_shadow", {}).get("enabled", False))
+        hot_ramp_peak = cal.get("hot_ramp_peak_capture", {})
+        timing_selector = hot_ramp_peak.get("peak_timing_selector", {})
+        self.assertTrue(timing_selector.get("enabled", False))
+        self.assertEqual(timing_selector.get("required_source"), "xgb_component")
+        self.assertGreaterEqual(int(timing_selector.get("consensus_required", 0)), 2)
+        self.assertTrue(timing_selector.get("block_on_strong_hot_ramp", False))
+
     def test_daily_peak_shadow_model_keeps_final_forecast_and_improves_peak_candidate(self):
         rows = []
         for day in range(10):
@@ -265,6 +395,1123 @@ class ForecastControlTests(unittest.TestCase):
         self.assertAlmostEqual(day_1["Delta_PeakAtActual_MAE_MWH"], 0.0)
         self.assertAlmostEqual(day_6["Delta_PeakAtActual_MAE_MWH"], 0.0)
 
+    def test_peak_window_expansion_extreme_heat_and_he18_20_daily_peak_metrics(self):
+        rows = []
+        for forecast_day, date, daily_max in [
+            (1, pd.Timestamp("2026-07-01"), 106.0),
+            (2, pd.Timestamp("2026-07-02"), 104.0),
+        ]:
+            for hour in range(14, 21):
+                actual = 300.0 + hour + (10.0 if hour == 19 else 0.0)
+                final = actual - (4.0 if hour in {19, 20} else 2.0)
+                rows.append(
+                    {
+                        "DT": date + pd.Timedelta(hours=hour),
+                        "Forecast_Day": forecast_day,
+                        "Replay_Horizon_Bucket": "Days1to3",
+                        "Hour": hour,
+                        "Month": date.month,
+                        "Actual_MWH": actual,
+                        "Raw_Forecast_MWH": final - 1.0,
+                        "Final_Backtest_Forecast_MWH": final,
+                        "Temperature_DailyMax": daily_max,
+                        "Temperature": daily_max,
+                        "CloudCover_Norm": 0.0,
+                    }
+                )
+        df = pd.DataFrame(rows)
+
+        expansion = build_peak_window_expansion_scorecard(df)
+        current = expansion[expansion["Slice"].eq("PeakWindowHours14to18")].iloc[0]
+        expanded = expansion[expansion["Slice"].eq("PeakWindowHours14to20")].iloc[0]
+        late = expansion[expansion["Slice"].eq("LatePeakHours19to20")].iloc[0]
+        self.assertEqual(current["N"], 10)
+        self.assertEqual(expanded["N"], 14)
+        self.assertEqual(late["N"], 4)
+
+        extreme_scorecard = build_extreme_heat_peak_scorecard(df)
+        extreme = extreme_scorecard[
+            extreme_scorecard["Slice"].eq("ExtremeHeat105PlusPeakWindowHours14to20")
+        ].iloc[0]
+        self.assertEqual(extreme["N"], 7)
+
+        extreme_metrics = build_extreme_heat_peak_metrics_by_stage(df)
+        final_extreme = extreme_metrics[extreme_metrics["Stage"].eq("final_corrected_production")]
+        self.assertEqual(set(final_extreme["Forecast_Day"].astype(int)), {1})
+        self.assertTrue({17, 18, 19, 20}.issubset(set(final_extreme["Hour"].astype(int))))
+
+        he18_20 = build_daily_peak_window_miss_by_stage(df)
+        final_peaks = he18_20[he18_20["Stage"].eq("final_corrected_production")]
+        self.assertEqual(set(final_peaks["PeakWindowName"]), {"HE18to20_CodeHours17to19"})
+        self.assertEqual(set(final_peaks["Actual_Peak_Hour"].astype(int)), {19})
+
+    def test_future_peak_muting_audit_flags_hotter_day_lower_peak_and_scenario_gap(self):
+        rows = []
+        for date, daily_max, peak_value, hot_stress_peak in [
+            (pd.Timestamp("2026-08-07"), 108.0, 346.0, 356.0),
+            (pd.Timestamp("2026-08-08"), 109.5, 342.0, 354.0),
+        ]:
+            stress_gap = hot_stress_peak - peak_value
+            for hour in range(14, 21):
+                point = peak_value - abs(hour - 18) * 12.0
+                hot_stress = point + stress_gap
+                rows.append(
+                    {
+                        "DT": date + pd.Timedelta(hours=hour),
+                        "Forecast_Expected_MWH": point,
+                        "Forecast": point,
+                        "Temperature": daily_max - abs(hour - 17) * 0.5,
+                        "Temperature_DailyMax": daily_max,
+                        "WeatherScenario_warmer_P50_MWH": hot_stress - 2.0,
+                        "WeatherScenario_hot_stress_5f_P50_MWH": hot_stress,
+                        "WeatherScenario_cooler_P50_MWH": point - 10.0,
+                        "Weather_Robustness_Hedge_MWH": 0.0,
+                    }
+                )
+
+        backtest = pd.DataFrame(
+            {
+                "DT": pd.to_datetime(["2026-07-15 17:00", "2026-07-15 18:00"]),
+                "Hour": [17, 18],
+                "Actual_MWH": [341.0, 340.0],
+                "Raw_Forecast_MWH": [338.0, 337.0],
+                "Final_Backtest_Forecast_MWH": [341.0, 340.0],
+                "Temperature_DailyMax": [105.0, 105.0],
+            }
+        )
+
+        audit = build_future_peak_muting_audit(pd.DataFrame(rows), backtest_df=backtest)
+
+        aug8 = audit[audit["Date"].eq("2026-08-08")].iloc[0]
+        self.assertTrue(bool(aug8["Muted_Peak_Flag"]))
+        self.assertIn("hotter_day_lower_peak", aug8["Muted_Peak_Reasons"])
+        self.assertIn("daily_peak_below_max_scenario", aug8["Muted_Peak_Reasons"])
+        self.assertEqual(aug8["Analog_Actual_Count"], 2)
+        self.assertAlmostEqual(aug8["MaxPeakWindowHotStressGap_MWH"], 12.0)
+
+    def test_multisummer_heat_analog_shadow_is_prior_origin_and_non_production(self):
+        rows = []
+        for dt, actual, final in [
+            (pd.Timestamp("2024-07-10 17:00"), 330.0, 320.0),
+            (pd.Timestamp("2025-07-10 17:00"), 350.0, 330.0),
+            (pd.Timestamp("2026-07-05 17:00"), 500.0, 300.0),
+            (pd.Timestamp("2026-07-10 17:00"), 335.0, 300.0),
+        ]:
+            rows.append(
+                {
+                    "DT": dt,
+                    "Replay_Origin_ID": "origin_2026_07_01",
+                    "Replay_Origin_DT": pd.Timestamp("2026-07-01"),
+                    "Forecast_Day": 1,
+                    "Replay_Horizon_Bucket": "Days1to3",
+                    "Hour": dt.hour,
+                    "Month": dt.month,
+                    "Actual_MWH": actual,
+                    "Raw_Forecast_MWH": final - 2.0,
+                    "Final_Backtest_Forecast_MWH": final,
+                    "Temperature_DailyMax": 106.0,
+                    "Temperature": 106.0,
+                    "CloudCover_Norm": 0.0,
+                }
+            )
+        config = {
+            "diagnostics": {
+                "heat_analog_shadow": {
+                    "min_analog_count": 2,
+                    "blend": 0.5,
+                    "cap_mwh": 100.0,
+                }
+            }
+        }
+
+        out = apply_multisummer_heat_analog_shadow(pd.DataFrame(rows), config=config)
+        target = out[out["DT"].eq(pd.Timestamp("2026-07-10 17:00"))].iloc[0]
+
+        self.assertEqual(target["Final_Backtest_Forecast_MWH"], 300.0)
+        self.assertEqual(target["Heat_Analog_Count_SameHour_PreOrigin"], 2)
+        self.assertEqual(target["Heat_Analog_Source"], "same_month_multi_summer")
+        self.assertAlmostEqual(target["Heat_Analog_Actual_Mean_SameHour_PreOrigin_MWH"], 340.0)
+        self.assertAlmostEqual(target["Heat_Analog_Shadow_Correction_MWH"], 20.0)
+        self.assertAlmostEqual(target["Heat_Analog_Shadow_Forecast_MWH"], 320.0)
+
+        audit = build_shadow_stage_promotion_audit(out)
+        self.assertIn("heat_analog_shadow", set(audit["Stage"]))
+
+    def test_hot_ramp_peak_capture_shadow_targets_strong_ramp_peak(self):
+        rows = []
+        shape = {16: 100.0, 17: 104.0, 18: 108.0, 19: 106.0, 20: 102.0}
+        for day in range(6):
+            date = pd.Timestamp("2026-07-01") + pd.Timedelta(days=day)
+            for hour, base in shape.items():
+                actual = base + (6.0 if hour == 18 else 2.0)
+                rows.append(
+                    {
+                        "DT": date + pd.Timedelta(hours=hour),
+                        "Hour": hour,
+                        "Month": 7,
+                        "Forecast_Day": 1,
+                        "Actual_MWH": actual,
+                        "Final_Backtest_Forecast_MWH": base,
+                        "Final_Forecast_MWH": base,
+                        "Raw_Forecast_MWH": base - 1.0,
+                        "Temperature": 103.0,
+                        "Temperature_DailyMax": 103.0,
+                        "DailyMaxTemp_Ramp_1Day": 3.5,
+                        "CloudCover_Norm": 0.05,
+                        "MWH_SameHour7DayMean": base - 2.0,
+                        "MWH_Lag24": base - 3.0,
+                    }
+                )
+        config = {
+            "calibration": {
+                "hot_ramp_peak_capture": {
+                    "enabled": True,
+                    "shadow_mode": True,
+                    "min_training_days": 3,
+                    "min_lookup_days": 1,
+                    "train_enforce_forecast_day": False,
+                    "min_maxtemp_f": 100.0,
+                    "min_dailymax_ramp_1day_f": 2.0,
+                    "strong_ramp_min_dailymax_ramp_1day_f": 3.0,
+                    "hours": [16, 17, 18, 19, 20],
+                    "max_cloud_cover_norm": 0.40,
+                    "spread_hours": 1.0,
+                    "strong_ramp_floor_mwh": 4.0,
+                    "cap_mwh": 9.0,
+                    "strong_ramp_cap_mwh": 10.0,
+                }
+            }
+        }
+        artifact = build_hot_ramp_peak_capture_artifact(
+            pd.DataFrame(rows),
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+        )
+        future = []
+        for hour, base in shape.items():
+            future.append(
+                {
+                    "DT": pd.Timestamp("2026-07-10") + pd.Timedelta(hours=hour),
+                    "Hour": hour,
+                    "Month": 7,
+                    "Forecast_Day": 1,
+                    "Final_Forecast_MWH": base + 2.0,
+                    "Stage_Selected_Forecast_MWH": base + 2.0,
+                    "Temperature": 104.0,
+                    "Temperature_DailyMax": 104.0,
+                    "DailyMaxTemp_Ramp_1Day": 3.5,
+                    "CloudCover_Norm": 0.05,
+                    "MWH_SameHour7DayMean": base,
+                    "MWH_Lag24": base - 1.0,
+                }
+            )
+
+        out = apply_hot_ramp_peak_capture(
+            pd.DataFrame(future),
+            artifact,
+            config,
+            forecast_col="Final_Forecast_MWH",
+            also_update_cols=("Stage_Selected_Forecast_MWH",),
+            evaluation_mode="unit_test_shadow",
+        )
+
+        peak = out.loc[out["Hour"].eq(18)].iloc[0]
+        self.assertIsNotNone(artifact)
+        self.assertEqual(peak["Hot_Ramp_Peak_Source"], "hot_ramp_peak_shadow")
+        self.assertEqual(peak["Hot_Ramp_Peak_Shadow_Mode"], 1)
+        self.assertEqual(peak["Hot_Ramp_Peak_Scope_Flag"], 1)
+        self.assertEqual(peak["Hot_Ramp_Peak_Strong_Ramp_Flag"], 1)
+        self.assertGreaterEqual(peak["Hot_Ramp_Peak_Correction_MWH"], 4.0)
+        self.assertLessEqual(peak["Hot_Ramp_Peak_Correction_MWH"], 10.0)
+        self.assertEqual(peak["Final_Forecast_MWH"], 110.0)
+        self.assertGreater(peak["Hot_Ramp_Peak_Shadow_Forecast_MWH"], peak["Final_Forecast_MWH"])
+        self.assertEqual(out["Hot_Ramp_Peak_Correction_MWH"].idxmax(), out.loc[out["Hour"].eq(18)].index[0])
+
+    def test_hot_ramp_peak_capture_cooling_guard_blocks_shadow_lift(self):
+        train = pd.DataFrame(
+            {
+                "DT": pd.date_range("2026-07-01 18:00", periods=5, freq="24h"),
+                "Hour": 18,
+                "Month": 7,
+                "Actual_MWH": 116.0,
+                "Final_Backtest_Forecast_MWH": 110.0,
+                "Final_Forecast_MWH": 110.0,
+                "Raw_Forecast_MWH": 109.0,
+                "Temperature": 103.0,
+                "Temperature_DailyMax": 103.0,
+                "DailyMaxTemp_Ramp_1Day": 3.0,
+                "CloudCover_Norm": 0.0,
+            }
+        )
+        config = {
+            "calibration": {
+                "hot_ramp_peak_capture": {
+                    "enabled": True,
+                    "shadow_mode": True,
+                    "min_training_days": 3,
+                    "min_lookup_days": 1,
+                    "train_enforce_forecast_day": False,
+                    "hours": [18],
+                    "min_maxtemp_f": 100.0,
+                    "min_dailymax_ramp_1day_f": 2.0,
+                    "cooling_underway_guard": {
+                        "enabled": True,
+                        "mode": "any",
+                        "min_hour": 18,
+                        "min_drop_from_dailymax_f": 5.0,
+                        "min_forecast_drop_next3hr_f": 6.0,
+                        "blocked_source": "hot_ramp_peak_cooling_underway_blocked",
+                    },
+                }
+            }
+        }
+        artifact = build_hot_ramp_peak_capture_artifact(
+            train,
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+        )
+        future = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2026-07-10 18:00")],
+                "Hour": [18],
+                "Month": [7],
+                "Forecast_Day": [1],
+                "Final_Forecast_MWH": [110.0],
+                "Temperature": [96.0],
+                "Temperature_DailyMax": [103.0],
+                "DailyMaxTemp_Ramp_1Day": [3.0],
+                "CloudCover_Norm": [0.0],
+                "TempDrop_Next3Hr_F": [7.0],
+            }
+        )
+
+        out = apply_hot_ramp_peak_capture(future, artifact, config, forecast_col="Final_Forecast_MWH")
+
+        self.assertEqual(out["Hot_Ramp_Peak_Correction_Applied_Flag"].sum(), 0)
+        self.assertEqual(out["Hot_Ramp_Peak_Source"].iloc[0], "hot_ramp_peak_cooling_underway_blocked")
+        self.assertEqual(out["Final_Forecast_MWH"].iloc[0], 110.0)
+
+    def test_hot_ramp_peak_capture_blocks_negative_learned_residual(self):
+        train = pd.DataFrame(
+            {
+                "DT": pd.date_range("2026-07-01 18:00", periods=5, freq="24h"),
+                "Hour": 18,
+                "Month": 7,
+                "Actual_MWH": 100.0,
+                "Final_Backtest_Forecast_MWH": 104.0,
+                "Final_Forecast_MWH": 104.0,
+                "Raw_Forecast_MWH": 104.0,
+                "Temperature": 102.0,
+                "Temperature_DailyMax": 102.0,
+                "DailyMaxTemp_Ramp_1Day": 3.5,
+                "CloudCover_Norm": 0.0,
+                "MWH_SameHour7DayMean": 95.0,
+                "MWH_Lag24": 95.0,
+            }
+        )
+        config = {
+            "calibration": {
+                "hot_ramp_peak_capture": {
+                    "enabled": True,
+                    "shadow_mode": True,
+                    "min_training_days": 3,
+                    "min_lookup_days": 1,
+                    "train_enforce_forecast_day": False,
+                    "hours": [18],
+                    "min_maxtemp_f": 100.0,
+                    "min_dailymax_ramp_1day_f": 2.0,
+                    "strong_ramp_floor_mwh": 4.0,
+                    "strong_ramp_cap_mwh": 10.0,
+                }
+            }
+        }
+        artifact = build_hot_ramp_peak_capture_artifact(
+            train,
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+        )
+        future = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2026-07-10 18:00")],
+                "Hour": [18],
+                "Month": [7],
+                "Forecast_Day": [1],
+                "Final_Forecast_MWH": [100.0],
+                "Temperature": [102.0],
+                "Temperature_DailyMax": [102.0],
+                "DailyMaxTemp_Ramp_1Day": [3.5],
+                "CloudCover_Norm": [0.0],
+                "MWH_SameHour7DayMean": [130.0],
+                "MWH_Lag24": [130.0],
+            }
+        )
+
+        out = apply_hot_ramp_peak_capture(future, artifact, config, forecast_col="Final_Forecast_MWH")
+
+        self.assertEqual(out["Hot_Ramp_Peak_Correction_Applied_Flag"].sum(), 0)
+        self.assertEqual(out["Hot_Ramp_Peak_Source"].iloc[0], "hot_ramp_peak_negative_learned_residual")
+        self.assertEqual(out["Hot_Ramp_Peak_Shadow_Forecast_MWH"].iloc[0], 100.0)
+
+    def test_hot_ramp_peak_capture_requires_anchor_support_for_strong_floor(self):
+        train = pd.DataFrame(
+            {
+                "DT": pd.date_range("2026-07-01 18:00", periods=5, freq="24h"),
+                "Hour": 18,
+                "Month": 7,
+                "Actual_MWH": 103.0,
+                "Final_Backtest_Forecast_MWH": 100.0,
+                "Final_Forecast_MWH": 100.0,
+                "Raw_Forecast_MWH": 100.0,
+                "Temperature": 102.0,
+                "Temperature_DailyMax": 102.0,
+                "DailyMaxTemp_Ramp_1Day": 3.5,
+                "CloudCover_Norm": 0.0,
+                "MWH_SameHour7DayMean": 98.0,
+                "MWH_Lag24": 98.0,
+            }
+        )
+        config = {
+            "calibration": {
+                "hot_ramp_peak_capture": {
+                    "enabled": True,
+                    "shadow_mode": True,
+                    "min_training_days": 3,
+                    "min_lookup_days": 1,
+                    "train_enforce_forecast_day": False,
+                    "hours": [18],
+                    "min_maxtemp_f": 100.0,
+                    "min_dailymax_ramp_1day_f": 2.0,
+                    "strong_ramp_floor_mwh": 4.0,
+                    "strong_ramp_cap_mwh": 10.0,
+                    "anchor_min_learned_residual_mwh": 4.0,
+                    "anchor_min_maxtemp_f": 105.0,
+                    "floor_requires_anchor_support": True,
+                }
+            }
+        }
+        artifact = build_hot_ramp_peak_capture_artifact(
+            train,
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+        )
+        future = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2026-07-10 18:00")],
+                "Hour": [18],
+                "Month": [7],
+                "Forecast_Day": [1],
+                "Final_Forecast_MWH": [100.0],
+                "Temperature": [102.0],
+                "Temperature_DailyMax": [102.0],
+                "DailyMaxTemp_Ramp_1Day": [3.5],
+                "CloudCover_Norm": [0.0],
+                "MWH_SameHour7DayMean": [130.0],
+                "MWH_Lag24": [130.0],
+            }
+        )
+
+        out = apply_hot_ramp_peak_capture(future, artifact, config, forecast_col="Final_Forecast_MWH")
+
+        self.assertEqual(out["Hot_Ramp_Peak_Correction_Applied_Flag"].sum(), 0)
+        self.assertEqual(out["Hot_Ramp_Peak_Source"].iloc[0], "hot_ramp_peak_insufficient_anchor_support")
+        self.assertEqual(out["Hot_Ramp_Peak_Shadow_Forecast_MWH"].iloc[0], 100.0)
+
+    def test_hot_ramp_peak_capture_anchorless_shadow_fallback_uses_strong_floor(self):
+        shape = {16: 300.0, 17: 310.0, 18: 320.0, 19: 315.0, 20: 300.0}
+        future = pd.DataFrame(
+            [
+                {
+                    "DT": pd.Timestamp("2026-07-21") + pd.Timedelta(hours=hour),
+                    "Hour": hour,
+                    "Month": 7,
+                    "Forecast_Day": 2,
+                    "Final_Forecast_MWH": base,
+                    "Temperature": 101.0,
+                    "Temperature_DailyMax": 101.0,
+                    "DailyMaxTemp_Ramp_1Day": 3.2,
+                    "CloudCover_Norm": 0.0,
+                }
+                for hour, base in shape.items()
+            ]
+        )
+        config = {
+            "calibration": {
+                "hot_ramp_peak_capture": {
+                    "enabled": True,
+                    "shadow_mode": True,
+                    "allow_anchorless_shadow_fallback": True,
+                    "min_maxtemp_f": 100.0,
+                    "min_dailymax_ramp_1day_f": 2.0,
+                    "strong_ramp_min_dailymax_ramp_1day_f": 3.0,
+                    "hours": [16, 17, 18, 19, 20],
+                    "max_cloud_cover_norm": 0.40,
+                    "spread_hours": 1.0,
+                    "strong_ramp_floor_mwh": 4.0,
+                    "cap_mwh": 9.0,
+                    "strong_ramp_cap_mwh": 10.0,
+                }
+            }
+        }
+
+        out = apply_hot_ramp_peak_capture(pd.DataFrame(future), None, config, forecast_col="Final_Forecast_MWH")
+
+        peak = out.loc[out["Hour"].eq(18)].iloc[0]
+        self.assertEqual(peak["Hot_Ramp_Peak_Source"], "hot_ramp_peak_shadow")
+        self.assertEqual(peak["Hot_Ramp_Peak_Scope_Flag"], 1)
+        self.assertEqual(peak["Hot_Ramp_Peak_Strong_Ramp_Flag"], 1)
+        self.assertAlmostEqual(peak["Hot_Ramp_Peak_Correction_MWH"], 4.0)
+        self.assertEqual(peak["Final_Forecast_MWH"], 320.0)
+        self.assertAlmostEqual(peak["Hot_Ramp_Peak_Shadow_Forecast_MWH"], 324.0)
+
+        prod_config = {
+            "calibration": {
+                "hot_ramp_peak_capture": {
+                    **config["calibration"]["hot_ramp_peak_capture"],
+                    "shadow_mode": False,
+                }
+            }
+        }
+        blocked = apply_hot_ramp_peak_capture(
+            pd.DataFrame(future),
+            None,
+            prod_config,
+            forecast_col="Final_Forecast_MWH",
+        )
+        self.assertEqual(blocked["Hot_Ramp_Peak_Correction_Applied_Flag"].sum(), 0)
+        self.assertEqual(blocked["Hot_Ramp_Peak_Source"].iloc[0], "insufficient_history")
+
+    def test_hot_ramp_peak_capture_timing_selector_uses_xgb_consensus_when_confident(self):
+        shape = {16: 300.0, 17: 312.0, 18: 316.0, 19: 311.0, 20: 304.0}
+        future = pd.DataFrame(
+            [
+                {
+                    "DT": pd.Timestamp("2026-07-22") + pd.Timedelta(hours=hour),
+                    "Hour": hour,
+                    "Month": 7,
+                    "Forecast_Day": 2,
+                    "Final_Forecast_MWH": base,
+                    "Stage_Selected_Forecast_MWH": base,
+                    "Raw_Forecast_MWH": {16: 303.0, 17: 330.0, 18: 322.0, 19: 314.0, 20: 304.0}[hour],
+                    "XGB_Pred_MWH": {16: 302.0, 17: 331.0, 18: 321.0, 19: 314.0, 20: 304.0}[hour],
+                    "Temperature": 102.0,
+                    "Temperature_DailyMax": 102.0,
+                    "DailyMaxTemp_Ramp_1Day": 2.5,
+                    "CloudCover_Norm": 0.05,
+                    "MWH_SameHour7DayMean": base - 1.0,
+                    "MWH_Lag24": base - 2.0,
+                }
+                for hour, base in shape.items()
+            ]
+        )
+        config = {
+            "calibration": {
+                "hot_ramp_peak_capture": {
+                    "enabled": True,
+                    "shadow_mode": False,
+                    "min_maxtemp_f": 100.0,
+                    "min_dailymax_ramp_1day_f": 2.0,
+                    "strong_ramp_min_dailymax_ramp_1day_f": 3.0,
+                    "hours": [16, 17, 18, 19, 20],
+                    "max_cloud_cover_norm": 0.40,
+                    "spread_hours": 1.0,
+                    "cap_mwh": 9.0,
+                    "strong_cap_mwh": 10.0,
+                    "peak_timing_selector": {
+                        "enabled": True,
+                        "required_source": "xgb_component",
+                        "timing_sources": [
+                            {"source": "xgb_component", "column": "XGB_Pred_MWH"},
+                            {"source": "raw_xgb_lgb", "column": "Raw_Forecast_MWH"},
+                        ],
+                        "source_priority": ["xgb_component", "raw_xgb_lgb"],
+                        "consensus_required": 2,
+                        "max_consensus_hour_spread": 1.0,
+                        "min_peak_margin_mwh": 1.0,
+                        "allowed_hours": [16, 17, 18, 19, 20],
+                        "block_on_strong_hot_ramp": True,
+                        "strong_hot_ramp_min_maxtemp_f": 100.0,
+                        "strong_hot_ramp_min_dailymax_ramp_1day_f": 3.0,
+                        "target_selected_hour_to_daily_peak": True,
+                        "cap_nonselected_hours_to_target": True,
+                        "max_selected_hour_extra_correction_mwh": 4.0,
+                    },
+                }
+            }
+        }
+        artifact = {
+            "lookups": {},
+            "metadata": {
+                "global_peak_residual_mwh": 6.0,
+                "global_samehour7_residual_mwh": 6.0,
+                "global_lag24_residual_mwh": 6.0,
+                "global_lag24_ramp_slope_mwh_per_f": 0.0,
+            },
+        }
+
+        out = apply_hot_ramp_peak_capture(
+            future,
+            artifact,
+            config,
+            forecast_col="Final_Forecast_MWH",
+            also_update_cols=("Stage_Selected_Forecast_MWH",),
+        )
+
+        selected = out.loc[out["Hour"].eq(17)].iloc[0]
+        self.assertEqual(selected["Hot_Ramp_Peak_Base_PeakHour"], 18.0)
+        self.assertEqual(selected["Hot_Ramp_Peak_Predicted_PeakHour"], 17.0)
+        self.assertEqual(selected["Hot_Ramp_Peak_Timing_Selected_PeakHour"], 17.0)
+        self.assertEqual(selected["Hot_Ramp_Peak_Timing_Source"], "xgb_component_consensus")
+        self.assertEqual(selected["Hot_Ramp_Peak_Timing_Override_Flag"], 1)
+        self.assertEqual(selected["Hot_Ramp_Peak_Timing_Block_Source"], "")
+        self.assertGreaterEqual(selected["Hot_Ramp_Peak_Timing_Confidence_MWH"], 1.0)
+        self.assertEqual(out["Hot_Ramp_Peak_Correction_MWH"].idxmax(), out.loc[out["Hour"].eq(17)].index[0])
+        self.assertEqual(out["Final_Forecast_MWH"].idxmax(), out.loc[out["Hour"].eq(17)].index[0])
+
+    def test_hot_ramp_peak_capture_timing_selector_blocks_strong_hot_ramp_timing(self):
+        shape = {16: 300.0, 17: 312.0, 18: 316.0, 19: 311.0, 20: 304.0}
+        future = pd.DataFrame(
+            [
+                {
+                    "DT": pd.Timestamp("2026-07-22") + pd.Timedelta(hours=hour),
+                    "Hour": hour,
+                    "Month": 7,
+                    "Forecast_Day": 2,
+                    "Final_Forecast_MWH": base,
+                    "Raw_Forecast_MWH": {16: 303.0, 17: 330.0, 18: 322.0, 19: 314.0, 20: 304.0}[hour],
+                    "XGB_Pred_MWH": {16: 302.0, 17: 331.0, 18: 321.0, 19: 314.0, 20: 304.0}[hour],
+                    "Temperature": 103.0,
+                    "Temperature_DailyMax": 103.0,
+                    "DailyMaxTemp_Ramp_1Day": 3.5,
+                    "CloudCover_Norm": 0.05,
+                    "MWH_SameHour7DayMean": base - 1.0,
+                    "MWH_Lag24": base - 2.0,
+                }
+                for hour, base in shape.items()
+            ]
+        )
+        config = {
+            "calibration": {
+                "hot_ramp_peak_capture": {
+                    "enabled": True,
+                    "shadow_mode": False,
+                    "min_maxtemp_f": 100.0,
+                    "min_dailymax_ramp_1day_f": 2.0,
+                    "strong_ramp_min_dailymax_ramp_1day_f": 3.0,
+                    "hours": [16, 17, 18, 19, 20],
+                    "max_cloud_cover_norm": 0.40,
+                    "spread_hours": 1.0,
+                    "cap_mwh": 9.0,
+                    "strong_cap_mwh": 10.0,
+                    "peak_timing_selector": {
+                        "enabled": True,
+                        "required_source": "xgb_component",
+                        "timing_sources": [
+                            {"source": "xgb_component", "column": "XGB_Pred_MWH"},
+                            {"source": "raw_xgb_lgb", "column": "Raw_Forecast_MWH"},
+                        ],
+                        "source_priority": ["xgb_component", "raw_xgb_lgb"],
+                        "consensus_required": 2,
+                        "max_consensus_hour_spread": 1.0,
+                        "min_peak_margin_mwh": 1.0,
+                        "allowed_hours": [16, 17, 18, 19, 20],
+                        "block_on_strong_hot_ramp": True,
+                        "strong_hot_ramp_min_maxtemp_f": 100.0,
+                        "strong_hot_ramp_min_dailymax_ramp_1day_f": 3.0,
+                    },
+                }
+            }
+        }
+        artifact = {
+            "lookups": {},
+            "metadata": {
+                "global_peak_residual_mwh": 6.0,
+                "global_samehour7_residual_mwh": 6.0,
+                "global_lag24_residual_mwh": 6.0,
+                "global_lag24_ramp_slope_mwh_per_f": 0.0,
+            },
+        }
+
+        out = apply_hot_ramp_peak_capture(future, artifact, config, forecast_col="Final_Forecast_MWH")
+
+        peak = out.loc[out["Hour"].eq(18)].iloc[0]
+        self.assertEqual(peak["Hot_Ramp_Peak_Base_PeakHour"], 18.0)
+        self.assertEqual(peak["Hot_Ramp_Peak_Predicted_PeakHour"], 18.0)
+        self.assertEqual(peak["Hot_Ramp_Peak_Timing_Selected_PeakHour"], 18.0)
+        self.assertEqual(peak["Hot_Ramp_Peak_Timing_Source"], "base_strong_hot_ramp_fallback")
+        self.assertEqual(peak["Hot_Ramp_Peak_Timing_Override_Flag"], 0)
+        self.assertEqual(peak["Hot_Ramp_Peak_Timing_Block_Source"], "strong_hot_ramp_timing_blocked")
+        self.assertEqual(out["Hot_Ramp_Peak_Correction_MWH"].idxmax(), out.loc[out["Hour"].eq(18)].index[0])
+
+    def test_hot_ramp_peak_capture_targeted_slice_can_run_without_artifact(self):
+        config = {
+            "calibration": {
+                "hot_ramp_peak_capture": {
+                    "enabled": True,
+                    "shadow_mode": False,
+                    "min_maxtemp_f": 100.0,
+                    "min_dailymax_ramp_1day_f": 2.0,
+                    "max_forecast_day": 7,
+                    "hours": [16, 17, 18, 19, 20],
+                    "targeted_missing_slices": [
+                        {
+                            "source": "unit_targeted_no_artifact_july_long_98_100_clear",
+                            "months": [7],
+                            "min_forecast_day": 8,
+                            "max_forecast_day": 16,
+                            "hours": [16, 17, 18, 19, 20],
+                            "min_maxtemp_f": 98.0,
+                            "max_maxtemp_f_exclusive": 100.0,
+                            "max_cloud_cover_norm": 0.10,
+                            "min_raw_minus_samehour7_mwh": 10.0,
+                            "max_raw_minus_samehour7_mwh_exclusive": 25.0,
+                            "correction_mwh": 6.0,
+                        }
+                    ],
+                }
+            }
+        }
+        future = pd.DataFrame(
+            [
+                {
+                    "DT": pd.Timestamp("2026-07-20 17:00"),
+                    "Hour": 17,
+                    "Month": 7,
+                    "Forecast_Day": 10,
+                    "Final_Forecast_MWH": 300.0,
+                    "Stage_Selected_Forecast_MWH": 300.0,
+                    "Raw_Forecast_MWH": 315.0,
+                    "MWH_SameHour7DayMean": 300.0,
+                    "Temperature": 96.0,
+                    "Temperature_DailyMax": 99.0,
+                    "DailyMaxTemp_Ramp_1Day": 1.0,
+                    "CloudCover_Norm": 0.05,
+                },
+                {
+                    "DT": pd.Timestamp("2026-07-20 18:00"),
+                    "Hour": 18,
+                    "Month": 7,
+                    "Forecast_Day": 10,
+                    "Final_Forecast_MWH": 305.0,
+                    "Stage_Selected_Forecast_MWH": 305.0,
+                    "Raw_Forecast_MWH": 335.0,
+                    "MWH_SameHour7DayMean": 300.0,
+                    "Temperature": 96.0,
+                    "Temperature_DailyMax": 99.0,
+                    "DailyMaxTemp_Ramp_1Day": 1.0,
+                    "CloudCover_Norm": 0.05,
+                },
+            ]
+        )
+
+        out = apply_hot_ramp_peak_capture(
+            future,
+            None,
+            config,
+            forecast_col="Final_Forecast_MWH",
+            also_update_cols=("Stage_Selected_Forecast_MWH",),
+        )
+
+        matched = out.iloc[0]
+        adjacent = out.iloc[1]
+        self.assertEqual(
+            matched["Hot_Ramp_Peak_Source"],
+            "unit_targeted_no_artifact_july_long_98_100_clear",
+        )
+        self.assertEqual(matched["Hot_Ramp_Peak_Correction_Applied_Flag"], 1)
+        self.assertAlmostEqual(matched["Hot_Ramp_Peak_Correction_MWH"], 6.0)
+        self.assertAlmostEqual(matched["Final_Forecast_MWH"], 306.0)
+        self.assertAlmostEqual(matched["Stage_Selected_Forecast_MWH"], 306.0)
+        self.assertEqual(matched["Hot_Ramp_Peak_Scope_Flag"], 1)
+        self.assertEqual(adjacent["Hot_Ramp_Peak_Source"], "insufficient_history")
+        self.assertEqual(adjacent["Hot_Ramp_Peak_Correction_Applied_Flag"], 0)
+        self.assertAlmostEqual(adjacent["Final_Forecast_MWH"], 305.0)
+
+    def test_hot_ramp_peak_capture_targeted_slice_respects_high_guards(self):
+        config = {
+            "calibration": {
+                "hot_ramp_peak_capture": {
+                    "enabled": True,
+                    "shadow_mode": False,
+                    "base_forecast_threshold_mwh": 300.0,
+                    "max_correction_mwh_if_base_high": 2.0,
+                    "warmer_delta_threshold_mwh": 10.0,
+                    "max_correction_mwh_if_warmer_delta_high": 1.0,
+                    "targeted_missing_slices": [
+                        {
+                            "source": "unit_targeted_guarded_slice",
+                            "months": [7],
+                            "min_forecast_day": 8,
+                            "max_forecast_day": 16,
+                            "hours": [16, 17, 18, 19, 20],
+                            "min_maxtemp_f": 98.0,
+                            "max_maxtemp_f_exclusive": 100.0,
+                            "max_cloud_cover_norm": 0.10,
+                            "min_raw_minus_samehour7_mwh": 10.0,
+                            "max_raw_minus_samehour7_mwh_exclusive": 25.0,
+                            "correction_mwh": 6.0,
+                        }
+                    ],
+                }
+            }
+        }
+        future = pd.DataFrame(
+            [
+                {
+                    "DT": pd.Timestamp("2026-07-20 17:00"),
+                    "Hour": 17,
+                    "Month": 7,
+                    "Forecast_Day": 10,
+                    "Final_Forecast_MWH": 305.0,
+                    "Raw_Forecast_MWH": 320.0,
+                    "MWH_SameHour7DayMean": 305.0,
+                    "WeatherScenario_warmer_P50_MWH": 320.0,
+                    "Temperature": 96.0,
+                    "Temperature_DailyMax": 99.0,
+                    "CloudCover_Norm": 0.05,
+                }
+            ]
+        )
+
+        out = apply_hot_ramp_peak_capture(future, None, config, forecast_col="Final_Forecast_MWH")
+
+        row = out.iloc[0]
+        self.assertEqual(row["Hot_Ramp_Peak_Source"], "unit_targeted_guarded_slice")
+        self.assertEqual(row["Hot_Ramp_Peak_Correction_Applied_Flag"], 1)
+        self.assertAlmostEqual(row["Hot_Ramp_Peak_Correction_MWH"], 1.0)
+        self.assertAlmostEqual(row["Final_Forecast_MWH"], 306.0)
+        self.assertAlmostEqual(row["Hot_Ramp_Peak_Predicted_Target_MWH"], 306.0)
+        self.assertAlmostEqual(row["Hot_Ramp_Peak_Learned_Residual_MWH"], 1.0)
+        self.assertEqual(row["Hot_Ramp_Peak_Base_High_Guard_Applied"], 1)
+        self.assertEqual(row["Hot_Ramp_Peak_Warmer_Delta_High_Guard_Applied"], 1)
+
+    def test_hot_ramp_peak_capture_targets_configured_missing_slice_only(self):
+        config = {
+            "calibration": {
+                "hot_ramp_peak_capture": {
+                    "enabled": True,
+                    "shadow_mode": False,
+                    "min_maxtemp_f": 100.0,
+                    "min_dailymax_ramp_1day_f": 2.0,
+                    "max_forecast_day": 7,
+                    "hours": [16, 17, 18, 19, 20],
+                    "targeted_missing_slices": [
+                        {
+                            "source": "unit_targeted_july_long_98_100_clear",
+                            "months": [7],
+                            "min_forecast_day": 8,
+                            "max_forecast_day": 16,
+                            "hours": [16, 17, 18, 19, 20],
+                            "min_maxtemp_f": 98.0,
+                            "max_maxtemp_f_exclusive": 100.0,
+                            "max_cloud_cover_norm": 0.10,
+                            "min_raw_minus_samehour7_mwh": 10.0,
+                            "max_raw_minus_samehour7_mwh_exclusive": 25.0,
+                            "correction_mwh": 6.0,
+                        }
+                    ],
+                }
+            }
+        }
+        artifact = {
+            "lookups": {},
+            "metadata": {
+                "global_peak_residual_mwh": 0.0,
+                "global_samehour7_residual_mwh": 0.0,
+                "global_lag24_residual_mwh": 0.0,
+                "global_lag24_ramp_slope_mwh_per_f": 0.0,
+            },
+        }
+        future = pd.DataFrame(
+            [
+                {
+                    "DT": pd.Timestamp("2026-07-20 17:00"),
+                    "Hour": 17,
+                    "Month": 7,
+                    "Forecast_Day": 10,
+                    "Final_Forecast_MWH": 300.0,
+                    "Stage_Selected_Forecast_MWH": 300.0,
+                    "Raw_Forecast_MWH": 315.0,
+                    "MWH_SameHour7DayMean": 300.0,
+                    "Temperature": 96.0,
+                    "Temperature_DailyMax": 99.0,
+                    "DailyMaxTemp_Ramp_1Day": 1.0,
+                    "CloudCover_Norm": 0.05,
+                },
+                {
+                    "DT": pd.Timestamp("2026-07-20 18:00"),
+                    "Hour": 18,
+                    "Month": 7,
+                    "Forecast_Day": 10,
+                    "Final_Forecast_MWH": 305.0,
+                    "Stage_Selected_Forecast_MWH": 305.0,
+                    "Raw_Forecast_MWH": 335.0,
+                    "MWH_SameHour7DayMean": 300.0,
+                    "Temperature": 96.0,
+                    "Temperature_DailyMax": 99.0,
+                    "DailyMaxTemp_Ramp_1Day": 1.0,
+                    "CloudCover_Norm": 0.05,
+                },
+            ]
+        )
+
+        out = apply_hot_ramp_peak_capture(
+            future,
+            artifact,
+            config,
+            forecast_col="Final_Forecast_MWH",
+            also_update_cols=("Stage_Selected_Forecast_MWH",),
+        )
+
+        matched = out.iloc[0]
+        adjacent = out.iloc[1]
+        self.assertEqual(matched["Hot_Ramp_Peak_Source"], "unit_targeted_july_long_98_100_clear")
+        self.assertEqual(matched["Hot_Ramp_Peak_Correction_Applied_Flag"], 1)
+        self.assertAlmostEqual(matched["Hot_Ramp_Peak_Correction_MWH"], 6.0)
+        self.assertAlmostEqual(matched["Final_Forecast_MWH"], 306.0)
+        self.assertEqual(matched["Hot_Ramp_Peak_Scope_Flag"], 1)
+        self.assertEqual(adjacent["Hot_Ramp_Peak_Source"], "out_of_scope")
+        self.assertEqual(adjacent["Hot_Ramp_Peak_Correction_Applied_Flag"], 0)
+        self.assertAlmostEqual(adjacent["Final_Forecast_MWH"], 305.0)
+
+        no_lead = apply_hot_ramp_peak_capture(
+            future.drop(columns=["Forecast_Day"]),
+            artifact,
+            config,
+            forecast_col="Final_Forecast_MWH",
+            also_update_cols=("Stage_Selected_Forecast_MWH",),
+        )
+        self.assertEqual(no_lead["Hot_Ramp_Peak_Correction_Applied_Flag"].sum(), 0)
+        self.assertEqual(no_lead["Hot_Ramp_Peak_Source"].iloc[0], "out_of_scope")
+
+    def test_hot_ramp_peak_candidate_scorecard_uses_stratified_event_slice(self):
+        rows = []
+        for hour, actual, final, shadow in [
+            (18, 110.0, 100.0, 108.0),
+            (19, 106.0, 100.0, 105.0),
+            (15, 100.0, 99.0, 130.0),
+        ]:
+            rows.append(
+                {
+                    "DT": pd.Timestamp("2026-07-10") + pd.Timedelta(hours=hour),
+                    "Replay_Horizon_Bucket": "Day1",
+                    "Hour": hour,
+                    "Month": 7,
+                    "Actual_MWH": actual,
+                    "Raw_Forecast_MWH": final - 1.0,
+                    "Final_Backtest_Forecast_MWH": final,
+                    "Hot_Ramp_Peak_Shadow_Forecast_MWH": shadow,
+                    "Temperature_DailyMax": 104.0,
+                    "DailyMaxTemp_Ramp_1Day": 3.0,
+                    "CloudCover_Norm": 0.05,
+                    "DailyMaxTempBucket": "100-105",
+                    "CloudCoverBucket": "Clear/Low",
+                }
+            )
+
+        scorecard = build_hot_ramp_peak_candidate_scorecard(
+            pd.DataFrame(rows),
+            group_cols=["Replay_Horizon_Bucket", "Month", "DailyMaxTempBucket", "CloudCoverBucket"],
+            min_count=2,
+        )
+
+        hot_ramp = scorecard[scorecard["Stage"].eq("hot_ramp_peak_shadow")].iloc[0]
+        self.assertEqual(hot_ramp["Target_Slice"], "hot_ramp_peak_100f_ramp2_he16to20")
+        self.assertEqual(hot_ramp["N"], 2)
+        self.assertAlmostEqual(hot_ramp["Candidate_MAE_MWH"], 1.5)
+        self.assertAlmostEqual(hot_ramp["Final_MAE_MWH"], 8.0)
+        self.assertTrue(bool(hot_ramp["Promote_Slice_Candidate"]))
+
+    def test_heat_persistence_peak_capture_shadow_targets_low_ramp_consecutive_heat_peak(self):
+        rows = []
+        shape = {16: 332.0, 17: 340.0, 18: 335.0, 19: 325.0, 20: 305.0}
+        for day in range(5):
+            date = pd.Timestamp("2026-08-01") + pd.Timedelta(days=day)
+            consecutive = min(day + 1, 5)
+            for hour, base in shape.items():
+                rows.append(
+                    {
+                        "DT": date + pd.Timedelta(hours=hour),
+                        "Hour": hour,
+                        "Month": 8,
+                        "Forecast_Day": 1,
+                        "Actual_MWH": base + (13.0 if hour == 17 else 6.0),
+                        "Final_Backtest_Forecast_MWH": base,
+                        "Final_Forecast_MWH": base,
+                        "Raw_Forecast_MWH": base - 1.0,
+                        "Temperature": 104.0,
+                        "Temperature_DailyMax": 104.0,
+                        "DailyMaxTemp_Ramp_1Day": 1.4,
+                        "DailyMaxTemp_3DayMean": 102.5,
+                        "ConsecutiveExtremeHotDays100": consecutive,
+                        "CloudCover_Norm": 0.0,
+                        "MWH_SameHour7DayMean": base - 5.0,
+                        "MWH_Lag24": base - 4.0,
+                    }
+                )
+        config = {
+            "calibration": {
+                "heat_persistence_peak_capture": {
+                    "enabled": True,
+                    "shadow_mode": True,
+                    "min_training_days": 2,
+                    "min_lookup_days": 1,
+                    "train_enforce_forecast_day": False,
+                    "min_maxtemp_f": 100.0,
+                    "min_consecutive_extreme_days100": 3.0,
+                    "min_dailymax_3day_mean_f": 100.0,
+                    "max_dailymax_ramp_1day_f": 2.0,
+                    "strong_min_consecutive_extreme_days100": 3.0,
+                    "hours": [16, 17, 18, 19, 20],
+                    "max_cloud_cover_norm": 0.40,
+                    "spread_hours": 1.0,
+                    "strong_persistence_floor_mwh": 9.0,
+                    "cap_mwh": 9.0,
+                    "strong_cap_mwh": 9.0,
+                    "floor_applies_without_positive_anchor": True,
+                }
+            }
+        }
+        artifact = build_heat_persistence_peak_capture_artifact(
+            pd.DataFrame(rows),
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+        )
+        future = []
+        for hour, base in shape.items():
+            future.append(
+                {
+                    "DT": pd.Timestamp("2026-08-10") + pd.Timedelta(hours=hour),
+                    "Hour": hour,
+                    "Month": 8,
+                    "Forecast_Day": 1,
+                    "Final_Forecast_MWH": base,
+                    "Stage_Selected_Forecast_MWH": base,
+                    "Temperature": 104.0,
+                    "Temperature_DailyMax": 104.0,
+                    "DailyMaxTemp_Ramp_1Day": 1.4,
+                    "DailyMaxTemp_3DayMean": 103.0,
+                    "ConsecutiveExtremeHotDays100": 3.0,
+                    "CloudCover_Norm": 0.0,
+                    "MWH_SameHour7DayMean": base - 2.0,
+                    "MWH_Lag24": base - 1.0,
+                }
+            )
+
+        out = apply_heat_persistence_peak_capture(
+            pd.DataFrame(future),
+            artifact,
+            config,
+            forecast_col="Final_Forecast_MWH",
+            also_update_cols=("Stage_Selected_Forecast_MWH",),
+            evaluation_mode="unit_test_shadow",
+        )
+
+        peak = out.loc[out["Hour"].eq(17)].iloc[0]
+        self.assertIsNotNone(artifact)
+        self.assertEqual(peak["Heat_Persistence_Peak_Source"], "heat_persistence_peak_shadow")
+        self.assertEqual(peak["Heat_Persistence_Peak_Shadow_Mode"], 1)
+        self.assertEqual(peak["Heat_Persistence_Peak_Scope_Flag"], 1)
+        self.assertEqual(peak["Heat_Persistence_Peak_Strong_Flag"], 1)
+        self.assertAlmostEqual(peak["Heat_Persistence_Peak_Correction_MWH"], 9.0)
+        self.assertEqual(peak["Final_Forecast_MWH"], 340.0)
+        self.assertAlmostEqual(peak["Heat_Persistence_Peak_Shadow_Forecast_MWH"], 349.0)
+        self.assertEqual(out["Heat_Persistence_Peak_Correction_MWH"].idxmax(), out.loc[out["Hour"].eq(17)].index[0])
+
+    def test_heat_persistence_peak_capture_anchorless_shadow_fallback_uses_floor(self):
+        shape = {16: 332.0, 17: 340.0, 18: 335.0, 19: 325.0, 20: 305.0}
+        future = pd.DataFrame(
+            [
+                {
+                    "DT": pd.Timestamp("2026-08-03") + pd.Timedelta(hours=hour),
+                    "Hour": hour,
+                    "Month": 8,
+                    "Forecast_Day": 6,
+                    "Final_Forecast_MWH": base,
+                    "Temperature": 104.0,
+                    "Temperature_DailyMax": 104.0,
+                    "DailyMaxTemp_Ramp_1Day": 1.0,
+                    "DailyMaxTemp_3DayMean": 103.0,
+                    "ConsecutiveExtremeHotDays100": 3.0,
+                    "CloudCover_Norm": 0.0,
+                }
+                for hour, base in shape.items()
+            ]
+        )
+        config = {
+            "calibration": {
+                "heat_persistence_peak_capture": {
+                    "enabled": True,
+                    "shadow_mode": True,
+                    "allow_anchorless_shadow_fallback": True,
+                    "min_maxtemp_f": 100.0,
+                    "min_consecutive_extreme_days100": 3.0,
+                    "min_dailymax_3day_mean_f": 100.0,
+                    "max_dailymax_ramp_1day_f": 2.0,
+                    "strong_min_consecutive_extreme_days100": 3.0,
+                    "hours": [16, 17, 18, 19, 20],
+                    "max_cloud_cover_norm": 0.40,
+                    "spread_hours": 1.0,
+                    "strong_persistence_floor_mwh": 9.0,
+                    "cap_mwh": 9.0,
+                    "strong_cap_mwh": 9.0,
+                    "floor_applies_without_positive_anchor": True,
+                }
+            }
+        }
+
+        out = apply_heat_persistence_peak_capture(
+            pd.DataFrame(future),
+            None,
+            config,
+            forecast_col="Final_Forecast_MWH",
+        )
+
+        peak = out.loc[out["Hour"].eq(17)].iloc[0]
+        self.assertEqual(peak["Heat_Persistence_Peak_Source"], "heat_persistence_peak_shadow")
+        self.assertEqual(peak["Heat_Persistence_Peak_Scope_Flag"], 1)
+        self.assertEqual(peak["Heat_Persistence_Peak_Strong_Flag"], 1)
+        self.assertAlmostEqual(peak["Heat_Persistence_Peak_Correction_MWH"], 9.0)
+        self.assertEqual(peak["Final_Forecast_MWH"], 340.0)
+        self.assertAlmostEqual(peak["Heat_Persistence_Peak_Shadow_Forecast_MWH"], 349.0)
+
+    def test_heat_persistence_peak_candidate_scorecard_uses_consecutive_heat_stratum(self):
+        rows = []
+        for hour, actual, final, shadow, consecutive in [
+            (17, 113.0, 100.0, 109.0, 3.0),
+            (18, 110.0, 101.0, 109.0, 3.0),
+            (19, 100.0, 98.0, 130.0, 2.0),
+        ]:
+            rows.append(
+                {
+                    "DT": pd.Timestamp("2026-08-03") + pd.Timedelta(hours=hour),
+                    "Replay_Horizon_Bucket": "Day1",
+                    "Hour": hour,
+                    "Month": 8,
+                    "Actual_MWH": actual,
+                    "Raw_Forecast_MWH": final - 1.0,
+                    "Final_Backtest_Forecast_MWH": final,
+                    "Heat_Persistence_Peak_Shadow_Forecast_MWH": shadow,
+                    "Temperature_DailyMax": 104.0,
+                    "ConsecutiveExtremeHotDays100": consecutive,
+                    "CloudCover_Norm": 0.0,
+                    "DailyMaxTempBucket": "100-105",
+                    "CloudCoverBucket": "Clear/Low",
+                }
+            )
+
+        scorecard = build_heat_persistence_peak_candidate_scorecard(
+            pd.DataFrame(rows),
+            group_cols=["Replay_Horizon_Bucket", "Month", "DailyMaxTempBucket", "CloudCoverBucket"],
+            min_count=2,
+        )
+
+        persistence = scorecard[scorecard["Stage"].eq("heat_persistence_peak_shadow")].iloc[0]
+        self.assertEqual(persistence["Target_Slice"], "heat_persistence_peak_100f_consec3_he16to20")
+        self.assertEqual(persistence["N"], 2)
+        self.assertAlmostEqual(persistence["Candidate_MAE_MWH"], 2.5)
+        self.assertAlmostEqual(persistence["Final_MAE_MWH"], 11.0)
+        self.assertTrue(bool(persistence["Promote_Slice_Candidate"]))
+
     def test_operational_residual_learner_shadow_keeps_final_forecast(self):
         dt = pd.date_range("2026-07-01", periods=72, freq="h")
         train = pd.DataFrame(
@@ -408,6 +1655,323 @@ class ForecastControlTests(unittest.TestCase):
         self.assertEqual(out.loc[4, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked")
         self.assertEqual(out.loc[5, "Auto_Residual_Correction_MWH"], 0.0)
         self.assertEqual(out.loc[5, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked")
+
+    def test_operational_residual_learner_hot_peak_gate_uses_live_ramp_evidence(self):
+        dt = pd.date_range("2026-07-01", periods=96, freq="h")
+        train = pd.DataFrame(
+            {
+                "DT": dt,
+                "Hour": dt.hour,
+                "Month": dt.month,
+                "Actual_MWH": 108.0,
+                "Final_Backtest_Forecast_MWH": 100.0,
+                "Final_Residual_MWH": 8.0,
+                "Raw_Forecast_MWH": 98.0,
+                "MWH_SameHour7DayMean": 70.0,
+                "MWH_Lag24": 95.0,
+                "XGB_Pred_MWH": 99.0,
+                "LGB_Pred_MWH": 100.0,
+                "CatBoost_Pred_MWH": 97.0,
+                "Prophet_Pred_MWH": 110.0,
+                "Temperature_DailyMax": 101.0,
+                "Temperature": 98.0,
+                "CloudCover_Norm": 0.0,
+            }
+        )
+        config = {
+            "operational_residual_learner": {
+                "enabled": True,
+                "shadow_mode": True,
+                "min_rows": 24,
+                "min_samples_leaf": 2,
+                "max_iter": 20,
+                "blend": 0.5,
+                "cap_mwh": 6.0,
+                "total_cap_mwh": 6.0,
+                "hot_peak": {
+                    "enabled": True,
+                    "min_rows": 2,
+                    "min_samples_leaf": 2,
+                    "hours": [17],
+                    "min_maxtemp_f": 90.0,
+                    "blend": 0.5,
+                    "cap_mwh": 6.0,
+                    "positive_gate": {
+                        "enabled": True,
+                        "min_raw_minus_samehour_7day_mean_mwh": 20.0,
+                        "max_raw_minus_samehour_7day_mean_mwh": 35.0,
+                        "min_raw_minus_samehour_yesterday_mwh": 20.0,
+                        "max_final_minus_raw_forecast_mwh": 14.0,
+                        "max_cloud_cover_norm": 0.20,
+                        "allow_negative_correction": False,
+                        "live_ramp_gate": {
+                            "enabled": True,
+                            "source": "global+hot_peak_live_ramp_gate",
+                            "min_forecast_day": 1,
+                            "max_forecast_day": 1,
+                            "hours": [17],
+                            "min_lag1_mwh": 110.0,
+                            "min_lag1_minus_base_forecast_mwh": 10.0,
+                            "min_lag1_minus_samehour_yesterday_mwh": 20.0,
+                            "min_lag1_minus_samehour_7day_mean_mwh": 35.0,
+                            "min_live_ramp_1hr_mwh": 5.0,
+                            "max_cloud_cover_norm": 0.20,
+                        },
+                    },
+                },
+            }
+        }
+        artifact = build_operational_residual_learner(
+            train,
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+        )
+        future = pd.DataFrame(
+            {
+                "DT": pd.date_range("2026-07-05 17:00", periods=2, freq="24h"),
+                "Hour": [17, 17],
+                "Month": [7, 7],
+                "Forecast_Day": [1, 1],
+                "Final_Forecast_MWH": [100.0, 100.0],
+                "Raw_Forecast_MWH": [98.0, 98.0],
+                "MWH_Lag1": [116.0, 116.0],
+                "MWH_Lag2": [108.0, 115.0],
+                "MWH_SameHour7DayMean": [70.0, 70.0],
+                "MWH_Lag24": [95.0, 95.0],
+                "Temperature_DailyMax": [101.0, 101.0],
+                "Temperature": [98.0, 98.0],
+                "CloudCover_Norm": [0.0, 0.0],
+            }
+        )
+
+        out = apply_operational_residual_learner(
+            future,
+            artifact,
+            config,
+            forecast_col="Final_Forecast_MWH",
+        )
+
+        self.assertGreater(out.loc[0, "Auto_Residual_Correction_MWH"], 0.0)
+        self.assertEqual(out.loc[0, "Auto_Residual_Source"], "global+hot_peak_live_ramp_gate")
+        self.assertEqual(out.loc[1, "Auto_Residual_Correction_MWH"], 0.0)
+        self.assertEqual(out.loc[1, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked")
+
+    def test_operational_residual_learner_structural_hot_peak_shadow_skips_raw_yesterday_gate(self):
+        dt = pd.date_range("2026-07-01", periods=96, freq="h")
+        train = pd.DataFrame(
+            {
+                "DT": dt,
+                "Hour": dt.hour,
+                "Month": dt.month,
+                "Actual_MWH": 110.0,
+                "Final_Backtest_Forecast_MWH": 100.0,
+                "Final_Residual_MWH": 10.0,
+                "Raw_Forecast_MWH": 99.0,
+                "MWH_SameHour7DayMean": 96.0,
+                "MWH_Lag24": 102.0,
+                "XGB_Pred_MWH": 99.0,
+                "LGB_Pred_MWH": 100.0,
+                "CatBoost_Pred_MWH": 98.0,
+                "Prophet_Pred_MWH": 108.0,
+                "Temperature_DailyMax": 96.0,
+                "Temperature": 93.0,
+                "CloudCover_Norm": 0.0,
+                "DailyMaxTemp_Ramp_1Day": 4.0,
+                "OvernightHeatStress": 8.0,
+                "HeatPersistenceStress90": 12.0,
+            }
+        )
+        config = {
+            "operational_residual_learner": {
+                "enabled": True,
+                "shadow_mode": False,
+                "production_scope": "hot_peak_only",
+                "min_rows": 24,
+                "min_samples_leaf": 2,
+                "max_iter": 20,
+                "blend": 0.5,
+                "cap_mwh": 6.0,
+                "total_cap_mwh": 6.0,
+                "hot_peak": {
+                    "enabled": True,
+                    "min_rows": 2,
+                    "min_samples_leaf": 2,
+                    "hours": [17],
+                    "min_maxtemp_f": 90.0,
+                    "blend": 0.5,
+                    "cap_mwh": 6.0,
+                    "structural_shadow": {
+                        "enabled": True,
+                        "source": "global+hot_peak_structural_residual",
+                        "min_rows": 2,
+                        "min_samples_leaf": 2,
+                        "hours": [17],
+                        "min_maxtemp_f": 90.0,
+                        "min_forecast_day": 1,
+                        "max_forecast_day": 16,
+                        "blend": 0.5,
+                        "cap_mwh": 5.0,
+                        "total_cap_mwh": 5.0,
+                        "min_positive_correction_mwh": 1.0,
+                        "allow_negative_correction": False,
+                    },
+                    "positive_gate": {
+                        "enabled": True,
+                        "min_raw_minus_samehour_7day_mean_mwh": 20.0,
+                        "min_raw_minus_samehour_yesterday_mwh": 20.0,
+                        "allow_negative_correction": False,
+                    },
+                },
+            }
+        }
+        artifact = build_operational_residual_learner(
+            train,
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+        )
+        future = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2026-07-10 17:00")],
+                "Hour": [17],
+                "Month": [7],
+                "Forecast_Day": [8],
+                "Final_Forecast_MWH": [100.0],
+                "Raw_Forecast_MWH": [99.0],
+                "MWH_SameHour7DayMean": [96.0],
+                "MWH_Lag24": [102.0],
+                "Temperature_DailyMax": [96.0],
+                "Temperature": [93.0],
+                "CloudCover_Norm": [0.0],
+                "DailyMaxTemp_Ramp_1Day": [4.0],
+                "OvernightHeatStress": [8.0],
+                "HeatPersistenceStress90": [12.0],
+            }
+        )
+
+        out = apply_operational_residual_learner(
+            future,
+            artifact,
+            config,
+            forecast_col="Final_Forecast_MWH",
+        )
+
+        self.assertEqual(out.loc[0, "Auto_Residual_Correction_MWH"], 0.0)
+        self.assertEqual(out.loc[0, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked")
+        self.assertGreater(out.loc[0, "Auto_Residual_Structural_HotPeak_Correction_MWH"], 0.0)
+        self.assertLessEqual(out.loc[0, "Auto_Residual_Structural_HotPeak_Correction_MWH"], 5.0)
+        self.assertEqual(
+            out.loc[0, "Auto_Residual_Structural_HotPeak_Source"],
+            "global+hot_peak_structural_residual",
+        )
+        self.assertEqual(out.loc[0, "Final_Forecast_MWH"], 100.0)
+
+    def test_operational_residual_learner_broad_hot_peak_shadow_uses_looser_gate_only_in_shadow(self):
+        dt = pd.date_range("2026-07-01", periods=96, freq="h")
+        train = pd.DataFrame(
+            {
+                "DT": dt,
+                "Hour": dt.hour,
+                "Month": dt.month,
+                "Actual_MWH": 110.0,
+                "Final_Backtest_Forecast_MWH": 100.0,
+                "Final_Residual_MWH": 10.0,
+                "Raw_Forecast_MWH": 99.0,
+                "MWH_SameHour7DayMean": 96.0,
+                "MWH_Lag24": 102.0,
+                "XGB_Pred_MWH": 99.0,
+                "LGB_Pred_MWH": 100.0,
+                "CatBoost_Pred_MWH": 98.0,
+                "Prophet_Pred_MWH": 108.0,
+                "Temperature_DailyMax": 96.0,
+                "Temperature": 93.0,
+                "CloudCover_Norm": 0.0,
+            }
+        )
+        config = {
+            "operational_residual_learner": {
+                "enabled": True,
+                "shadow_mode": False,
+                "production_scope": "hot_peak_only",
+                "min_rows": 24,
+                "min_samples_leaf": 2,
+                "max_iter": 20,
+                "blend": 0.5,
+                "cap_mwh": 6.0,
+                "total_cap_mwh": 6.0,
+                "hot_peak": {
+                    "enabled": True,
+                    "min_rows": 2,
+                    "min_samples_leaf": 2,
+                    "hours": [17],
+                    "min_maxtemp_f": 90.0,
+                    "blend": 0.5,
+                    "cap_mwh": 6.0,
+                    "broad_shadow": {
+                        "enabled": True,
+                        "source": "global+hot_peak_broad_shadow",
+                        "hours": [17],
+                        "min_maxtemp_f": 90.0,
+                        "blend": 0.5,
+                        "cap_mwh": 6.0,
+                        "total_cap_mwh": 6.0,
+                        "min_abs_correction_mwh": 0.1,
+                        "allow_negative_correction": False,
+                        "positive_gate": {
+                            "enabled": True,
+                            "min_raw_minus_samehour_7day_mean_mwh": 0.0,
+                            "min_raw_minus_samehour_yesterday_mwh": -10.0,
+                            "max_final_minus_raw_forecast_mwh": 14.0,
+                            "allow_negative_correction": False,
+                            "blocked_source": "hot_peak_broad_low_forecast_gate_blocked",
+                        },
+                    },
+                    "positive_gate": {
+                        "enabled": True,
+                        "min_raw_minus_samehour_7day_mean_mwh": 20.0,
+                        "min_raw_minus_samehour_yesterday_mwh": 20.0,
+                        "allow_negative_correction": False,
+                        "blocked_source": "hot_peak_low_forecast_gate_blocked",
+                    },
+                },
+            }
+        }
+        artifact = build_operational_residual_learner(
+            train,
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+        )
+        future = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2026-07-10 17:00")],
+                "Hour": [17],
+                "Month": [7],
+                "Forecast_Day": [8],
+                "Final_Forecast_MWH": [100.0],
+                "Raw_Forecast_MWH": [99.0],
+                "MWH_SameHour7DayMean": [96.0],
+                "MWH_Lag24": [102.0],
+                "Temperature_DailyMax": [96.0],
+                "Temperature": [93.0],
+                "CloudCover_Norm": [0.0],
+            }
+        )
+
+        out = apply_operational_residual_learner(
+            future,
+            artifact,
+            config,
+            forecast_col="Final_Forecast_MWH",
+        )
+
+        self.assertEqual(out.loc[0, "Auto_Residual_Correction_MWH"], 0.0)
+        self.assertEqual(out.loc[0, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked")
+        self.assertGreater(out.loc[0, "Auto_Residual_Broad_HotPeak_Shadow_Correction_MWH"], 0.0)
+        self.assertEqual(
+            out.loc[0, "Auto_Residual_Broad_HotPeak_Shadow_Source"],
+            "global+hot_peak_broad_shadow",
+        )
+        self.assertGreater(out.loc[0, "Auto_Residual_Broad_HotPeak_Shadow_Adjusted_Forecast_MWH"], 100.0)
+        self.assertEqual(out.loc[0, "Final_Forecast_MWH"], 100.0)
 
     def test_operational_residual_learner_blocks_hot_peak_lift_when_cooling_underway(self):
         dt = pd.date_range("2026-07-01", periods=96, freq="h")
@@ -600,6 +2164,75 @@ class ForecastControlTests(unittest.TestCase):
         self.assertGreater(out.loc[1, "Final_Forecast_MWH"], 100.0)
         self.assertEqual(out.loc[1, "Stage_Selected_Forecast_MWH"], out.loc[1, "Final_Forecast_MWH"])
 
+    def test_operational_residual_learner_capped_full_scope_promotes_small_global_signal(self):
+        dt = pd.date_range("2026-07-01", periods=72, freq="h")
+        train = pd.DataFrame(
+            {
+                "DT": dt,
+                "Hour": dt.hour,
+                "Month": dt.month,
+                "Actual_MWH": 108.0,
+                "Final_Backtest_Forecast_MWH": 100.0,
+                "Final_Residual_MWH": 8.0,
+                "Raw_Forecast_MWH": 98.0,
+                "XGB_Pred_MWH": 99.0,
+                "LGB_Pred_MWH": 100.0,
+                "CatBoost_Pred_MWH": 97.0,
+                "Prophet_Pred_MWH": 110.0,
+                "Temperature_DailyMax": 82.0,
+                "Temperature": 76.0,
+                "CloudCover_Norm": 0.0,
+            }
+        )
+        config = {
+            "operational_residual_learner": {
+                "enabled": True,
+                "shadow_mode": False,
+                "production_scope": "capped_full_shadow",
+                "capped_full_shadow_cap_mwh": 1.0,
+                "min_rows": 24,
+                "min_samples_leaf": 2,
+                "max_iter": 20,
+                "blend": 1.0,
+                "cap_mwh": 6.0,
+                "total_cap_mwh": 6.0,
+                "hot_peak": {"enabled": False},
+            }
+        }
+        artifact = build_operational_residual_learner(
+            train,
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+        )
+        future = pd.DataFrame(
+            {
+                "DT": pd.to_datetime(["2026-07-05 10:00", "2026-07-05 11:00"]),
+                "Hour": [10, 11],
+                "Month": [7, 7],
+                "Final_Forecast_MWH": [100.0, 100.0],
+                "Stage_Selected_Forecast_MWH": [100.0, 100.0],
+                "Raw_Forecast_MWH": [98.0, 98.0],
+                "Temperature_DailyMax": [82.0, 82.0],
+                "Temperature": [76.0, 76.0],
+                "CloudCover_Norm": [0.0, 0.0],
+            }
+        )
+
+        out = apply_operational_residual_learner(
+            future,
+            artifact,
+            config,
+            forecast_col="Final_Forecast_MWH",
+            also_update_cols=("Stage_Selected_Forecast_MWH",),
+        )
+
+        self.assertEqual(out.loc[0, "Auto_Residual_Production_Scope"], "capped_full_shadow")
+        self.assertGreater(out.loc[0, "Auto_Residual_Full_Shadow_Correction_MWH"], 1.0)
+        self.assertAlmostEqual(out.loc[0, "Auto_Residual_Correction_MWH"], 1.0)
+        self.assertEqual(out.loc[0, "Auto_Residual_Source"], "global+capped_full_shadow_cap")
+        self.assertAlmostEqual(out.loc[0, "Final_Forecast_MWH"], 101.0)
+        self.assertEqual(out.loc[0, "Stage_Selected_Forecast_MWH"], out.loc[0, "Final_Forecast_MWH"])
+
     def test_operational_residual_learner_walk_forward_marks_insufficient_history(self):
         dt = pd.date_range("2026-07-01", periods=96, freq="h")
         df = pd.DataFrame(
@@ -640,6 +2273,36 @@ class ForecastControlTests(unittest.TestCase):
         self.assertEqual(out.loc[0, "Auto_Residual_Source"], "insufficient_walk_forward_history")
         self.assertTrue((out["Final_Backtest_Forecast_MWH"] == 100.0).all())
         self.assertTrue((out["Auto_Residual_Adjusted_Forecast_MWH"] >= 100.0).all())
+
+    def test_hot_peak_shadow_candidate_scorecard_flags_only_slices_that_beat_final(self):
+        df = pd.DataFrame(
+            {
+                "DT": pd.to_datetime(["2026-07-10 17:00", "2026-08-10 17:00"]),
+                "Actual_MWH": [110.0, 100.0],
+                "Final_Backtest_Forecast_MWH": [100.0, 100.0],
+                "Auto_Residual_Broad_HotPeak_Shadow_Adjusted_Forecast_MWH": [108.0, 110.0],
+                "Replay_Horizon_Bucket": ["Days8to16", "Days8to16"],
+                "Month": [7, 8],
+                "Hour": [17, 17],
+                "Temperature_DailyMax": [96.0, 96.0],
+                "CloudCover_Norm": [0.10, 0.10],
+            }
+        )
+
+        scorecard = build_hot_peak_shadow_candidate_scorecard(df, min_count=1)
+
+        july = scorecard[
+            scorecard["Stage"].eq("auto_residual_broad_hot_peak_shadow")
+            & scorecard["Month"].eq(7)
+        ].iloc[0]
+        august = scorecard[
+            scorecard["Stage"].eq("auto_residual_broad_hot_peak_shadow")
+            & scorecard["Month"].eq(8)
+        ].iloc[0]
+        self.assertTrue(bool(july["Promote_Slice_Candidate"]))
+        self.assertGreater(july["Candidate_MAE_Improvement_vs_Final_MWH"], 0.0)
+        self.assertFalse(bool(august["Promote_Slice_Candidate"]))
+        self.assertLess(august["Candidate_MAE_Improvement_vs_Final_MWH"], 0.0)
 
     def test_weather_robustness_hedge_derives_forecast_day_from_dt(self):
         df = pd.DataFrame(
@@ -1576,6 +3239,78 @@ class ForecastControlTests(unittest.TestCase):
             110.0 - out.loc[0, "Final_Backtest_Forecast_MWH"],
         )
 
+    def test_focused_shape_residual_learner_can_apply_additively_to_reference(self):
+        dt = pd.date_range("2026-07-01 14:00", periods=48, freq="h")
+        train = pd.DataFrame(
+            {
+                "DT": dt,
+                "Actual_MWH": 110.0,
+                "Pre_Focused_Guard_Forecast_MWH": 100.0,
+                "Final_Backtest_Forecast_MWH": 105.0,
+                "Final_Forecast_MWH": 105.0,
+                "Stage_Selected_Forecast_MWH": 105.0,
+                "Raw_Forecast_MWH": 98.0,
+                "MWH_SameHour7DayMean": 90.0,
+                "MWH_Lag24": 92.0,
+                "Temperature_DailyMax": 98.0,
+                "Temperature": 95.0,
+                "CloudCover_Norm": 0.0,
+                "IsHoliday": 0,
+                "IsWeekend": 0,
+            }
+        )
+        config = {
+            "calibration": {
+                "stage_selector": {
+                    "focused_shape_residual_learner": {
+                        "enabled": True,
+                        "shadow_mode": False,
+                        "apply_correction_to_reference_forecast": True,
+                        "min_rows": 12,
+                        "min_samples_leaf": 4,
+                        "max_iter": 20,
+                        "blend": 1.0,
+                        "cap_mwh": 12.0,
+                        "promotion_delta_guard": {
+                            "enabled": False,
+                            "reference_col": "current_final",
+                        },
+                        "min_abs_correction_mwh": 0.0,
+                        "scope": {
+                            "use_focused_guard_rule_union": False,
+                            "require_scope_for_application": True,
+                            "include_hot_peak": True,
+                            "hot_peak_min_maxtemp_f": 90.0,
+                            "hot_peak_hours": [14, 15, 16, 17, 18, 19, 20, 21],
+                            "include_cloud_solar": False,
+                            "include_delta_breeze": False,
+                            "include_long_horizon_heat": False,
+                        },
+                    },
+                }
+            }
+        }
+        artifact = build_focused_shape_residual_learner(
+            train,
+            config,
+            forecast_col="Pre_Focused_Guard_Forecast_MWH",
+        )
+        future = train.head(1).copy()
+
+        out = apply_focused_shape_residual_learner(
+            future,
+            artifact,
+            config,
+            forecast_col="Pre_Focused_Guard_Forecast_MWH",
+            also_update_cols=("Final_Backtest_Forecast_MWH", "Stage_Selected_Forecast_MWH"),
+            update_forecast_col=False,
+        )
+
+        self.assertIsNotNone(artifact)
+        self.assertEqual(out.loc[0, "Focused_Shape_Base_Forecast_MWH"], 105.0)
+        self.assertGreater(out.loc[0, "Final_Backtest_Forecast_MWH"], 112.0)
+        self.assertEqual(out.loc[0, "Final_Forecast_MWH"], out.loc[0, "Final_Backtest_Forecast_MWH"])
+
     def test_metrics_summary_flags_focused_shape_shadow_beating_final(self):
         df = pd.DataFrame(
             {
@@ -1595,6 +3330,39 @@ class ForecastControlTests(unittest.TestCase):
         self.assertAlmostEqual(summary["Focused_Shape_Shadow_MAE_Improvement_vs_Final_MWH"], 4.0)
         self.assertEqual(audit.loc[0, "Stage"], "focused_shape_shadow")
         self.assertTrue(audit.loc[0, "Beats_Final"])
+
+    def test_shadow_promotion_audit_requires_bias_and_slice_gates(self):
+        df = pd.DataFrame(
+            {
+                "DT": [
+                    pd.Timestamp("2026-07-01 17:00"),
+                    pd.Timestamp("2026-07-02 14:00"),
+                    pd.Timestamp("2026-07-08 00:00"),
+                ],
+                "Actual_MWH": [100.0, 100.0, 100.0],
+                "Final_Backtest_Forecast_MWH": [95.0, 90.0, 90.0],
+                "Focused_Shape_Adjusted_Forecast_MWH": [100.0, 100.0, 100.0],
+                "Auto_Residual_Full_Shadow_Adjusted_Forecast_MWH": [94.0, 100.0, 106.0],
+                "Raw_Forecast_MWH": [95.0, 90.0, 90.0],
+                "Forecast_Day": [1, 2, 8],
+                "Hour": [17, 14, 0],
+                "Month": [7, 7, 7],
+                "Temperature_DailyMax": [95.0, 82.0, 82.0],
+                "CloudCover_Norm": [0.10, 0.80, 0.10],
+                "BTM_Solar_Loss_From_ClearSky_MW": [0.0, 2.0, 0.0],
+            }
+        )
+
+        audit = build_shadow_stage_promotion_audit(df)
+        focused = audit.loc[audit["Stage"].eq("focused_shape_shadow")].iloc[0]
+        full_shadow = audit.loc[audit["Stage"].eq("auto_residual_full_shadow")].iloc[0]
+
+        self.assertTrue(focused["Meets_Promotion_Rule"])
+        self.assertEqual(focused["Promotion_Gate_Failures"], "none")
+        self.assertTrue(full_shadow["Beats_Final"])
+        self.assertFalse(full_shadow["Meets_Promotion_Rule"])
+        self.assertIn("HotPeak_MAE", full_shadow["Promotion_Gate_Failures"])
+        self.assertIn("Day1_NoRegression", full_shadow["Promotion_Gate_Failures"])
 
     def test_recursive_forecast_exposes_load_state_lags_for_guards(self):
         class ConstantModel:
@@ -1893,6 +3661,300 @@ class ForecastControlTests(unittest.TestCase):
         self.assertAlmostEqual(out.loc[1, "Peak_Risk_Cal_MWH"], 10.0)
         self.assertEqual(out.loc[1, "Peak_Risk_Source"], "prophet_peak_gap")
 
+    def test_peak_risk_hot_ramp_override_bypasses_cooling_guard_when_persistent(self):
+        df = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2026-08-02 17:00"), pd.Timestamp("2026-08-02 18:00")],
+                "Hour": [17, 18],
+                "Forecast_Day": [2, 2],
+                "Temperature_DailyMax": [103.6, 103.6],
+                "Calibrated_Forecast_MWH": [320.0, 322.0],
+                "Raw_Forecast_MWH": [319.0, 321.0],
+                "Raw_Minus_SameHour7DayMean_MWH": [33.0, 33.0],
+                "TempDrop_Next3Hr_F": [7.2, 12.5],
+                "Prophet_Pred_MWH": [344.0, 346.0],
+                "ConsecutiveVeryHotDays95": [2.0, 1.0],
+                "ConsecutiveExtremeHotDays100": [2.0, 1.0],
+                "DailyMaxTemp_Ramp_1Day": [1.5, 1.5],
+            }
+        )
+        config = {
+            "calibration": {
+                "hot_ramp_override": {
+                    "enabled": True,
+                    "hours": [17, 18],
+                    "min_maxtemp_f": 100.0,
+                    "max_maxtemp_f": 109.9,
+                    "min_consecutive_very_hot_days_95": 2,
+                    "min_consecutive_extreme_hot_days_100": 2,
+                    "guard_bypass_enabled": True,
+                    "peak_risk_protected_cap_mwh": 8.0,
+                    "scenario_lift_enabled": False,
+                },
+                "peak_risk": {
+                    "enabled": True,
+                    "hours": [17, 18],
+                    "min_maxtemp_f": 78.0,
+                    "prophet_gap_threshold_mwh": 6.0,
+                    "catboost_gap_threshold_mwh": 99.0,
+                    "blend": 1.0,
+                    "cap_mwh": 10.0,
+                    "positive_guard": {
+                        "enabled": True,
+                        "overforecast_risk": {
+                            "enabled": True,
+                            "hours": [17, 18],
+                            "min_maxtemp_f": 95.0,
+                            "min_raw_minus_samehour_7day_mean_mwh": 30.0,
+                            "min_forecast_drop_next3hr_f": 6.0,
+                            "max_positive_correction_mwh": 0.0,
+                            "blocked_source": "peak_risk_overforecast_guard_blocked",
+                        },
+                    },
+                },
+            }
+        }
+
+        out = apply_peak_risk_correction(df, config)
+
+        self.assertAlmostEqual(out.loc[0, "Peak_Risk_Cal_MWH"], 8.0)
+        self.assertIn("hot_ramp_guard_bypass", out.loc[0, "Peak_Risk_Source"])
+        self.assertAlmostEqual(out.loc[0, "Hot_Ramp_Override_PeakRisk_Protected_MWH"], 8.0)
+        self.assertEqual(out.loc[0, "Hot_Ramp_Override_Gate"], 1)
+        self.assertAlmostEqual(out.loc[1, "Peak_Risk_Cal_MWH"], 0.0)
+        self.assertEqual(out.loc[1, "Peak_Risk_Source"], "peak_risk_overforecast_guard_blocked")
+        self.assertEqual(out.loc[1, "Hot_Ramp_Override_Gate"], 0)
+
+    def test_hot_ramp_scenario_override_lifts_toward_hot_stress_gap_with_cap(self):
+        df = pd.DataFrame(
+            {
+                "DT": [
+                    pd.Timestamp("2026-08-08 17:00"),
+                    pd.Timestamp("2026-08-08 18:00"),
+                    pd.Timestamp("2026-08-08 16:00"),
+                    pd.Timestamp("2026-08-08 17:00"),
+                    pd.Timestamp("2026-08-09 17:00"),
+                ],
+                "Hour": [17, 18, 16, 17, 17],
+                "Forecast_Day": [6, 6, 6, 6, 7],
+                "Final_Forecast_MWH": [334.0, 333.0, 325.0, 334.0, 334.0],
+                "Stage_Selected_Forecast_MWH": [334.0, 333.0, 325.0, 334.0, 334.0],
+                "Calibrated_Forecast_MWH": [334.0, 333.0, 325.0, 334.0, 334.0],
+                "WeatherScenario_hot_stress_5f_P50_MWH": [354.0, 344.0, 345.0, 354.0, 354.0],
+                "Temperature_DailyMax": [108.4, 108.4, 108.4, 110.2, 108.4],
+                "ConsecutiveVeryHotDays95": [5.0, 5.0, 5.0, 5.0, 5.0],
+                "ConsecutiveExtremeHotDays100": [5.0, 5.0, 5.0, 5.0, 5.0],
+                "Hot_Ramp_Override_Cal_MWH": [0.0, 0.0, 0.0, 0.0, 6.5],
+                "Hot_Ramp_Override_Source": ["none", "none", "none", "none", "hot_ramp_guard_bypass"],
+            }
+        )
+        config = {
+            "calibration": {
+                "hot_ramp_override": {
+                    "enabled": True,
+                    "hours": [17, 18, 19, 20],
+                    "min_maxtemp_f": 100.0,
+                    "max_maxtemp_f": 109.9,
+                    "min_consecutive_very_hot_days_95": 2,
+                    "min_consecutive_extreme_hot_days_100": 2,
+                    "scenario_lift_enabled": True,
+                    "scenario_gap_blend": 0.40,
+                    "scenario_lift_cap_mwh": 6.0,
+                    "total_cap_mwh": 8.0,
+                }
+            }
+        }
+
+        out = apply_hot_ramp_scenario_override(
+            df,
+            config=config,
+            base_col="Final_Forecast_MWH",
+            also_update_cols=("Stage_Selected_Forecast_MWH", "Calibrated_Forecast_MWH"),
+        )
+
+        self.assertAlmostEqual(out.loc[0, "Hot_Ramp_Override_Scenario_Lift_MWH"], 6.0)
+        self.assertAlmostEqual(out.loc[0, "Final_Forecast_MWH"], 340.0)
+        self.assertAlmostEqual(out.loc[0, "Stage_Selected_Forecast_MWH"], 340.0)
+        self.assertAlmostEqual(out.loc[0, "Calibrated_Forecast_MWH"], 340.0)
+        self.assertEqual(out.loc[0, "Hot_Ramp_Override_Source"], "hot_ramp_hot_stress_scenario_lift")
+        self.assertAlmostEqual(out.loc[1, "Hot_Ramp_Override_Scenario_Lift_MWH"], 4.4)
+        self.assertEqual(out.loc[2, "Hot_Ramp_Override_Gate"], 0)
+        self.assertEqual(out.loc[3, "Hot_Ramp_Override_Gate"], 0)
+        self.assertAlmostEqual(out.loc[4, "Hot_Ramp_Override_Scenario_Lift_MWH"], 1.5)
+        self.assertAlmostEqual(out.loc[4, "Hot_Ramp_Override_Cal_MWH"], 8.0)
+        self.assertAlmostEqual(out.loc[4, "Final_Forecast_MWH"], 335.5)
+
+    def test_day1_live_ramp_override_carries_observed_delta_to_hot_peak(self):
+        history_rows = []
+        for hour, yesterday, today in [
+            (5, 129.97, 149.76),
+            (6, 126.85, 152.40),
+            (7, 132.93, 160.42),
+        ]:
+            history_rows.append({"DT": pd.Timestamp("2026-08-02") + pd.Timedelta(hours=hour), "MWH": yesterday})
+            history_rows.append({"DT": pd.Timestamp("2026-08-03") + pd.Timedelta(hours=hour), "MWH": today})
+        history = pd.DataFrame(history_rows)
+        future = pd.DataFrame(
+            {
+                "DT": [
+                    pd.Timestamp("2026-08-03 15:00"),
+                    pd.Timestamp("2026-08-03 18:00"),
+                    pd.Timestamp("2026-08-04 18:00"),
+                ],
+                "Hour": [15, 18, 18],
+                "Forecast_Day": [1, 1, 2],
+                "Final_Forecast_MWH": [327.0, 346.5, 338.0],
+                "Stage_Selected_Forecast_MWH": [327.0, 346.5, 338.0],
+                "Calibrated_Forecast_MWH": [327.0, 346.5, 338.0],
+                "Temperature_DailyMax": [105.0, 105.0, 105.0],
+                "MWH_Lag24": [300.7, 335.7, 335.7],
+            }
+        )
+        config = {
+            "calibration": {
+                "day1_live_ramp_override": {
+                    "enabled": True,
+                    "hours": [16, 17, 18, 19, 20],
+                    "min_maxtemp_f": 100.0,
+                    "min_latest_actual_hour": 6,
+                    "min_pair_hours": 3,
+                    "observation_tail_hours": 3,
+                    "observed_delta_stat": "latest",
+                    "min_observed_delta_mwh": 15.0,
+                    "carry_fraction": 0.90,
+                    "cap_mwh": 16.0,
+                }
+            }
+        }
+
+        out = apply_day1_live_ramp_override(
+            future,
+            history,
+            config=config,
+            base_col="Final_Forecast_MWH",
+            also_update_cols=("Stage_Selected_Forecast_MWH", "Calibrated_Forecast_MWH"),
+        )
+
+        observed_delta = 160.42 - 132.93
+        target = 335.7 + observed_delta * 0.90
+        expected_lift = target - 346.5
+        self.assertEqual(out.loc[0, "Day1_Live_Ramp_Gate"], 0)
+        self.assertEqual(out.loc[1, "Day1_Live_Ramp_Gate"], 1)
+        self.assertAlmostEqual(out.loc[1, "Day1_Live_Ramp_Observed_Delta_MWH"], observed_delta)
+        self.assertAlmostEqual(out.loc[1, "Day1_Live_Ramp_Target_MWH"], target)
+        self.assertAlmostEqual(out.loc[1, "Day1_Live_Ramp_Cal_MWH"], expected_lift)
+        self.assertAlmostEqual(out.loc[1, "Final_Forecast_MWH"], target)
+        self.assertAlmostEqual(out.loc[1, "Calibrated_Forecast_MWH"], target)
+        self.assertEqual(out.loc[1, "Day1_Live_Ramp_Source"], "day1_live_same_day_ramp")
+        self.assertEqual(out.loc[2, "Day1_Live_Ramp_Gate"], 0)
+
+    def test_multiday_live_heat_anchor_lifts_muted_following_hot_day(self):
+        future = pd.DataFrame(
+            {
+                "DT": [
+                    pd.Timestamp("2026-08-03 18:00"),
+                    pd.Timestamp("2026-08-04 18:00"),
+                    pd.Timestamp("2026-08-08 18:00"),
+                ],
+                "Hour": [18, 18, 18],
+                "Forecast_Day": [1, 2, 6],
+                "Final_Forecast_MWH": [360.0, 338.0, 342.0],
+                "Stage_Selected_Forecast_MWH": [360.0, 338.0, 342.0],
+                "Calibrated_Forecast_MWH": [360.0, 338.0, 342.0],
+                "Temperature_DailyMax": [105.0, 104.0, 108.0],
+                "ConsecutiveExtremeHotDays100": [3.0, 4.0, 8.0],
+                "Day1_Live_Ramp_Cal_MWH": [16.0, 0.0, 0.0],
+                "Day1_Live_Ramp_Observed_Delta_MWH": [31.3, 31.3, 31.3],
+            }
+        )
+        config = {
+            "calibration": {
+                "multiday_live_heat_anchor_override": {
+                    "enabled": True,
+                    "hours": [16, 17, 18, 19, 20],
+                    "anchor_hours": [16, 17, 18, 19],
+                    "min_forecast_day": 2,
+                    "max_forecast_day": 7,
+                    "min_maxtemp_f": 102.0,
+                    "min_anchor_observed_delta_mwh": 20.0,
+                    "min_anchor_live_ramp_mwh": 8.0,
+                    "min_consecutive_extreme_hot_days_100": 2,
+                    "anchor_discount_mwh": 7.0,
+                    "lead_decay_mwh_per_day": 1.0,
+                    "temp_shortfall_discount_mwh_per_f": 2.0,
+                    "temp_excess_credit_mwh_per_f": 1.0,
+                    "weekend_discount_mwh": 12.0,
+                    "sunday_extra_discount_mwh": 2.0,
+                    "hour_target_offsets_mwh": {18: 0.0},
+                    "cap_mwh": 12.0,
+                    "max_target_mwh": 365.0,
+                }
+            }
+        }
+
+        out = apply_multiday_live_heat_anchor_override(
+            future,
+            config=config,
+            base_col="Final_Forecast_MWH",
+            also_update_cols=("Stage_Selected_Forecast_MWH", "Calibrated_Forecast_MWH"),
+        )
+
+        self.assertEqual(out.loc[0, "MultiDay_Heat_Anchor_Gate"], 0)
+        self.assertEqual(out.loc[1, "MultiDay_Heat_Anchor_Gate"], 1)
+        self.assertAlmostEqual(out.loc[1, "MultiDay_Heat_Anchor_Target_MWH"], 350.0)
+        self.assertAlmostEqual(out.loc[1, "MultiDay_Heat_Anchor_Cal_MWH"], 12.0)
+        self.assertAlmostEqual(out.loc[1, "Final_Forecast_MWH"], 350.0)
+        self.assertAlmostEqual(out.loc[1, "Calibrated_Forecast_MWH"], 350.0)
+        self.assertEqual(out.loc[1, "MultiDay_Heat_Anchor_Source"], "multiday_live_heat_anchor")
+        self.assertEqual(out.loc[2, "MultiDay_Heat_Anchor_Gate"], 1)
+        self.assertAlmostEqual(out.loc[2, "MultiDay_Heat_Anchor_Cal_MWH"], 0.0)
+        self.assertEqual(out.loc[2, "MultiDay_Heat_Anchor_Source"], "already_at_heat_anchor_target")
+
+    def test_display_df_exports_heat_ramp_review_columns(self):
+        train = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2026-08-02 17:00")],
+                "MWH": [333.0],
+                "Temperature": [103.5],
+                "Temperature_DailyMax": [103.6],
+                "DailyMaxTemp_Ramp_1Day": [1.6],
+                "ConsecutiveExtremeHotDays100": [2.0],
+            }
+        )
+        future = pd.DataFrame(
+            {
+                "DT": [pd.Timestamp("2026-08-03 17:00")],
+                "Final_Forecast_MWH": [342.0],
+                "Calibrated_Forecast_MWH": [342.0],
+                "Temperature": [105.1],
+                "Temperature_DailyMax": [105.3],
+                "DailyMaxTemp_Ramp_1Day": [1.7],
+                "ConsecutiveExtremeHotDays100": [3.0],
+                "Hot_Ramp_Override_Gate": [1],
+                "Hot_Ramp_Override_Scenario_Lift_MWH": [6.0],
+                "Day1_Live_Ramp_Gate": [1],
+                "Day1_Live_Ramp_Cal_MWH": [14.0],
+                "Day1_Live_Ramp_Target_MWH": [360.0],
+                "MultiDay_Heat_Anchor_Gate": [1],
+                "MultiDay_Heat_Anchor_Cal_MWH": [10.0],
+                "MultiDay_Heat_Anchor_Target_MWH": [352.0],
+                "MWH_Lag24": [335.7],
+            }
+        )
+
+        out = build_display_df(train, future)
+
+        self.assertIn("DailyMaxTemp_Ramp_1Day", out.columns)
+        self.assertIn("ConsecutiveExtremeHotDays100", out.columns)
+        self.assertIn("Hot_Ramp_Override_Scenario_Lift_MWH", out.columns)
+        self.assertIn("Day1_Live_Ramp_Cal_MWH", out.columns)
+        self.assertIn("MultiDay_Heat_Anchor_Cal_MWH", out.columns)
+        self.assertIn("MWH_Lag24", out.columns)
+        self.assertEqual(out.loc[out["Actual"].notna(), "DailyMaxTemp_Ramp_1Day"].iloc[0], 1.6)
+        self.assertEqual(out.loc[out["Forecast"].notna(), "Hot_Ramp_Override_Scenario_Lift_MWH"].iloc[0], 6.0)
+        self.assertEqual(out.loc[out["Forecast"].notna(), "Day1_Live_Ramp_Target_MWH"].iloc[0], 360.0)
+        self.assertEqual(out.loc[out["Forecast"].notna(), "MultiDay_Heat_Anchor_Target_MWH"].iloc[0], 352.0)
+
     def test_stage_selector_conditional_override_respects_hour_filter(self):
         df = pd.DataFrame(
             {
@@ -1935,6 +3997,61 @@ class ForecastControlTests(unittest.TestCase):
         self.assertEqual(out.loc[1, "Stage_Selected_Forecast_MWH"], 282.0)
         self.assertEqual(out.loc[1, "Stage_Selector_Source"], "Final_Forecast_MWH")
         self.assertNotIn("conditional_stage_override", out.loc[1, "Stage_Selector_Reason"])
+
+    def test_stage_selector_day1_summer_hot_peak_override_promotes_peak_risk(self):
+        df = pd.DataFrame(
+            {
+                "DT": [
+                    pd.Timestamp("2026-08-02 18:00"),
+                    pd.Timestamp("2026-08-02 15:00"),
+                    pd.Timestamp("2026-08-03 18:00"),
+                    pd.Timestamp("2026-08-02 19:00"),
+                ],
+                "Forecast_Day": [1, 1, 2, 1],
+                "Season": ["Summer", "Summer", "Summer", "Summer"],
+                "Hour": [18, 15, 18, 19],
+                "Temperature_DailyMax": [105.0, 105.0, 105.0, 105.0],
+                "Targeted_Meta_Adjusted_Forecast_MWH": [322.0, 295.0, 330.0, 333.0],
+                "Peak_Risk_Adjusted_Forecast_MWH": [331.0, 302.0, 340.0, 331.0],
+                "Final_Forecast_MWH": [324.0, 297.0, 332.0, 332.0],
+            }
+        )
+        config = {
+            "calibration": {
+                "stage_selector": {
+                    "enabled": True,
+                    "day1_stage": "targeted_meta",
+                    "days2to3_stage": "targeted_meta",
+                    "hot_peak_final_stack_override": False,
+                    "conditional_stage_overrides": [
+                        {
+                            "name": "day1_summer_hot_peak_peak_risk_override",
+                            "enabled": True,
+                            "seasons": ["Summer"],
+                            "hours": [16, 17, 18, 19, 20],
+                            "min_maxtemp_f": 103.0,
+                            "min_forecast_day": 1,
+                            "max_forecast_day": 1,
+                            "stage": "peak_risk",
+                            "only_if_stage_above_current": True,
+                        }
+                    ],
+                }
+            }
+        }
+
+        out = apply_operational_stage_selector(df, config, forecast_col="Final_Forecast_MWH")
+
+        self.assertEqual(out.loc[0, "Stage_Selected_Forecast_MWH"], 331.0)
+        self.assertEqual(out.loc[0, "Stage_Selector_Source"], "Peak_Risk_Adjusted_Forecast_MWH")
+        self.assertIn("conditional_stage_override:day1_summer_hot_peak_peak_risk_override", out.loc[0, "Stage_Selector_Reason"])
+        self.assertEqual(out.loc[1, "Stage_Selected_Forecast_MWH"], 295.0)
+        self.assertNotIn("day1_summer_hot_peak_peak_risk_override", out.loc[1, "Stage_Selector_Reason"])
+        self.assertEqual(out.loc[2, "Stage_Selected_Forecast_MWH"], 330.0)
+        self.assertNotIn("day1_summer_hot_peak_peak_risk_override", out.loc[2, "Stage_Selector_Reason"])
+        self.assertEqual(out.loc[3, "Stage_Selected_Forecast_MWH"], 333.0)
+        self.assertEqual(out.loc[3, "Stage_Selector_Source"], "Targeted_Meta_Adjusted_Forecast_MWH")
+        self.assertNotIn("day1_summer_hot_peak_peak_risk_override", out.loc[3, "Stage_Selector_Reason"])
 
     def test_stage_selector_day1_cloud_solar_override_uses_peak_risk_only_for_cloud_slice(self):
         df = pd.DataFrame(

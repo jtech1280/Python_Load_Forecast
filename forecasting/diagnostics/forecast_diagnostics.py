@@ -19,6 +19,10 @@ from forecasting.forecast.uncertainty_bands import (
 
 RAW_STAGE = "raw_xgb_lgb_production"
 FINAL_STAGE = "final_corrected_production"
+HE18_20_CODE_HOURS = [17, 18, 19]
+PEAK_WINDOW_14_18_HOURS = [14, 15, 16, 17, 18]
+PEAK_WINDOW_14_20_HOURS = [14, 15, 16, 17, 18, 19, 20]
+EXTREME_HEAT_MIN_DAILY_MAX_F = 105.0
 
 
 def _as_num(s: pd.Series | Any) -> pd.Series:
@@ -246,7 +250,12 @@ def _available_stage_columns(df: pd.DataFrame) -> dict[str, str]:
         FINAL_STAGE: "Final_Backtest_Forecast_MWH",
         "auto_residual_shadow": "Auto_Residual_Adjusted_Forecast_MWH",
         "daily_peak_shadow": "Daily_Peak_Shadow_Adjusted_Forecast_MWH",
+        "heat_analog_shadow": "Heat_Analog_Shadow_Forecast_MWH",
         "auto_residual_full_shadow": "Auto_Residual_Full_Shadow_Adjusted_Forecast_MWH",
+        "auto_residual_structural_hot_peak_shadow": "Auto_Residual_Structural_HotPeak_Adjusted_Forecast_MWH",
+        "auto_residual_broad_hot_peak_shadow": "Auto_Residual_Broad_HotPeak_Shadow_Adjusted_Forecast_MWH",
+        "hot_ramp_peak_shadow": "Hot_Ramp_Peak_Shadow_Forecast_MWH",
+        "heat_persistence_peak_shadow": "Heat_Persistence_Peak_Shadow_Forecast_MWH",
         "baseline_same_hour_yesterday": "Baseline_SameHourYesterday_MWH",
         "baseline_same_hour_7_days_ago": "Baseline_SameHour7DaysAgo_MWH",
         "baseline_rolling_7day_same_hour_avg": "Baseline_Rolling7DaySameHourAvg_MWH",
@@ -290,7 +299,12 @@ _SHADOW_STAGE_NAMES = {
     "focused_shape_shadow",
     "auto_residual_shadow",
     "auto_residual_full_shadow",
+    "auto_residual_structural_hot_peak_shadow",
+    "auto_residual_broad_hot_peak_shadow",
     "daily_peak_shadow",
+    "hot_ramp_peak_shadow",
+    "heat_persistence_peak_shadow",
+    "heat_analog_shadow",
 }
 
 
@@ -484,7 +498,7 @@ def build_backtest_metrics_by_segment(df: pd.DataFrame, min_count: int = 6, fore
 
 def build_backtest_metrics_by_segment_by_stage(df: pd.DataFrame, min_count: int = 6) -> pd.DataFrame:
     stages = _available_stage_columns(df)
-    preferred = {k: v for k, v in stages.items() if k in [RAW_STAGE, "targeted_residual_meta_adjusted", "residual_calibrated", "heat_adjusted", "warm_ramp_adjusted", "cloud_solar_adjusted", "peak_risk_adjusted", "recent_corrected_simulation", FINAL_STAGE, "auto_residual_shadow", "daily_peak_shadow", "prophet_benchmark", "catboost_benchmark", "baseline_same_hour_yesterday", "baseline_rolling_7day_same_hour_avg"]}
+    preferred = {k: v for k, v in stages.items() if k in [RAW_STAGE, "targeted_residual_meta_adjusted", "residual_calibrated", "heat_adjusted", "warm_ramp_adjusted", "cloud_solar_adjusted", "peak_risk_adjusted", "recent_corrected_simulation", FINAL_STAGE, "auto_residual_shadow", "auto_residual_broad_hot_peak_shadow", "daily_peak_shadow", "hot_ramp_peak_shadow", "heat_persistence_peak_shadow", "heat_analog_shadow", "prophet_benchmark", "catboost_benchmark", "baseline_same_hour_yesterday", "baseline_rolling_7day_same_hour_avg"]}
     frames = []
     for stage, col in preferred.items():
         seg = build_backtest_metrics_by_segment(df, min_count=min_count, forecast_col=col)
@@ -495,11 +509,32 @@ def build_backtest_metrics_by_segment_by_stage(df: pd.DataFrame, min_count: int 
     return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
 
 
-def build_daily_peak_miss_table(df: pd.DataFrame, forecast_col: str = "Raw_Forecast_MWH", stage: str | None = None) -> pd.DataFrame:
+def build_daily_peak_miss_table(
+    df: pd.DataFrame,
+    forecast_col: str = "Raw_Forecast_MWH",
+    stage: str | None = None,
+    peak_hours: list[int] | set[int] | None = None,
+    peak_window_name: str | None = None,
+) -> pd.DataFrame:
     if df is None or df.empty or forecast_col not in df.columns:
         return pd.DataFrame()
+    work = df.copy()
+    if "Date" not in work.columns:
+        if "DT" not in work.columns:
+            return pd.DataFrame()
+        work = prep_backtest(work)
+        if forecast_col not in work.columns:
+            return pd.DataFrame()
+    hour_set = {int(h) for h in peak_hours} if peak_hours is not None else set()
+    if hour_set:
+        if "Hour" not in work.columns:
+            return pd.DataFrame()
+        hour_mask = _as_num(work["Hour"]).astype("Int64").isin(hour_set).fillna(False)
+        work = work.loc[hour_mask].copy()
+        if work.empty:
+            return pd.DataFrame()
     rows = []
-    for date, g in df.groupby("Date", dropna=False):
+    for date, g in work.groupby("Date", dropna=False):
         g = g.dropna(subset=["Actual_MWH", forecast_col])
         if g.empty:
             continue
@@ -512,6 +547,8 @@ def build_daily_peak_miss_table(df: pd.DataFrame, forecast_col: str = "Raw_Forec
             "Stage": stage or RAW_STAGE,
             "ForecastColumn": forecast_col,
             "Date": date,
+            "PeakWindowName": peak_window_name or ("custom_hours" if hour_set else "all_hours"),
+            "PeakHours": ",".join(str(h) for h in sorted(hour_set)) if hour_set else "all",
             "Season": actual_peak.get("Season"),
             "Actual_Peak_DT": actual_peak["DT"],
             "Actual_Peak_Hour": int(actual_peak["Hour"]),
@@ -539,15 +576,573 @@ def build_daily_peak_miss_table(df: pd.DataFrame, forecast_col: str = "Raw_Forec
     return out.reset_index(drop=True)
 
 
-def build_daily_peak_miss_by_stage(df: pd.DataFrame) -> pd.DataFrame:
+def build_daily_peak_miss_by_stage(
+    df: pd.DataFrame,
+    peak_hours: list[int] | set[int] | None = None,
+    peak_window_name: str | None = None,
+) -> pd.DataFrame:
     frames = []
     for stage, col in _available_stage_columns(df).items():
         if stage.startswith("baseline_") or stage in {"xgb_component", "lgb_component"}:
             continue
-        tab = build_daily_peak_miss_table(df, forecast_col=col, stage=stage)
+        tab = build_daily_peak_miss_table(
+            df,
+            forecast_col=col,
+            stage=stage,
+            peak_hours=peak_hours,
+            peak_window_name=peak_window_name,
+        )
         if not tab.empty:
             frames.append(tab)
     return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+
+
+def build_daily_peak_window_miss_by_stage(
+    df: pd.DataFrame,
+    peak_hours: list[int] | set[int] | None = None,
+    peak_window_name: str = "HE18to20_CodeHours17to19",
+) -> pd.DataFrame:
+    """Daily peak timing/magnitude metrics inside a specific operational peak window."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    peak_hours = peak_hours or HE18_20_CODE_HOURS
+    if "Replay_Origin_ID" not in df.columns:
+        return build_daily_peak_miss_by_stage(df, peak_hours=peak_hours, peak_window_name=peak_window_name)
+
+    frames: list[pd.DataFrame] = []
+    for origin_id, group in df.groupby("Replay_Origin_ID", dropna=False):
+        peak = build_daily_peak_miss_by_stage(group, peak_hours=peak_hours, peak_window_name=peak_window_name)
+        if peak.empty:
+            continue
+        peak.insert(0, "Replay_Origin_ID", origin_id)
+        peak.insert(1, "Replay_Origin_DT", group["Replay_Origin_DT"].iloc[0] if "Replay_Origin_DT" in group.columns else pd.NaT)
+        frames.append(peak)
+    return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+
+
+def _default_forecast_col(df: pd.DataFrame) -> str | None:
+    for stage in [FINAL_STAGE, "stage_selected_production", "recent_corrected_simulation", RAW_STAGE]:
+        col = _available_stage_columns(df).get(stage)
+        if col:
+            return col
+    return None
+
+
+def _hours_label(hours: list[int] | set[int]) -> str:
+    return ",".join(str(int(h)) for h in sorted({int(h) for h in hours}))
+
+
+def _diagnostic_slice_metric_row(
+    df: pd.DataFrame,
+    mask: pd.Series,
+    *,
+    slice_name: str,
+    slice_group: str,
+    slice_value: str,
+    purpose: str,
+    hour_definition: str,
+    forecast_col: str,
+    gate: str = "diagnostic_only",
+    gate_mae_mwh: float | None = None,
+) -> dict[str, Any]:
+    mask = pd.Series(mask, index=df.index).fillna(False).astype(bool)
+    subset = df.loc[mask].copy()
+    row: dict[str, Any] = {
+        "Slice": slice_name,
+        "SliceGroup": slice_group,
+        "SliceValue": slice_value,
+        "Purpose": purpose,
+        "HourDefinition": hour_definition,
+        "ForecastColumn": forecast_col,
+        "Gate": gate,
+        "Gate_MAE_MWH": gate_mae_mwh if gate_mae_mwh is not None else np.nan,
+        "Pass": np.nan,
+        "N": 0,
+    }
+    if subset.empty or forecast_col not in subset.columns or "Actual_MWH" not in subset.columns:
+        return row
+    metrics = _metric_dict(subset["Actual_MWH"], subset[forecast_col], col=forecast_col)
+    if not metrics:
+        return row
+    row.update({k: v for k, v in metrics.items() if k not in {"Stage", "ForecastColumn"}})
+    if gate_mae_mwh is not None:
+        mae = float(row.get("MAE_MWH", np.nan))
+        row["Pass"] = bool(np.isfinite(mae) and mae <= float(gate_mae_mwh))
+    return row
+
+
+def _forecast_day_bucket(values: pd.Series) -> pd.Series:
+    day = _as_num(values)
+    return pd.cut(
+        day,
+        bins=[0, 1, 3, 7, 16, 999],
+        labels=["Day1", "Days2-3", "Days4-7", "Days8-16", "Day17+"],
+        include_lowest=True,
+    ).astype("object")
+
+
+def _peak_dailymax_bias_band(values: pd.Series) -> pd.Series:
+    temp = _as_num(values)
+    return pd.cut(
+        temp,
+        bins=[-999, 75, 85, 90, 92.5, 95, 98, 100, 105, 999],
+        labels=["<75", "75-85", "85-90", "90-92.5", "92.5-95", "95-98", "98-100", "100-105", "105+"],
+        include_lowest=True,
+        right=False,
+    ).astype("object")
+
+
+def _peak_cloud_bias_band(values: pd.Series) -> pd.Series:
+    cloud = _as_num(values)
+    if cloud.notna().any() and cloud.max(skipna=True) > 1.5:
+        cloud = cloud / 100.0
+    return pd.cut(
+        cloud,
+        bins=[-0.001, 0.10, 0.35, 0.60, 1.001],
+        labels=["Clear/Low", "Some/Partly", "Cloudy", "Overcast"],
+        include_lowest=True,
+    ).astype("object")
+
+
+def _lag_anchor_state_band(values: pd.Series) -> pd.Series:
+    delta = _as_num(values)
+    return pd.cut(
+        delta,
+        bins=[-999, -10, 10, 25, 50, 999],
+        labels=["<-10", "-10..10", "10..25", "25..50", ">50"],
+        include_lowest=True,
+    ).astype("object")
+
+
+def build_peak_window_bias_scorecard(
+    df: pd.DataFrame,
+    forecast_col: str | None = None,
+    min_count: int = 5,
+) -> pd.DataFrame:
+    """Rank HE14-18 residual-bias slices by net residual contribution."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    work = prep_backtest(df)
+    forecast_col = forecast_col or _default_forecast_col(work)
+    if not forecast_col or forecast_col not in work.columns or "Actual_MWH" not in work.columns:
+        return pd.DataFrame()
+
+    hour = _as_num(work.get("Hour", pd.Series(np.nan, index=work.index))).astype("Int64")
+    work = work.loc[hour.isin(PEAK_WINDOW_14_18_HOURS).fillna(False)].copy()
+    if work.empty:
+        return pd.DataFrame()
+    hour = _as_num(work.get("Hour", pd.Series(np.nan, index=work.index))).astype("Int64")
+
+    daily_max = _as_num(work.get("Temperature_DailyMax", work.get("Temperature", pd.Series(np.nan, index=work.index))))
+    cloud = _as_num(work.get("CloudCover_Norm", pd.Series(np.nan, index=work.index)))
+    raw = _as_num(work.get("Raw_Forecast_MWH", pd.Series(np.nan, index=work.index)))
+    same7 = _as_num(work.get("MWH_SameHour7DayMean", pd.Series(np.nan, index=work.index)))
+    lag24_minus_7 = _as_num(work.get("Lag24_Minus_SameHour7DayMean_MWH", pd.Series(np.nan, index=work.index)))
+    raw_minus_7 = raw - same7
+
+    work["Forecast_Day_Bucket"] = _forecast_day_bucket(work["Forecast_Day"])
+    work["Peak_Hour_Band"] = np.where(hour.isin([14, 15]), "HE14-15", "HE16-18")
+    work["DailyMaxTempBiasBand"] = _peak_dailymax_bias_band(daily_max)
+    work["CloudCoverBiasBand"] = _peak_cloud_bias_band(cloud)
+    work["LagAnchorState"] = _lag_anchor_state_band(raw_minus_7)
+    work["RawMinusSameHour7_MWH"] = raw_minus_7
+    work["Lag24MinusSameHour7_MWH"] = lag24_minus_7
+    work["Forecast_MWH"] = _as_num(work[forecast_col])
+    work["Actual_MWH"] = _as_num(work["Actual_MWH"])
+    work["Residual_MWH"] = work["Actual_MWH"] - work["Forecast_MWH"]
+    work["AbsError_MWH"] = work["Residual_MWH"].abs()
+    work["SqResidual_MWH"] = work["Residual_MWH"] ** 2
+    work["Underforecast_Flag"] = work["Residual_MWH"].gt(0.0).astype(float)
+    work["Positive_Residual_MWH"] = work["Residual_MWH"].clip(lower=0.0)
+    work["Negative_Residual_MWH"] = work["Residual_MWH"].clip(upper=0.0)
+    work["Raw_Residual_MWH"] = work["Actual_MWH"] - raw
+
+    keys = [
+        "Month",
+        "Forecast_Day_Bucket",
+        "Peak_Hour_Band",
+        "DailyMaxTempBiasBand",
+        "CloudCoverBiasBand",
+        "LagAnchorState",
+    ]
+    work = work.dropna(subset=["Actual_MWH", "Forecast_MWH"])
+    if work.empty:
+        return pd.DataFrame()
+
+    grouped = work.groupby(keys, dropna=False, observed=True)
+    out = grouped.agg(
+        N=("Residual_MWH", "size"),
+        Residual_Sum_MWH=("Residual_MWH", "sum"),
+        Positive_Residual_Sum_MWH=("Positive_Residual_MWH", "sum"),
+        Negative_Residual_Sum_MWH=("Negative_Residual_MWH", "sum"),
+        Bias_MWH=("Residual_MWH", "mean"),
+        MAE_MWH=("AbsError_MWH", "mean"),
+        Mean_SqResidual_MWH=("SqResidual_MWH", "mean"),
+        Underforecast_Rate_PCT=("Underforecast_Flag", lambda s: float(s.mean() * 100.0)),
+        P90_AbsError_MWH=("AbsError_MWH", lambda s: float(s.quantile(0.90))),
+        Max_Underforecast_MWH=("Residual_MWH", "max"),
+        Max_Overforecast_MWH=("Residual_MWH", lambda s: float((-s).max())),
+        Actual_Mean_MWH=("Actual_MWH", "mean"),
+        Forecast_Mean_MWH=("Forecast_MWH", "mean"),
+        Raw_Bias_MWH=("Raw_Residual_MWH", "mean"),
+        Raw_Residual_Sum_MWH=("Raw_Residual_MWH", "sum"),
+        Mean_RawMinusSameHour7_MWH=("RawMinusSameHour7_MWH", "mean"),
+        Mean_Lag24MinusSameHour7_MWH=("Lag24MinusSameHour7_MWH", "mean"),
+    ).reset_index()
+    out["RMSE_MWH"] = np.sqrt(out.pop("Mean_SqResidual_MWH"))
+    out = out[out["N"] >= int(min_count)].copy()
+    if out.empty:
+        return out
+    out.insert(0, "ForecastColumn", forecast_col)
+    out.insert(1, "RankBasis", "Residual_Sum_MWH_desc")
+    out["Abs_Residual_Sum_MWH"] = out["Residual_Sum_MWH"].abs()
+    out["Bias_Delta_vs_Raw_MWH"] = out["Bias_MWH"] - out["Raw_Bias_MWH"]
+    return out.sort_values(["Residual_Sum_MWH", "N"], ascending=[False, False]).reset_index(drop=True)
+
+
+def build_peak_window_expansion_scorecard(
+    df: pd.DataFrame,
+    forecast_col: str | None = None,
+) -> pd.DataFrame:
+    """Compare the current 14-18 peak window against wider late-evening candidates."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    work = prep_backtest(df)
+    forecast_col = forecast_col or _default_forecast_col(work)
+    if not forecast_col or forecast_col not in work.columns:
+        return pd.DataFrame()
+
+    hour = _as_num(work.get("Hour", pd.Series(np.nan, index=work.index))).astype("Int64")
+    rows = [
+        _diagnostic_slice_metric_row(
+            work,
+            hour.isin(PEAK_WINDOW_14_18_HOURS),
+            slice_name="PeakWindowHours14to18",
+            slice_group="peak_window",
+            slice_value="current_gate",
+            purpose="Current production peak-window gate",
+            hour_definition=f"code Hour {_hours_label(PEAK_WINDOW_14_18_HOURS)}",
+            forecast_col=forecast_col,
+            gate="mae<=5.5",
+            gate_mae_mwh=5.5,
+        ),
+        _diagnostic_slice_metric_row(
+            work,
+            hour.isin(PEAK_WINDOW_14_20_HOURS),
+            slice_name="PeakWindowHours14to20",
+            slice_group="peak_window",
+            slice_value="candidate_expansion",
+            purpose="A/B candidate before changing peak-window training weights",
+            hour_definition=f"code Hour {_hours_label(PEAK_WINDOW_14_20_HOURS)}",
+            forecast_col=forecast_col,
+        ),
+        _diagnostic_slice_metric_row(
+            work,
+            hour.isin([19, 20]),
+            slice_name="LatePeakHours19to20",
+            slice_group="peak_window",
+            slice_value="late_extension_only",
+            purpose="Isolate incremental HE20/HE21 late-peak behavior",
+            hour_definition="code Hour 19-20",
+            forecast_col=forecast_col,
+        ),
+        _diagnostic_slice_metric_row(
+            work,
+            hour.isin(HE18_20_CODE_HOURS),
+            slice_name="HE18to20_CodeHours17to19",
+            slice_group="peak_window",
+            slice_value="solar_shifted_daily_peak",
+            purpose="Daily peak timing/magnitude focus for later net-load peaks",
+            hour_definition="operational HE18-20 / code Hour 17-19",
+            forecast_col=forecast_col,
+        ),
+    ]
+    return pd.DataFrame(rows)
+
+
+def build_peak_window_14to20_metrics_by_stage(df: pd.DataFrame, min_count: int = 1) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    work = prep_backtest(df)
+    hour = _as_num(work.get("Hour", pd.Series(np.nan, index=work.index))).astype("Int64")
+    subset = work.loc[hour.isin(PEAK_WINDOW_14_20_HOURS)].copy()
+    keys = [k for k in ["Replay_Horizon_Bucket", "Forecast_Day", "Hour"] if k in subset.columns]
+    return build_metrics_by_group_by_stage(subset, keys, min_count=min_count) if keys else pd.DataFrame()
+
+
+def build_extreme_heat_peak_scorecard(
+    df: pd.DataFrame,
+    forecast_col: str | None = None,
+    min_daily_max_f: float = EXTREME_HEAT_MIN_DAILY_MAX_F,
+) -> pd.DataFrame:
+    """Dedicated 105F+ hot-peak scorecard. Rows are diagnostic until a gate is calibrated."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    work = prep_backtest(df)
+    forecast_col = forecast_col or _default_forecast_col(work)
+    if not forecast_col or forecast_col not in work.columns:
+        return pd.DataFrame()
+
+    hour = _as_num(work.get("Hour", pd.Series(np.nan, index=work.index))).astype("Int64")
+    daily_max = _as_num(work.get("Temperature_DailyMax", pd.Series(np.nan, index=work.index)))
+    hot = daily_max.ge(float(min_daily_max_f))
+    rows = [
+        _diagnostic_slice_metric_row(
+            work,
+            hot & hour.isin(PEAK_WINDOW_14_20_HOURS),
+            slice_name="ExtremeHeat105PlusPeakWindowHours14to20",
+            slice_group="extreme_heat_peak",
+            slice_value="105f_plus_14to20",
+            purpose="Sparse extreme-heat peak risk",
+            hour_definition=f"Temperature_DailyMax >= {float(min_daily_max_f):.1f}F; code Hour {_hours_label(PEAK_WINDOW_14_20_HOURS)}",
+            forecast_col=forecast_col,
+        ),
+        _diagnostic_slice_metric_row(
+            work,
+            hot & hour.between(16, 20),
+            slice_name="ExtremeHeat105PlusHotPeakHours16to20",
+            slice_group="extreme_heat_peak",
+            slice_value="105f_plus_hot_peak_gate_hours",
+            purpose="105F+ subset of current hot-peak operating hours",
+            hour_definition=f"Temperature_DailyMax >= {float(min_daily_max_f):.1f}F; code Hour 16-20",
+            forecast_col=forecast_col,
+        ),
+        _diagnostic_slice_metric_row(
+            work,
+            hot & hour.isin(HE18_20_CODE_HOURS),
+            slice_name="ExtremeHeat105PlusHE18to20CodeHours17to19",
+            slice_group="extreme_heat_peak",
+            slice_value="105f_plus_he18_20",
+            purpose="105F+ daily peak timing/magnitude focus window",
+            hour_definition=f"Temperature_DailyMax >= {float(min_daily_max_f):.1f}F; operational HE18-20 / code Hour 17-19",
+            forecast_col=forecast_col,
+        ),
+    ]
+    return pd.DataFrame(rows)
+
+
+def build_extreme_heat_peak_metrics_by_stage(
+    df: pd.DataFrame,
+    min_daily_max_f: float = EXTREME_HEAT_MIN_DAILY_MAX_F,
+    min_count: int = 1,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    work = prep_backtest(df)
+    hour = _as_num(work.get("Hour", pd.Series(np.nan, index=work.index))).astype("Int64")
+    daily_max = _as_num(work.get("Temperature_DailyMax", pd.Series(np.nan, index=work.index)))
+    subset = work.loc[daily_max.ge(float(min_daily_max_f)) & hour.isin(PEAK_WINDOW_14_20_HOURS)].copy()
+    keys = [k for k in ["Replay_Horizon_Bucket", "Forecast_Day", "Hour"] if k in subset.columns]
+    return build_metrics_by_group_by_stage(subset, keys, min_count=min_count) if keys else pd.DataFrame()
+
+
+def _heat_analog_shadow_cfg(config: dict | None) -> dict[str, Any]:
+    if not isinstance(config, dict):
+        return {}
+    diag = config.get("diagnostics", {}) or {}
+    if isinstance(diag.get("heat_analog_shadow"), dict):
+        return diag.get("heat_analog_shadow", {}) or {}
+    return {}
+
+
+def apply_multisummer_heat_analog_shadow(
+    df: pd.DataFrame,
+    config: dict | None = None,
+    base_col: str | None = None,
+) -> pd.DataFrame:
+    """Add a non-production, prior-origin multi-summer analog forecast for 105F+ peak rows."""
+    if df is None or df.empty:
+        return pd.DataFrame() if df is None else df.copy()
+    required = {"DT", "Actual_MWH", "Hour", "Temperature_DailyMax"}
+    if not required.issubset(df.columns):
+        return df.copy()
+
+    out = prep_backtest(df)
+    base_col = base_col or _default_forecast_col(out)
+    if not base_col or base_col not in out.columns:
+        return out
+
+    cfg = _heat_analog_shadow_cfg(config)
+    min_daily_max_f = float(cfg.get("min_daily_max_f", EXTREME_HEAT_MIN_DAILY_MAX_F))
+    temp_window_f = float(cfg.get("temp_window_f", 3.0))
+    blend = float(cfg.get("blend", 0.50))
+    cap_mwh = abs(float(cfg.get("cap_mwh", 12.0)))
+    min_analog_count = max(1, int(cfg.get("min_analog_count", 3)))
+    peak_hours = [int(h) for h in cfg.get("peak_hours", PEAK_WINDOW_14_20_HOURS)]
+    summer_months = [int(m) for m in cfg.get("months", [6, 7, 8, 9])]
+
+    out["Heat_Analog_Model_Version"] = "multi_summer_v1"
+    out["Heat_Analog_Shadow_Mode"] = "shadow_only"
+    out["Heat_Analog_Production_Scope"] = "not_production"
+    out["Heat_Analog_Base_Forecast_MWH"] = _as_num(out[base_col])
+    out["Heat_Analog_Shadow_Correction_MWH"] = 0.0
+    out["Heat_Analog_Shadow_Forecast_MWH"] = out["Heat_Analog_Base_Forecast_MWH"]
+    out["Heat_Analog_Shadow_Applied_Flag"] = 0
+    out["Heat_Analog_Scope_Flag"] = 0
+    out["Heat_Analog_Source"] = "out_of_scope"
+    out["Heat_Analog_Temp_Window_F"] = temp_window_f
+    out["Heat_Analog_MinDailyMax_F"] = min_daily_max_f
+    out["Heat_Analog_PeakHours"] = _hours_label(peak_hours)
+    out["Heat_Analog_MinAnalogCount"] = min_analog_count
+    out["Heat_Analog_Count_SameHour_PreOrigin"] = 0
+    out["Heat_Analog_Count_HE14_20_PreOrigin"] = 0
+    out["Heat_Analog_Actual_Mean_SameHour_PreOrigin_MWH"] = np.nan
+    out["Heat_Analog_Actual_P90_SameHour_PreOrigin_MWH"] = np.nan
+    out["Heat_Analog_Actual_Mean_HE14_20_PreOrigin_MWH"] = np.nan
+    out["Heat_Analog_Actual_P90_HE14_20_PreOrigin_MWH"] = np.nan
+
+    hour = _as_num(out["Hour"]).astype("Int64")
+    month = _as_num(out.get("Month", pd.Series(np.nan, index=out.index))).astype("Int64")
+    daily_max = _as_num(out["Temperature_DailyMax"])
+    scope = daily_max.ge(min_daily_max_f) & hour.isin(peak_hours) & month.isin(summer_months)
+    scope = scope.fillna(False).astype(bool)
+    out.loc[scope, "Heat_Analog_Scope_Flag"] = 1
+    out.loc[scope, "Heat_Analog_Source"] = "no_pre_origin_match"
+    if not scope.any():
+        actual = _as_num(out["Actual_MWH"])
+        shadow = _as_num(out["Heat_Analog_Shadow_Forecast_MWH"])
+        out["Heat_Analog_Shadow_Residual_MWH"] = actual - shadow
+        out["Heat_Analog_Shadow_AbsError_MWH"] = out["Heat_Analog_Shadow_Residual_MWH"].abs()
+        out["Heat_Analog_Delta_AbsError_MWH"] = out["Heat_Analog_Shadow_AbsError_MWH"] - (actual - out["Heat_Analog_Base_Forecast_MWH"]).abs()
+        return out
+
+    source = out.drop_duplicates(subset=["DT"], keep="first").copy()
+    source["_DT_UTC"] = pd.to_datetime(source["DT"], errors="coerce", utc=True)
+    source["_Month_Num"] = _as_num(source["Month"])
+    source["_Hour_Num"] = _as_num(source["Hour"])
+    source["_DailyMax_Num"] = _as_num(source["Temperature_DailyMax"])
+    source["_Actual_Num"] = _as_num(source["Actual_MWH"])
+    source = source.dropna(subset=["_DT_UTC", "_Month_Num", "_Hour_Num", "_DailyMax_Num", "_Actual_Num"])
+
+    out["_HeatAnalog_Ref_UTC"] = (
+        pd.to_datetime(out["Replay_Origin_DT"], errors="coerce", utc=True)
+        if "Replay_Origin_DT" in out.columns
+        else pd.to_datetime(out["DT"], errors="coerce", utc=True)
+    )
+    out["_HeatAnalog_Hour_Num"] = _as_num(out["Hour"])
+    out["_HeatAnalog_Month_Num"] = _as_num(out["Month"])
+    out["_HeatAnalog_DailyMax_Num"] = _as_num(out["Temperature_DailyMax"])
+
+    for idx in out.index[scope]:
+        ref_dt = out.at[idx, "_HeatAnalog_Ref_UTC"]
+        row_hour = out.at[idx, "_HeatAnalog_Hour_Num"]
+        row_month = out.at[idx, "_HeatAnalog_Month_Num"]
+        row_temp = out.at[idx, "_HeatAnalog_DailyMax_Num"]
+        base_forecast = out.at[idx, "Heat_Analog_Base_Forecast_MWH"]
+        if pd.isna(ref_dt) or not np.isfinite(row_hour) or not np.isfinite(row_month) or not np.isfinite(row_temp) or not np.isfinite(base_forecast):
+            continue
+
+        prior = source[source["_DT_UTC"].lt(ref_dt)]
+        if prior.empty:
+            continue
+        temp_match = prior["_DailyMax_Num"].ge(min_daily_max_f) & prior["_DailyMax_Num"].between(
+            float(row_temp) - temp_window_f,
+            float(row_temp) + temp_window_f,
+        )
+        hour_match = prior["_Hour_Num"].eq(float(row_hour))
+        same_hour_temp = prior.loc[temp_match & hour_match].copy()
+        candidates = [
+            ("same_month_multi_summer", same_hour_temp.loc[same_hour_temp["_Month_Num"].eq(float(row_month))]),
+            ("summer_months_multi_summer", same_hour_temp.loc[same_hour_temp["_Month_Num"].isin(summer_months)]),
+            ("all_prior_same_hour_temp", same_hour_temp),
+        ]
+
+        chosen_source = None
+        same_values = pd.Series(dtype=float)
+        for source_name, candidate in candidates:
+            values = candidate["_Actual_Num"].dropna()
+            if len(values) >= min_analog_count:
+                chosen_source = source_name
+                same_values = values
+                break
+        if chosen_source is None:
+            continue
+
+        peak_values = prior.loc[
+            temp_match
+            & prior["_Month_Num"].isin(summer_months)
+            & prior["_Hour_Num"].isin(PEAK_WINDOW_14_20_HOURS),
+            "_Actual_Num",
+        ].dropna()
+        analog_mean = float(same_values.mean())
+        raw_correction = (analog_mean - float(base_forecast)) * blend
+        correction = float(np.clip(raw_correction, -cap_mwh, cap_mwh)) if cap_mwh > 0 else float(raw_correction)
+
+        out.at[idx, "Heat_Analog_Source"] = chosen_source
+        out.at[idx, "Heat_Analog_Shadow_Correction_MWH"] = correction
+        out.at[idx, "Heat_Analog_Shadow_Forecast_MWH"] = float(base_forecast) + correction
+        out.at[idx, "Heat_Analog_Shadow_Applied_Flag"] = int(abs(correction) > 1e-9)
+        out.at[idx, "Heat_Analog_Count_SameHour_PreOrigin"] = int(len(same_values))
+        out.at[idx, "Heat_Analog_Actual_Mean_SameHour_PreOrigin_MWH"] = analog_mean
+        out.at[idx, "Heat_Analog_Actual_P90_SameHour_PreOrigin_MWH"] = float(same_values.quantile(0.90))
+        out.at[idx, "Heat_Analog_Count_HE14_20_PreOrigin"] = int(len(peak_values))
+        out.at[idx, "Heat_Analog_Actual_Mean_HE14_20_PreOrigin_MWH"] = float(peak_values.mean()) if len(peak_values) else np.nan
+        out.at[idx, "Heat_Analog_Actual_P90_HE14_20_PreOrigin_MWH"] = float(peak_values.quantile(0.90)) if len(peak_values) else np.nan
+
+    actual = _as_num(out["Actual_MWH"])
+    base = _as_num(out["Heat_Analog_Base_Forecast_MWH"])
+    shadow = _as_num(out["Heat_Analog_Shadow_Forecast_MWH"])
+    out["Heat_Analog_Base_Residual_MWH"] = actual - base
+    out["Heat_Analog_Base_AbsError_MWH"] = out["Heat_Analog_Base_Residual_MWH"].abs()
+    out["Heat_Analog_Shadow_Residual_MWH"] = actual - shadow
+    out["Heat_Analog_Shadow_AbsError_MWH"] = out["Heat_Analog_Shadow_Residual_MWH"].abs()
+    out["Heat_Analog_Delta_AbsError_MWH"] = out["Heat_Analog_Shadow_AbsError_MWH"] - out["Heat_Analog_Base_AbsError_MWH"]
+    out["Actual_Minus_Heat_Analog_SameHour_Mean_MWH"] = (
+        actual - _as_num(out["Heat_Analog_Actual_Mean_SameHour_PreOrigin_MWH"])
+    )
+    return out.drop(
+        columns=["_HeatAnalog_Ref_UTC", "_HeatAnalog_Hour_Num", "_HeatAnalog_Month_Num", "_HeatAnalog_DailyMax_Num"],
+        errors="ignore",
+    )
+
+
+def build_heat_analog_shadow_detail(df: pd.DataFrame, config: dict | None = None) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    work = df.copy() if "Heat_Analog_Shadow_Forecast_MWH" in df.columns else apply_multisummer_heat_analog_shadow(df, config=config)
+    if work.empty or "Heat_Analog_Scope_Flag" not in work.columns:
+        return pd.DataFrame()
+    scope = _as_num(work["Heat_Analog_Scope_Flag"]).fillna(0).eq(1)
+    detail = work.loc[scope].copy()
+    if detail.empty:
+        return pd.DataFrame()
+    preferred_cols = [
+        "DT", "Replay_Origin_ID", "Replay_Origin_DT", "Replay_Origin_Year", "Replay_Origin_Month",
+        "Forecast_Lead_Hour", "Forecast_Day", "Replay_Horizon_Bucket", "Season", "Month", "Hour",
+        "Actual_MWH", "Temperature", "Temperature_DailyMax", "DailyMaxTempBucket", "CloudCover_Norm",
+        "Raw_Forecast_MWH", "Final_Backtest_Forecast_MWH", "Heat_Analog_Base_Forecast_MWH",
+        "Heat_Analog_Shadow_Forecast_MWH", "Heat_Analog_Shadow_Correction_MWH",
+        "Heat_Analog_Shadow_Applied_Flag", "Heat_Analog_Scope_Flag", "Heat_Analog_Source",
+        "Heat_Analog_Temp_Window_F", "Heat_Analog_MinDailyMax_F", "Heat_Analog_PeakHours",
+        "Heat_Analog_MinAnalogCount", "Heat_Analog_Count_SameHour_PreOrigin",
+        "Heat_Analog_Actual_Mean_SameHour_PreOrigin_MWH",
+        "Heat_Analog_Actual_P90_SameHour_PreOrigin_MWH",
+        "Heat_Analog_Count_HE14_20_PreOrigin",
+        "Heat_Analog_Actual_Mean_HE14_20_PreOrigin_MWH",
+        "Heat_Analog_Actual_P90_HE14_20_PreOrigin_MWH",
+        "Heat_Analog_Base_Residual_MWH", "Heat_Analog_Base_AbsError_MWH",
+        "Heat_Analog_Shadow_Residual_MWH", "Heat_Analog_Shadow_AbsError_MWH",
+        "Heat_Analog_Delta_AbsError_MWH", "Actual_Minus_Heat_Analog_SameHour_Mean_MWH",
+    ]
+    ordered = [col for col in preferred_cols if col in detail.columns]
+    extras = [col for col in detail.columns if col not in ordered]
+    sort_cols = [col for col in ["Replay_Origin_ID", "DT", "Hour"] if col in detail.columns]
+    detail = detail[ordered + extras]
+    return detail.sort_values(sort_cols, kind="stable").reset_index(drop=True) if sort_cols else detail.reset_index(drop=True)
+
+
+def build_heat_analog_shadow_metrics(df: pd.DataFrame, config: dict | None = None, min_count: int = 1) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    work = df.copy() if "Heat_Analog_Shadow_Forecast_MWH" in df.columns else apply_multisummer_heat_analog_shadow(df, config=config)
+    if work.empty or "Heat_Analog_Scope_Flag" not in work.columns:
+        return pd.DataFrame()
+    scope = _as_num(work["Heat_Analog_Scope_Flag"]).fillna(0).eq(1)
+    subset = work.loc[scope].copy()
+    if subset.empty:
+        return pd.DataFrame()
+    keys = [k for k in ["Heat_Analog_Source", "Forecast_Day", "Hour"] if k in subset.columns]
+    return build_metrics_by_group_by_stage(subset, keys, min_count=min_count) if keys else pd.DataFrame()
 
 
 def _daily_peak_shadow_cfg(config: dict | None) -> dict:
@@ -977,29 +1572,132 @@ def build_forecast_stage_metrics(df: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values("MAE_MWH").reset_index(drop=True)
 
 
+def _cloud_solar_gate_mask(df: pd.DataFrame) -> pd.Series:
+    hour = _as_num(df.get("Hour", pd.Series(np.nan, index=df.index)))
+    cloud = _as_num(df.get("CloudCover_Norm", pd.Series(np.nan, index=df.index)))
+    if cloud.notna().any() and cloud.max(skipna=True) > 1.5:
+        cloud = cloud / 100.0
+    loss_candidates = [
+        _as_num(df[col])
+        for col in ["BTM_Solar_Loss_From_ClearSky_MW", "Midday_Overcast_Solar_Loss_MW"]
+        if col in df.columns
+    ]
+    if loss_candidates:
+        solar_loss = pd.concat(loss_candidates, axis=1).max(axis=1)
+        solar_gate = solar_loss.ge(1.25)
+    else:
+        solar_gate = pd.Series(True, index=df.index)
+    return (hour.between(10, 16) & cloud.ge(0.60) & solar_gate).fillna(False)
+
+
+def _shadow_promotion_slice_gate(
+    df: pd.DataFrame,
+    final_col: str,
+    candidate_col: str,
+    mask: pd.Series,
+    *,
+    require_improvement: bool,
+) -> dict[str, Any]:
+    mask = pd.Series(mask, index=df.index).fillna(False).astype(bool)
+    subset = df.loc[mask]
+    if subset.empty:
+        return {
+            "N": 0,
+            "Final_MAE_MWH": np.nan,
+            "Candidate_MAE_MWH": np.nan,
+            "MAE_Delta_vs_Final_MWH": np.nan,
+            "Pass": True,
+        }
+    final = _metric_dict(subset["Actual_MWH"], subset[final_col], col=final_col)
+    candidate = _metric_dict(subset["Actual_MWH"], subset[candidate_col], col=candidate_col)
+    if not final or not candidate:
+        return {
+            "N": 0,
+            "Final_MAE_MWH": np.nan,
+            "Candidate_MAE_MWH": np.nan,
+            "MAE_Delta_vs_Final_MWH": np.nan,
+            "Pass": True,
+        }
+    final_mae = float(final.get("MAE_MWH", np.nan))
+    candidate_mae = float(candidate.get("MAE_MWH", np.nan))
+    delta = candidate_mae - final_mae
+    tolerance = 1e-9
+    passes = delta < -tolerance if require_improvement else delta <= tolerance
+    return {
+        "N": int(candidate.get("N", 0) or 0),
+        "Final_MAE_MWH": final_mae,
+        "Candidate_MAE_MWH": candidate_mae,
+        "MAE_Delta_vs_Final_MWH": delta,
+        "Pass": bool(np.isfinite(delta) and passes),
+    }
+
+
 def build_shadow_stage_promotion_audit(df: pd.DataFrame) -> pd.DataFrame:
-    """Compare shadow candidate stages directly against the current final forecast."""
+    """Compare shadow candidates against final and gate them on bias/slice safety."""
     if df is None or df.empty or "Actual_MWH" not in df.columns:
         return pd.DataFrame()
-    stages = _available_stage_columns(df)
+    work = prep_backtest(df) if "DT" in df.columns else df.copy()
+    stages = _available_stage_columns(work)
     final_col = stages.get(FINAL_STAGE) or stages.get("recent_corrected_simulation") or stages.get(RAW_STAGE)
     if not final_col:
         return pd.DataFrame()
-    final = _metric_dict(df["Actual_MWH"], df[final_col], label=FINAL_STAGE, col=final_col)
+    final = _metric_dict(work["Actual_MWH"], work[final_col], label=FINAL_STAGE, col=final_col)
     if not final:
         return pd.DataFrame()
 
     rows = []
     final_mae = float(final.get("MAE_MWH", np.nan))
     final_bias = float(final.get("Bias_MWH", np.nan))
+    hour = _as_num(work.get("Hour", pd.Series(np.nan, index=work.index)))
+    forecast_day = _as_num(work.get("Forecast_Day", pd.Series(np.nan, index=work.index)))
+    daily_max = _as_num(work.get("Temperature_DailyMax", work.get("Temperature", pd.Series(np.nan, index=work.index))))
+    slice_masks = {
+        "HotPeak": (hour.between(16, 20) & daily_max.ge(90.0)).fillna(False),
+        "Peak14to18": hour.isin(PEAK_WINDOW_14_18_HOURS).fillna(False),
+        "Day1": forecast_day.eq(1).fillna(False),
+        "Days2to7": forecast_day.between(2, 7).fillna(False),
+        "CloudSolar": _cloud_solar_gate_mask(work),
+    }
     for stage, col in stages.items():
-        if stage not in _SHADOW_STAGE_NAMES or col not in df.columns:
+        if stage not in _SHADOW_STAGE_NAMES or col not in work.columns:
             continue
-        candidate = _metric_dict(df["Actual_MWH"], df[col], label=stage, col=col)
+        candidate = _metric_dict(work["Actual_MWH"], work[col], label=stage, col=col)
         if not candidate:
             continue
         candidate_mae = float(candidate.get("MAE_MWH", np.nan))
+        candidate_bias = float(candidate.get("Bias_MWH", np.nan))
         improvement = final_mae - candidate_mae
+        seasonal_abs_bias = abs(candidate_bias)
+        seasonal_bias_pass = bool(np.isfinite(seasonal_abs_bias) and seasonal_abs_bias <= 0.75)
+        hot_peak_gate = _shadow_promotion_slice_gate(
+            work, final_col, col, slice_masks["HotPeak"], require_improvement=False
+        )
+        peak_window_gate = _shadow_promotion_slice_gate(
+            work, final_col, col, slice_masks["Peak14to18"], require_improvement=True
+        )
+        day1_gate = _shadow_promotion_slice_gate(
+            work, final_col, col, slice_masks["Day1"], require_improvement=False
+        )
+        days2to7_gate = _shadow_promotion_slice_gate(
+            work, final_col, col, slice_masks["Days2to7"], require_improvement=False
+        )
+        cloud_solar_gate = _shadow_promotion_slice_gate(
+            work, final_col, col, slice_masks["CloudSolar"], require_improvement=False
+        )
+        gate_failures = []
+        if not seasonal_bias_pass:
+            gate_failures.append("Seasonal_Abs_Bias")
+        for name, gate in [
+            ("HotPeak_MAE", hot_peak_gate),
+            ("Peak14to18_MAE", peak_window_gate),
+            ("Day1_NoRegression", day1_gate),
+            ("Days2to7_NoRegression", days2to7_gate),
+            ("CloudSolar_NoRegression", cloud_solar_gate),
+        ]:
+            if not bool(gate["Pass"]):
+                gate_failures.append(name)
+        promotion_gate_pass = not gate_failures
+        beats_final = bool(np.isfinite(improvement) and improvement > 1e-9)
         rows.append({
             "Stage": stage,
             "ForecastColumn": col,
@@ -1013,12 +1711,273 @@ def build_shadow_stage_promotion_audit(df: pd.DataFrame) -> pd.DataFrame:
             "Final_MAPE_PCT": final.get("MAPE_PCT"),
             "Candidate_Underforecast_Rate_PCT": candidate.get("Underforecast_Rate_PCT"),
             "Final_Underforecast_Rate_PCT": final.get("Underforecast_Rate_PCT"),
-            "Beats_Final": bool(np.isfinite(improvement) and improvement > 1e-9),
+            "Seasonal_Abs_Bias_Gate_MWH": 0.75,
+            "Candidate_Seasonal_Abs_Bias_MWH": seasonal_abs_bias,
+            "Seasonal_Abs_Bias_Gate_Pass": seasonal_bias_pass,
+            "HotPeak_N": hot_peak_gate["N"],
+            "HotPeak_Final_MAE_MWH": hot_peak_gate["Final_MAE_MWH"],
+            "HotPeak_Candidate_MAE_MWH": hot_peak_gate["Candidate_MAE_MWH"],
+            "HotPeak_MAE_Delta_vs_Final_MWH": hot_peak_gate["MAE_Delta_vs_Final_MWH"],
+            "HotPeak_MAE_Gate_Pass": hot_peak_gate["Pass"],
+            "Peak14to18_N": peak_window_gate["N"],
+            "Peak14to18_Final_MAE_MWH": peak_window_gate["Final_MAE_MWH"],
+            "Peak14to18_Candidate_MAE_MWH": peak_window_gate["Candidate_MAE_MWH"],
+            "Peak14to18_MAE_Delta_vs_Final_MWH": peak_window_gate["MAE_Delta_vs_Final_MWH"],
+            "Peak14to18_MAE_Gate_Pass": peak_window_gate["Pass"],
+            "Day1_N": day1_gate["N"],
+            "Day1_MAE_Delta_vs_Final_MWH": day1_gate["MAE_Delta_vs_Final_MWH"],
+            "Day1_NoRegression_Gate_Pass": day1_gate["Pass"],
+            "Days2to7_N": days2to7_gate["N"],
+            "Days2to7_MAE_Delta_vs_Final_MWH": days2to7_gate["MAE_Delta_vs_Final_MWH"],
+            "Days2to7_NoRegression_Gate_Pass": days2to7_gate["Pass"],
+            "CloudSolar_N": cloud_solar_gate["N"],
+            "CloudSolar_MAE_Delta_vs_Final_MWH": cloud_solar_gate["MAE_Delta_vs_Final_MWH"],
+            "CloudSolar_NoRegression_Gate_Pass": cloud_solar_gate["Pass"],
+            "Promotion_Gate_Pass": promotion_gate_pass,
+            "Promotion_Gate_Failures": ";".join(gate_failures) if gate_failures else "none",
+            "Meets_Promotion_Rule": bool(beats_final and promotion_gate_pass),
+            "Beats_Final": beats_final,
         })
     out = pd.DataFrame(rows)
     if out.empty:
         return out
-    return out.sort_values("Candidate_MAE_Improvement_vs_Final_MWH", ascending=False).reset_index(drop=True)
+    return out.sort_values(
+        ["Meets_Promotion_Rule", "Candidate_MAE_Improvement_vs_Final_MWH"],
+        ascending=[False, False],
+    ).reset_index(drop=True)
+
+
+def build_hot_peak_shadow_candidate_scorecard(
+    df: pd.DataFrame,
+    group_cols: list[str] | None = None,
+    min_count: int = 1,
+) -> pd.DataFrame:
+    """Compare shadow candidates against final inside hot-peak promotion slices."""
+    if df is None or df.empty or "Actual_MWH" not in df.columns:
+        return pd.DataFrame()
+
+    work = _add_readable_bins(df.copy())
+    if "Hour" not in work.columns and "DT" in work.columns:
+        work["Hour"] = _local_datetime_series(work["DT"]).dt.hour
+    if "Month" not in work.columns and "DT" in work.columns:
+        work["Month"] = _local_datetime_series(work["DT"]).dt.month
+    group_cols = group_cols or ["Replay_Horizon_Bucket", "Month", "DailyMaxTempBucket", "CloudCoverBucket"]
+    available_group_cols = [c for c in group_cols if c in work.columns]
+    if not available_group_cols:
+        return pd.DataFrame()
+
+    hour = _as_num(work.get("Hour", pd.Series(np.nan, index=work.index)))
+    daily_max = _as_num(work.get("Temperature_DailyMax", pd.Series(np.nan, index=work.index)))
+    hot_peak = hour.between(16, 20) & daily_max.ge(90.0)
+    work = work.loc[hot_peak.fillna(False)].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    stages = _available_stage_columns(work)
+    final_col = stages.get(FINAL_STAGE) or stages.get("recent_corrected_simulation") or stages.get(RAW_STAGE)
+    if not final_col or final_col not in work.columns:
+        return pd.DataFrame()
+
+    candidate_stages = {
+        stage: col
+        for stage, col in stages.items()
+        if stage in _SHADOW_STAGE_NAMES and col in work.columns
+    }
+    if not candidate_stages:
+        return pd.DataFrame()
+
+    rows: list[dict[str, Any]] = []
+    for keys, group in work.groupby(available_group_cols, dropna=False):
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        if len(group) < int(min_count):
+            continue
+        final = _metric_dict(group["Actual_MWH"], group[final_col], label=FINAL_STAGE, col=final_col)
+        if not final:
+            continue
+        final_mae = float(final.get("MAE_MWH", np.nan))
+        final_bias = float(final.get("Bias_MWH", np.nan))
+        for stage, col in candidate_stages.items():
+            candidate = _metric_dict(group["Actual_MWH"], group[col], label=stage, col=col)
+            if not candidate:
+                continue
+            candidate_mae = float(candidate.get("MAE_MWH", np.nan))
+            improvement = final_mae - candidate_mae
+            row = {col_name: key for col_name, key in zip(available_group_cols, keys)}
+            row.update(
+                {
+                    "Stage": stage,
+                    "ForecastColumn": col,
+                    "N": candidate.get("N"),
+                    "Candidate_MAE_MWH": candidate.get("MAE_MWH"),
+                    "Final_MAE_MWH": final.get("MAE_MWH"),
+                    "Candidate_MAE_Improvement_vs_Final_MWH": improvement,
+                    "Candidate_Bias_MWH": candidate.get("Bias_MWH"),
+                    "Final_Bias_MWH": final_bias,
+                    "Candidate_Bias_Abs_Improvement_vs_Final_MWH": abs(final_bias) - abs(float(candidate.get("Bias_MWH", np.nan))),
+                    "Candidate_MAPE_PCT": candidate.get("MAPE_PCT"),
+                    "Final_MAPE_PCT": final.get("MAPE_PCT"),
+                    "Candidate_Underforecast_Rate_PCT": candidate.get("Underforecast_Rate_PCT"),
+                    "Final_Underforecast_Rate_PCT": final.get("Underforecast_Rate_PCT"),
+                    "Candidate_P90_AbsError_MWH": candidate.get("P90_AbsError_MWH"),
+                    "Final_P90_AbsError_MWH": final.get("P90_AbsError_MWH"),
+                    "Beats_Final": bool(np.isfinite(improvement) and improvement > 1e-9),
+                    "Promote_Slice_Candidate": bool(
+                        int(candidate.get("N", 0) or 0) >= int(min_count)
+                        and np.isfinite(improvement)
+                        and improvement > 1e-9
+                    ),
+                }
+            )
+            rows.append(row)
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values(
+        ["Promote_Slice_Candidate", "Candidate_MAE_Improvement_vs_Final_MWH", "N"],
+        ascending=[False, False, False],
+    ).reset_index(drop=True)
+
+
+def _dailymax_ramp_1day_for_scorecard(work: pd.DataFrame, daily_max: pd.Series) -> pd.Series:
+    if "DailyMaxTemp_Ramp_1Day" in work.columns:
+        ramp = _as_num(work["DailyMaxTemp_Ramp_1Day"])
+        if ramp.notna().any():
+            return ramp
+    if "PriorDay_DailyMaxTemp" in work.columns:
+        prior = _as_num(work["PriorDay_DailyMaxTemp"])
+        ramp = daily_max - prior
+        if ramp.notna().any():
+            return ramp
+    if "Date" in work.columns:
+        date = work["Date"].astype(str)
+    elif "DT" in work.columns:
+        date = _local_datetime_series(work["DT"]).dt.date.astype(str)
+    else:
+        return pd.Series(np.nan, index=work.index)
+    daily = (
+        pd.DataFrame({"Date": date, "DailyMax": daily_max}, index=work.index)
+        .groupby("Date", dropna=False)["DailyMax"]
+        .max()
+        .reset_index()
+    )
+    daily["_DateDT"] = pd.to_datetime(daily["Date"], errors="coerce")
+    daily = daily.sort_values("_DateDT")
+    daily["_Ramp"] = daily["DailyMax"].diff()
+    return date.map(daily.set_index("Date")["_Ramp"]).reindex(work.index).astype(float)
+
+
+def _consecutive_extreme_days100_for_scorecard(work: pd.DataFrame, daily_max: pd.Series) -> pd.Series:
+    if "ConsecutiveExtremeHotDays100" in work.columns:
+        consecutive = _as_num(work["ConsecutiveExtremeHotDays100"])
+        if consecutive.notna().any():
+            return consecutive
+    if "Date" in work.columns:
+        date = work["Date"].astype(str)
+    elif "DT" in work.columns:
+        date = _local_datetime_series(work["DT"]).dt.date.astype(str)
+    else:
+        return pd.Series(np.nan, index=work.index)
+
+    group_cols = ["Date"]
+    source = pd.DataFrame({"Date": date, "DailyMax": daily_max}, index=work.index)
+    if "Replay_Origin_ID" in work.columns:
+        source["Replay_Origin_ID"] = work["Replay_Origin_ID"].astype(str)
+        group_cols = ["Replay_Origin_ID", "Date"]
+
+    daily = source.groupby(group_cols, dropna=False)["DailyMax"].max().reset_index()
+    daily["_DateDT"] = pd.to_datetime(daily["Date"], errors="coerce")
+    daily = daily.sort_values((["Replay_Origin_ID"] if "Replay_Origin_ID" in daily.columns else []) + ["_DateDT"])
+
+    if "Replay_Origin_ID" in daily.columns:
+        counts = []
+        for _, group in daily.groupby("Replay_Origin_ID", dropna=False, sort=False):
+            running = 0
+            for value in pd.to_numeric(group["DailyMax"], errors="coerce"):
+                running = running + 1 if pd.notna(value) and float(value) >= 100.0 else 0
+                counts.append(running)
+        daily["_ConsecutiveExtremeHotDays100"] = counts
+        key = pd.MultiIndex.from_frame(daily[["Replay_Origin_ID", "Date"]])
+        values = pd.Series(daily["_ConsecutiveExtremeHotDays100"].to_numpy(), index=key)
+        lookup_key = pd.MultiIndex.from_arrays([source["Replay_Origin_ID"], source["Date"]])
+        return pd.Series(values.reindex(lookup_key).to_numpy(), index=work.index, dtype=float)
+
+    running = 0
+    counts = []
+    for value in pd.to_numeric(daily["DailyMax"], errors="coerce"):
+        running = running + 1 if pd.notna(value) and float(value) >= 100.0 else 0
+        counts.append(running)
+    daily["_ConsecutiveExtremeHotDays100"] = counts
+    return date.map(daily.set_index("Date")["_ConsecutiveExtremeHotDays100"]).reindex(work.index).astype(float)
+
+
+def build_hot_ramp_peak_candidate_scorecard(
+    df: pd.DataFrame,
+    group_cols: list[str] | None = None,
+    min_count: int = 1,
+) -> pd.DataFrame:
+    """Compare shadow candidates against final inside the hot-ramp peak stratum."""
+    if df is None or df.empty or "Actual_MWH" not in df.columns:
+        return pd.DataFrame()
+
+    work = _add_readable_bins(df.copy())
+    if "Hour" not in work.columns and "DT" in work.columns:
+        work["Hour"] = _local_datetime_series(work["DT"]).dt.hour
+    if "Month" not in work.columns and "DT" in work.columns:
+        work["Month"] = _local_datetime_series(work["DT"]).dt.month
+
+    hour = _as_num(work.get("Hour", pd.Series(np.nan, index=work.index)))
+    daily_max = _as_num(work.get("Temperature_DailyMax", pd.Series(np.nan, index=work.index)))
+    ramp = _dailymax_ramp_1day_for_scorecard(work, daily_max)
+    hot_ramp_peak = hour.between(16, 20) & daily_max.ge(100.0) & ramp.ge(2.0)
+    work = work.loc[hot_ramp_peak.fillna(False)].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    out = build_hot_peak_shadow_candidate_scorecard(
+        work,
+        group_cols=group_cols or ["Replay_Horizon_Bucket", "Month", "DailyMaxTempBucket", "CloudCoverBucket"],
+        min_count=min_count,
+    )
+    if out.empty:
+        return out
+    out.insert(0, "Target_Slice", "hot_ramp_peak_100f_ramp2_he16to20")
+    return out
+
+
+def build_heat_persistence_peak_candidate_scorecard(
+    df: pd.DataFrame,
+    group_cols: list[str] | None = None,
+    min_count: int = 1,
+) -> pd.DataFrame:
+    """Compare shadow candidates against final inside the heat-persistence peak stratum."""
+    if df is None or df.empty or "Actual_MWH" not in df.columns:
+        return pd.DataFrame()
+
+    work = _add_readable_bins(df.copy())
+    if "Hour" not in work.columns and "DT" in work.columns:
+        work["Hour"] = _local_datetime_series(work["DT"]).dt.hour
+    if "Month" not in work.columns and "DT" in work.columns:
+        work["Month"] = _local_datetime_series(work["DT"]).dt.month
+
+    hour = _as_num(work.get("Hour", pd.Series(np.nan, index=work.index)))
+    daily_max = _as_num(work.get("Temperature_DailyMax", pd.Series(np.nan, index=work.index)))
+    consecutive = _consecutive_extreme_days100_for_scorecard(work, daily_max)
+    heat_persistence_peak = hour.between(16, 20) & daily_max.ge(100.0) & consecutive.ge(3.0)
+    work = work.loc[heat_persistence_peak.fillna(False)].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    out = build_hot_peak_shadow_candidate_scorecard(
+        work,
+        group_cols=group_cols or ["Replay_Horizon_Bucket", "Month", "DailyMaxTempBucket", "CloudCoverBucket"],
+        min_count=min_count,
+    )
+    if out.empty:
+        return out
+    out.insert(0, "Target_Slice", "heat_persistence_peak_100f_consec3_he16to20")
+    return out
 
 
 def _feature_mean(df: pd.DataFrame, col: str) -> float:
@@ -1401,6 +2360,220 @@ def build_band_coverage_by_stage(df: pd.DataFrame, residual_band_lookup: dict | 
     return summary, by_hour, by_temp, detail
 
 
+def _future_point_forecast_col(df: pd.DataFrame) -> str | None:
+    for col in [
+        "Forecast_Expected_MWH",
+        "Forecast",
+        "Final_Forecast_MWH",
+        "Stage_Selected_Forecast_MWH",
+        "Final_Backtest_Forecast_MWH",
+    ]:
+        if col in df.columns and _as_num(df[col]).notna().any():
+            return col
+    return None
+
+
+def _optional_series(df: pd.DataFrame, col: str, default: float | str = np.nan) -> pd.Series:
+    if col in df.columns:
+        return df[col]
+    return pd.Series(default, index=df.index)
+
+
+def build_future_peak_muting_audit(
+    forecast_df: pd.DataFrame | None,
+    backtest_df: pd.DataFrame | None = None,
+    config: dict | None = None,
+) -> pd.DataFrame:
+    """Flag future hot-peak days where the point forecast lags hotter/stress scenarios.
+
+    This is an operational forward-looking audit. Replay scorecards validate realized-weather
+    accuracy, while this table checks whether the current P50 is being held down during hot
+    weather-risk peaks and merely exporting the risk into the upper band.
+    """
+    if forecast_df is None or forecast_df.empty:
+        return pd.DataFrame()
+
+    cfg = (((config or {}).get("diagnostics", {}) or {}).get("future_peak_muting_audit", {}) or {})
+    if not bool(cfg.get("enabled", True)):
+        return pd.DataFrame()
+
+    work = forecast_df.copy()
+    if "DT" not in work.columns:
+        return pd.DataFrame()
+
+    point_col = _future_point_forecast_col(work)
+    if point_col is None:
+        return pd.DataFrame()
+
+    point = _as_num(work[point_col])
+    work = work.loc[point.notna()].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    raw_dt = work["DT"].copy()
+    dt = _local_datetime_series(work["DT"])
+    work = work.loc[dt.notna()].copy()
+    if work.empty:
+        return pd.DataFrame()
+    dt = _local_datetime_series(work["DT"])
+    work["_DT_Label"] = raw_dt.loc[work.index].astype(str)
+    work["_DT"] = dt
+    work["_Date"] = work["_DT"].dt.date.astype(str)
+    work["_Hour"] = _as_num(work["Hour"]).fillna(work["_DT"].dt.hour).astype(int) if "Hour" in work.columns else work["_DT"].dt.hour.astype(int)
+    work["_PointForecast_MWH"] = _as_num(work[point_col])
+    if "Forecast_Day" in work.columns:
+        work["_Forecast_Day"] = _as_num(work["Forecast_Day"])
+    else:
+        first_day = work["_DT"].dt.normalize().min()
+        work["_Forecast_Day"] = (work["_DT"].dt.normalize() - first_day).dt.days + 1
+
+    if "Temperature_DailyMax" in work.columns:
+        daily_max = _as_num(work["Temperature_DailyMax"])
+    elif "Temperature" in work.columns:
+        daily_max = _as_num(work["Temperature"])
+    else:
+        daily_max = pd.Series(np.nan, index=work.index)
+    work["_DailyMaxTemp_F"] = daily_max
+    work["_Temperature_F"] = _as_num(_optional_series(work, "Temperature"))
+
+    peak_hours = [int(h) for h in cfg.get("peak_hours", PEAK_WINDOW_14_20_HOURS)]
+    hot_min_daily_max = float(cfg.get("hot_min_daily_max_f", 95.0))
+    scenario_gap_warn = float(cfg.get("scenario_gap_warn_mwh", 8.0))
+    hotter_day_min_temp_increase = float(cfg.get("hotter_day_min_temp_increase_f", 1.0))
+    hotter_day_peak_drop_warn = float(cfg.get("hotter_day_peak_drop_warn_mwh", 2.0))
+    analog_min_daily_max = float(cfg.get("analog_min_daily_max_f", EXTREME_HEAT_MIN_DAILY_MAX_F))
+
+    scenario_cols = [
+        col
+        for col in [
+            "WeatherScenario_warmer_P50_MWH",
+            "WeatherScenario_hot_stress_5f_P50_MWH",
+            "WeatherScenario_cloudier_solar_loss_P50_MWH",
+            "WeatherScenario_severe_cloud_solar_loss_P50_MWH",
+            "WeatherScenario_clearer_high_solar_P50_MWH",
+            "WeatherScenario_cooler_P50_MWH",
+        ]
+        if col in work.columns
+    ]
+    if "WeatherScenario_Max_P50_MWH" in work.columns:
+        work["_MaxScenario_P50_MWH"] = _as_num(work["WeatherScenario_Max_P50_MWH"])
+    elif scenario_cols:
+        work["_MaxScenario_P50_MWH"] = pd.concat([_as_num(work[col]) for col in scenario_cols], axis=1).max(axis=1, skipna=True)
+    else:
+        work["_MaxScenario_P50_MWH"] = np.nan
+    work["_HotStress_P50_MWH"] = _as_num(_optional_series(work, "WeatherScenario_hot_stress_5f_P50_MWH"))
+    work["_Warmer_P50_MWH"] = _as_num(_optional_series(work, "WeatherScenario_warmer_P50_MWH"))
+
+    analog_count = 0
+    analog_mean = np.nan
+    analog_p90 = np.nan
+    analog_max = np.nan
+    if backtest_df is not None and isinstance(backtest_df, pd.DataFrame) and not backtest_df.empty:
+        bt = prep_backtest(backtest_df)
+        if not bt.empty and "Actual_MWH" in bt.columns:
+            bt_hour = _as_num(bt.get("Hour", pd.Series(np.nan, index=bt.index))).astype("Int64")
+            bt_temp = _as_num(bt.get("Temperature_DailyMax", pd.Series(np.nan, index=bt.index)))
+            analog_values = _as_num(bt.loc[bt_temp.ge(analog_min_daily_max) & bt_hour.isin(peak_hours), "Actual_MWH"]).dropna()
+            analog_count = int(len(analog_values))
+            if analog_count:
+                analog_mean = float(analog_values.mean())
+                analog_p90 = float(analog_values.quantile(0.90))
+                analog_max = float(analog_values.max())
+
+    rows: list[dict[str, Any]] = []
+    for date, g in work.sort_values("_DT").groupby("_Date", dropna=False):
+        g = g.dropna(subset=["_PointForecast_MWH"])
+        if g.empty:
+            continue
+        peak_idx = g["_PointForecast_MWH"].idxmax()
+        peak = g.loc[peak_idx]
+        peak_window = g.loc[g["_Hour"].isin(peak_hours)].copy()
+        if peak_window.empty:
+            peak_window = g
+
+        max_gap_series = (_as_num(peak_window["_MaxScenario_P50_MWH"]) - _as_num(peak_window["_PointForecast_MWH"]))
+        hot_gap_series = (_as_num(peak_window["_HotStress_P50_MWH"]) - _as_num(peak_window["_PointForecast_MWH"]))
+        warmer_gap_series = (_as_num(peak_window["_Warmer_P50_MWH"]) - _as_num(peak_window["_PointForecast_MWH"]))
+
+        max_gap_idx = max_gap_series.idxmax() if max_gap_series.notna().any() else peak_idx
+        hot_gap_idx = hot_gap_series.idxmax() if hot_gap_series.notna().any() else peak_idx
+        max_gap_row = peak_window.loc[max_gap_idx]
+        hot_gap_row = peak_window.loc[hot_gap_idx]
+
+        daily_peak_hot_gap = float(peak.get("_HotStress_P50_MWH", np.nan) - peak["_PointForecast_MWH"]) if pd.notna(peak.get("_HotStress_P50_MWH", np.nan)) else np.nan
+        daily_peak_warmer_gap = float(peak.get("_Warmer_P50_MWH", np.nan) - peak["_PointForecast_MWH"]) if pd.notna(peak.get("_Warmer_P50_MWH", np.nan)) else np.nan
+        daily_peak_max_gap = float(peak.get("_MaxScenario_P50_MWH", np.nan) - peak["_PointForecast_MWH"]) if pd.notna(peak.get("_MaxScenario_P50_MWH", np.nan)) else np.nan
+
+        rows.append({
+            "Date": date,
+            "Forecast_Day": float(peak.get("_Forecast_Day", np.nan)),
+            "PointForecastColumn": point_col,
+            "Forecast_Peak_DT": peak.get("_DT_Label"),
+            "Forecast_Peak_Hour": int(peak["_Hour"]),
+            "Forecast_Peak_MWH": float(peak["_PointForecast_MWH"]),
+            "Temperature_At_Forecast_Peak_F": float(peak.get("_Temperature_F", np.nan)) if pd.notna(peak.get("_Temperature_F", np.nan)) else np.nan,
+            "Temperature_DailyMax_F": float(peak_window["_DailyMaxTemp_F"].max(skipna=True)) if peak_window["_DailyMaxTemp_F"].notna().any() else np.nan,
+            "Peak_In_Configured_Window": bool(int(peak["_Hour"]) in set(peak_hours)),
+            "DailyPeak_WarmerScenario_Gap_MWH": daily_peak_warmer_gap,
+            "DailyPeak_HotStressScenario_Gap_MWH": daily_peak_hot_gap,
+            "DailyPeak_MaxScenario_Gap_MWH": daily_peak_max_gap,
+            "MaxPeakWindowScenarioGap_DT": max_gap_row.get("_DT_Label"),
+            "MaxPeakWindowScenarioGap_Hour": int(max_gap_row["_Hour"]),
+            "MaxPeakWindowScenarioGap_MWH": float(max_gap_series.loc[max_gap_idx]) if max_gap_series.notna().any() else np.nan,
+            "MaxPeakWindowScenarioGap_Point_MWH": float(max_gap_row["_PointForecast_MWH"]),
+            "MaxPeakWindowScenarioGap_Scenario_MWH": float(max_gap_row["_MaxScenario_P50_MWH"]) if pd.notna(max_gap_row.get("_MaxScenario_P50_MWH", np.nan)) else np.nan,
+            "MaxPeakWindowHotStressGap_DT": hot_gap_row.get("_DT_Label"),
+            "MaxPeakWindowHotStressGap_Hour": int(hot_gap_row["_Hour"]),
+            "MaxPeakWindowHotStressGap_MWH": float(hot_gap_series.loc[hot_gap_idx]) if hot_gap_series.notna().any() else np.nan,
+            "MaxPeakWindowWarmerGap_MWH": float(warmer_gap_series.max(skipna=True)) if warmer_gap_series.notna().any() else np.nan,
+            "Forecast_High_MWH": float(peak.get("Forecast_High_MWH", np.nan)) if "Forecast_High_MWH" in peak.index and pd.notna(peak.get("Forecast_High_MWH")) else np.nan,
+            "Band_MWH": float(peak.get("Band", np.nan)) if "Band" in peak.index and pd.notna(peak.get("Band")) else np.nan,
+            "Weather_Robustness_Hedge_MWH": float(peak.get("Weather_Robustness_Hedge_MWH", np.nan)) if "Weather_Robustness_Hedge_MWH" in peak.index and pd.notna(peak.get("Weather_Robustness_Hedge_MWH")) else np.nan,
+            "Peak_Risk_Cal_MWH": float(peak.get("Peak_Risk_Cal_MWH", np.nan)) if "Peak_Risk_Cal_MWH" in peak.index and pd.notna(peak.get("Peak_Risk_Cal_MWH")) else np.nan,
+            "Stage_Selector_Reason": peak.get("Stage_Selector_Reason", ""),
+            "Production_Confidence_Label": peak.get("Production_Confidence_Label", ""),
+            "Production_Risk_Code": peak.get("Production_Risk_Code", ""),
+            "Analog_MinDailyMax_F": analog_min_daily_max,
+            "Analog_PeakHours": _hours_label(peak_hours),
+            "Analog_Actual_Count": analog_count,
+            "Analog_Actual_Mean_MWH": analog_mean,
+            "Analog_Actual_P90_MWH": analog_p90,
+            "Analog_Actual_Max_MWH": analog_max,
+            "Forecast_Delta_vs_Analog_P90_MWH": float(peak["_PointForecast_MWH"] - analog_p90) if np.isfinite(analog_p90) else np.nan,
+            "Forecast_Delta_vs_Analog_Max_MWH": float(peak["_PointForecast_MWH"] - analog_max) if np.isfinite(analog_max) else np.nan,
+        })
+
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+
+    out.sort_values(["Date"], inplace=True)
+    out["Temperature_DailyMax_Delta_From_Previous_Day_F"] = _as_num(out["Temperature_DailyMax_F"]).diff()
+    out["Forecast_Peak_Delta_From_Previous_Day_MWH"] = _as_num(out["Forecast_Peak_MWH"]).diff()
+    muted_flags = []
+    muted_reasons = []
+    for _, row in out.iterrows():
+        reasons = []
+        hot_enough = pd.notna(row.get("Temperature_DailyMax_F")) and float(row["Temperature_DailyMax_F"]) >= hot_min_daily_max
+        if hot_enough:
+            if pd.notna(row.get("DailyPeak_MaxScenario_Gap_MWH")) and float(row["DailyPeak_MaxScenario_Gap_MWH"]) >= scenario_gap_warn:
+                reasons.append("daily_peak_below_max_scenario")
+            if pd.notna(row.get("MaxPeakWindowScenarioGap_MWH")) and float(row["MaxPeakWindowScenarioGap_MWH"]) >= scenario_gap_warn:
+                reasons.append("peak_window_below_max_scenario")
+            if (
+                pd.notna(row.get("Temperature_DailyMax_Delta_From_Previous_Day_F"))
+                and pd.notna(row.get("Forecast_Peak_Delta_From_Previous_Day_MWH"))
+                and float(row["Temperature_DailyMax_Delta_From_Previous_Day_F"]) >= hotter_day_min_temp_increase
+                and float(row["Forecast_Peak_Delta_From_Previous_Day_MWH"]) <= -hotter_day_peak_drop_warn
+            ):
+                reasons.append("hotter_day_lower_peak")
+        muted_flags.append(bool(reasons))
+        muted_reasons.append("+".join(reasons) if reasons else "none")
+    out["Muted_Peak_Flag"] = muted_flags
+    out["Muted_Peak_Reasons"] = muted_reasons
+    return out.reset_index(drop=True)
+
+
 def build_diagnostics_bundle(
     backtest_df: pd.DataFrame,
     forecast_display_df: pd.DataFrame | None = None,
@@ -1430,7 +2603,7 @@ def build_diagnostics_bundle(
     top_n = int(diag_cfg.get("top_n", 100))
     min_segment_count = int(diag_cfg.get("min_segment_count", 6))
 
-    bt = prep_backtest(backtest_df)
+    bt = apply_multisummer_heat_analog_shadow(prep_backtest(backtest_df), config=config)
     under, over = build_top_error_tables(bt, n=top_n, forecast_col="Raw_Forecast_MWH", stage=RAW_STAGE)
     under_stage, over_stage = build_top_error_tables_by_stage(bt, n=top_n)
 
@@ -1466,7 +2639,18 @@ def build_diagnostics_bundle(
         "model_component_metrics": build_model_component_metrics(bt),
         "forecast_stage_metrics": build_forecast_stage_metrics(bt),
         "shadow_stage_promotion_audit": build_shadow_stage_promotion_audit(bt),
+        "hot_peak_shadow_candidate_scorecard": build_hot_peak_shadow_candidate_scorecard(bt, min_count=1),
+        "hot_ramp_peak_candidate_scorecard": build_hot_ramp_peak_candidate_scorecard(bt, min_count=1),
+        "heat_persistence_peak_candidate_scorecard": build_heat_persistence_peak_candidate_scorecard(bt, min_count=1),
         "delta_breeze_shape_metrics_by_stage": build_delta_breeze_shape_metrics_by_stage(bt, min_count=min_segment_count),
+        "peak_window_bias_scorecard": build_peak_window_bias_scorecard(bt, forecast_col="Final_Backtest_Forecast_MWH", min_count=5),
+        "peak_window_expansion_scorecard": build_peak_window_expansion_scorecard(bt),
+        "peak_window_14to20_metrics_by_stage": build_peak_window_14to20_metrics_by_stage(bt, min_count=1),
+        "extreme_heat_peak_scorecard": build_extreme_heat_peak_scorecard(bt),
+        "extreme_heat_peak_metrics_by_stage": build_extreme_heat_peak_metrics_by_stage(bt, min_count=1),
+        "daily_peak_he18_20_miss_by_stage": build_daily_peak_window_miss_by_stage(bt),
+        "heat_analog_shadow_metrics": build_heat_analog_shadow_metrics(bt, config=config, min_count=1),
+        "heat_analog_shadow_detail": build_heat_analog_shadow_detail(bt, config=config),
         "daily_peak_shadow_window_scorecard": build_daily_peak_shadow_window_scorecard(bt, config=config),
         "backtest_metrics_by_segment_by_stage": build_backtest_metrics_by_segment_by_stage(bt, min_count=min_segment_count),
         "error_by_hour_by_stage": build_metrics_by_group_by_stage(bt, ["Hour"], min_count=1),
@@ -1490,6 +2674,7 @@ def build_diagnostics_bundle(
         "band_coverage_by_hour": band_by_hour,
         "band_coverage_by_temp_bucket": band_by_temp,
         "band_coverage_detail": band_detail,
+        "future_peak_muting_audit": build_future_peak_muting_audit(forecast_display_df, backtest_df=bt, config=config),
         "recent_residual_profile_debug": build_recent_profile_debug_table(recent_residual_profile),
         "calibration_lookup_debug": build_calibration_debug_table(calibration_lookup_bundle, heat_peak_lookup, warm_ramp_lookup),
         "cloud_solar_shape_lookup_debug": cloud_solar_debug,

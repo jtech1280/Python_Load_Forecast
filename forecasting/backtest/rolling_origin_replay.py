@@ -10,11 +10,23 @@ import pandas as pd
 
 from forecasting.backtest.rolling_backtest import run_rolling_backtest
 from forecasting.diagnostics.forecast_diagnostics import (
+    apply_multisummer_heat_analog_shadow,
     build_daily_peak_miss_by_stage,
     build_daily_peak_shadow_window_scorecard,
+    build_daily_peak_window_miss_by_stage,
     build_delta_breeze_shape_metrics_by_stage,
+    build_extreme_heat_peak_metrics_by_stage,
+    build_extreme_heat_peak_scorecard,
     build_forecast_stage_metrics,
+    build_heat_persistence_peak_candidate_scorecard,
+    build_hot_ramp_peak_candidate_scorecard,
+    build_hot_peak_shadow_candidate_scorecard,
+    build_heat_analog_shadow_detail,
+    build_heat_analog_shadow_metrics,
     build_metrics_by_group_by_stage,
+    build_peak_window_bias_scorecard,
+    build_peak_window_14to20_metrics_by_stage,
+    build_peak_window_expansion_scorecard,
     metrics_summary,
     prep_backtest,
 )
@@ -45,6 +57,14 @@ from forecasting.forecast.daily_peak_shadow_model import (
     apply_daily_peak_shadow_model,
     daily_peak_shadow_summary,
 )
+from forecasting.forecast.hot_ramp_peak_capture import (
+    HEAT_PERSISTENCE_PEAK_COLUMNS,
+    HOT_RAMP_PEAK_COLUMNS,
+    apply_heat_persistence_peak_capture,
+    apply_hot_ramp_peak_capture,
+    heat_persistence_peak_capture_summary,
+    hot_ramp_peak_capture_summary,
+)
 from forecasting.forecast.recursive_engine import recursive_forecast
 from forecasting.data.weather_loader import fetch_previous_run_weather
 from forecasting.features.feature_builder import build_forecast_frame
@@ -57,6 +77,50 @@ from forecasting.model.trainers import train_tree_models
 CONTEXT_COLS = [
     "DT", "MWH", "Season", "Month", "Hour", "HourGroup", "DOW", "IsWeekend", "IsHoliday",
     "IsLikelySystemPeakHour", "Temperature", "Temperature_DailyMax", "DailyMaxTempBin",
+    "IsPeakWindow14to18", "IsPeakWindow16to18", "IsHotPeakWindow16to20",
+    "ClearHotPeakWindow16to20", "ClearHotPeakWindow16to18",
+    "OvercastHotPeakWindow16to20", "CloudCover_x_PeakWindow14to18",
+    "CloudCover_x_PeakWindow16to18", "CloudCover_x_HotPeakWindow16to20",
+    "ClearPeakWindow14to18", "OvercastPeakWindow14to18",
+    "ClearPeakWindow16to18", "OvercastPeakWindow16to18",
+    "PeakWindowDailyMaxBelow75", "PeakWindowDailyMax75to85", "PeakWindowDailyMax85to90",
+    "ClearPeakDailyMaxBelow75", "ClearPeakDailyMax75to85", "ClearPeakDailyMax85to90",
+    "OvercastPeakDailyMaxBelow75", "OvercastPeakDailyMax75to85", "OvercastPeakDailyMax85to90",
+    "PeakHE16to18DailyMaxBelow75", "OvercastPeakHE16to18DailyMaxBelow75",
+    "OvercastCoolPeakWindow16to18", "OvercastPeakHE16to18DailyMax90to92_5",
+    "ClearPeakHE16to18DailyMax85to90", "ClearPeakHE16to18DailyMax95to98",
+    "ClearPeakHE16to18DailyMax98to100", "ClearPeakHE16to18DailyMax100to105",
+    "ClearPeakHE16to18DailyMax105Plus",
+    "HotPeakDailyMax90to92_5", "HotPeakDailyMax92_5to95", "HotPeakDailyMax95to98",
+    "HotPeakDailyMax98to100", "HotPeakDailyMax100to105", "HotPeakDailyMax105Plus",
+    "ClearHotPeakDailyMax90to92_5", "ClearHotPeakDailyMax92_5to95",
+    "ClearHotPeakDailyMax95to98", "ClearHotPeakDailyMax98to100", "ClearHotPeakDailyMax100to105",
+    "ClearHotPeakDailyMax105Plus",
+    "OvercastHotPeakDailyMax90to92_5", "OvercastHotPeakDailyMax92_5to95",
+    "OvercastHotPeakDailyMax95to98", "OvercastHotPeakDailyMax98to100",
+    "OvercastHotPeakDailyMax100to105", "OvercastHotPeakDailyMax105Plus",
+    "ClearHotPeak_x_DailyMaxExcess90", "ClearHotPeak_x_DailyMaxExcess95",
+    "ClearHotPeak_x_CDD", "OvercastHotPeak_x_DailyMaxExcess90",
+    "OvercastHotPeak_x_DailyMaxExcess95", "OvercastHotPeak_x_CDD",
+    "Month_x_HotPeak", "MonthSin_x_HotPeak", "MonthCos_x_HotPeak",
+    "Month_x_OvercastPeakWindow14to18", "MonthSin_x_OvercastPeakWindow14to18",
+    "MonthCos_x_OvercastPeakWindow14to18",
+    "Month_x_OvercastPeakHE16to18DailyMaxBelow75",
+    "Month_x_OvercastPeakHE16to18DailyMax90to92_5",
+    "Month_x_ClearPeakHE16to18DailyMax85to90",
+    "Month_x_ClearPeakHE16to18DailyMax95to98",
+    "Month_x_ClearPeakHE16to18DailyMax98to100",
+    "Month_x_ClearPeakHE16to18DailyMax100to105",
+    "Month_x_ClearPeakHE16to18DailyMax105Plus",
+    "Month_x_ClearHotPeak", "MonthSin_x_ClearHotPeak", "MonthCos_x_ClearHotPeak",
+    "Month_x_OvercastHotPeak", "MonthSin_x_OvercastHotPeak", "MonthCos_x_OvercastHotPeak",
+    "ClearHotPeak_x_HE16", "ClearHotPeak_x_HE17",
+    "ClearHotPeak_x_HE18", "ClearHotPeak_x_HE19", "ClearHotPeak_x_HE20",
+    "PriorDay_DailyMaxTemp", "PriorDay_DailyMinTemp", "DailyMaxTemp_Ramp_1Day", "DailyMinTemp_Ramp_1Day",
+    "DailyMaxTemp_2DayMean", "DailyMaxTemp_3DayMean", "DailyMinTemp_2DayMean", "DailyMinTemp_3DayMean",
+    "ConsecutiveHotDays90", "ConsecutiveVeryHotDays95", "ConsecutiveExtremeHotDays100",
+    "HeatPersistenceStress90", "HeatPersistenceStress95", "DailyMax3DayMean_x_PeakHour",
+    "OvernightHeatStress", "OvernightHeatStress_x_PeakHour",
     "BTM_Solar_Proxy_MW", "BTM_Solar_Loss_From_ClearSky_MW", "Midday_Overcast_Solar_Loss_MW",
     "ClearSky_Index", "CloudCover_Norm", "Humidity_Norm", "WindSpeed_Mph", "WindDirection_Deg",
     "WindDirection_Available_Flag", "Westerly_Flow_Mph", "Westerly_Flow_Flag",
@@ -79,6 +143,22 @@ PRED_COLS = [
     "MWH_Lag24", "MWH_SameHour7DayMean",
     "Load_Decay_1Hr_MWH", "Load_Decay_2Hr_MWH",
     "Lag1_Minus_SameHourYesterday_MWH", "Lag1_Minus_SameHour7DayMean_MWH",
+    "Lag24_Minus_SameHour7DayMean_MWH",
+    "PeakWindow_Lag1_Minus_SameHour7DayMean_MWH",
+    "PeakWindow_Lag24_Minus_SameHour7DayMean_MWH",
+    "PeakWindow16to18_Lag1_Minus_SameHour7DayMean_MWH",
+    "PeakWindow16to18_Lag24_Minus_SameHour7DayMean_MWH",
+    "HotPeak_Lag1_Minus_SameHourYesterday_MWH",
+    "HotPeak_Lag1_Minus_SameHour7DayMean_MWH",
+    "HotPeak_Lag24_Minus_SameHour7DayMean_MWH",
+    "ClearHotPeak_Lag1_Minus_SameHourYesterday_MWH",
+    "ClearHotPeak_Lag1_Minus_SameHour7DayMean_MWH",
+    "ClearHotPeak_Lag24_Minus_SameHour7DayMean_MWH",
+    "ClearPeak16to18_Lag24_Minus_SameHour7DayMean_MWH",
+    "OvercastPeak16to18_Lag24_Minus_SameHour7DayMean_MWH",
+    "ClearHotPeak16to18_Lag24_Minus_SameHour7DayMean_MWH",
+    "OvercastCoolPeak16to18_Lag1_Minus_SameHour7DayMean_MWH",
+    "OvercastCoolPeak16to18_Lag24_Minus_SameHour7DayMean_MWH",
     "PostPeak_LoadDecay_1Hr_MWH", "PostPeak_LoadDecay_2Hr_MWH",
     "PostPeak_LoadDecay_VsSameHourYesterday_MWH", "PostPeak_LoadDecay_VsSameHour7DayMean_MWH",
     "ClearHotEvening_LoadDecay_Vs7Day_MWH", "DeltaBreeze_PostPeak_LoadDecay_Signal",
@@ -89,6 +169,45 @@ WEATHER_REALISM_PREFIX_COLS = [
     "Raw_Forecast_MWH", "XGB_Pred_MWH", "LGB_Pred_MWH", "CatBoost_Pred_MWH",
     "Prophet_Pred_MWH", "Residual_MWH", "Final_Backtest_Forecast_MWH", "Final_Residual_MWH",
     "Final_AbsError_MWH", "Final_APE", "Temperature", "Temperature_DailyMax",
+    "IsPeakWindow14to18", "IsPeakWindow16to18", "IsHotPeakWindow16to20",
+    "ClearHotPeakWindow16to20", "ClearHotPeakWindow16to18",
+    "OvercastHotPeakWindow16to20", "CloudCover_x_PeakWindow14to18",
+    "CloudCover_x_PeakWindow16to18", "CloudCover_x_HotPeakWindow16to20",
+    "ClearPeakWindow14to18", "OvercastPeakWindow14to18",
+    "ClearPeakWindow16to18", "OvercastPeakWindow16to18",
+    "PeakWindowDailyMaxBelow75", "PeakWindowDailyMax75to85", "PeakWindowDailyMax85to90",
+    "ClearPeakDailyMaxBelow75", "ClearPeakDailyMax75to85", "ClearPeakDailyMax85to90",
+    "OvercastPeakDailyMaxBelow75", "OvercastPeakDailyMax75to85", "OvercastPeakDailyMax85to90",
+    "PeakHE16to18DailyMaxBelow75", "OvercastPeakHE16to18DailyMaxBelow75",
+    "OvercastCoolPeakWindow16to18", "OvercastPeakHE16to18DailyMax90to92_5",
+    "ClearPeakHE16to18DailyMax85to90", "ClearPeakHE16to18DailyMax95to98",
+    "ClearPeakHE16to18DailyMax98to100", "ClearPeakHE16to18DailyMax100to105",
+    "ClearPeakHE16to18DailyMax105Plus",
+    "HotPeakDailyMax90to92_5", "HotPeakDailyMax92_5to95", "HotPeakDailyMax95to98",
+    "HotPeakDailyMax98to100", "HotPeakDailyMax100to105", "HotPeakDailyMax105Plus",
+    "ClearHotPeakDailyMax90to92_5", "ClearHotPeakDailyMax92_5to95",
+    "ClearHotPeakDailyMax95to98", "ClearHotPeakDailyMax98to100", "ClearHotPeakDailyMax100to105",
+    "ClearHotPeakDailyMax105Plus",
+    "OvercastHotPeakDailyMax90to92_5", "OvercastHotPeakDailyMax92_5to95",
+    "OvercastHotPeakDailyMax95to98", "OvercastHotPeakDailyMax98to100",
+    "OvercastHotPeakDailyMax100to105", "OvercastHotPeakDailyMax105Plus",
+    "ClearHotPeak_x_DailyMaxExcess90", "ClearHotPeak_x_DailyMaxExcess95",
+    "ClearHotPeak_x_CDD", "OvercastHotPeak_x_DailyMaxExcess90",
+    "OvercastHotPeak_x_DailyMaxExcess95", "OvercastHotPeak_x_CDD",
+    "Month_x_HotPeak", "MonthSin_x_HotPeak", "MonthCos_x_HotPeak",
+    "Month_x_OvercastPeakWindow14to18", "MonthSin_x_OvercastPeakWindow14to18",
+    "MonthCos_x_OvercastPeakWindow14to18",
+    "Month_x_OvercastPeakHE16to18DailyMaxBelow75",
+    "Month_x_OvercastPeakHE16to18DailyMax90to92_5",
+    "Month_x_ClearPeakHE16to18DailyMax85to90",
+    "Month_x_ClearPeakHE16to18DailyMax95to98",
+    "Month_x_ClearPeakHE16to18DailyMax98to100",
+    "Month_x_ClearPeakHE16to18DailyMax100to105",
+    "Month_x_ClearPeakHE16to18DailyMax105Plus",
+    "Month_x_ClearHotPeak", "MonthSin_x_ClearHotPeak", "MonthCos_x_ClearHotPeak",
+    "Month_x_OvercastHotPeak", "MonthSin_x_OvercastHotPeak", "MonthCos_x_OvercastHotPeak",
+    "ClearHotPeak_x_HE16", "ClearHotPeak_x_HE17",
+    "ClearHotPeak_x_HE18", "ClearHotPeak_x_HE19", "ClearHotPeak_x_HE20",
     "CloudCover_Norm", "Humidity_Norm", "WindSpeed_Mph", "WindDirection_Deg",
     "WindDirection_Available_Flag", "Westerly_Flow_Mph", "Westerly_Flow_Flag",
     "WindRamp_1Hr_Mph", "WindRamp_3Hr_Mph", "WindRamp_Next1Hr_Mph", "WindRamp_Next3Hr_Mph",
@@ -104,6 +223,22 @@ WEATHER_REALISM_PREFIX_COLS = [
     "DeltaBreeze_CoolingNoDirection_Signal", "DeltaBreeze_ClearHotEvening_Signal",
     "Load_Decay_1Hr_MWH", "Load_Decay_2Hr_MWH",
     "Lag1_Minus_SameHourYesterday_MWH", "Lag1_Minus_SameHour7DayMean_MWH",
+    "Lag24_Minus_SameHour7DayMean_MWH",
+    "PeakWindow_Lag1_Minus_SameHour7DayMean_MWH",
+    "PeakWindow_Lag24_Minus_SameHour7DayMean_MWH",
+    "PeakWindow16to18_Lag1_Minus_SameHour7DayMean_MWH",
+    "PeakWindow16to18_Lag24_Minus_SameHour7DayMean_MWH",
+    "HotPeak_Lag1_Minus_SameHourYesterday_MWH",
+    "HotPeak_Lag1_Minus_SameHour7DayMean_MWH",
+    "HotPeak_Lag24_Minus_SameHour7DayMean_MWH",
+    "ClearHotPeak_Lag1_Minus_SameHourYesterday_MWH",
+    "ClearHotPeak_Lag1_Minus_SameHour7DayMean_MWH",
+    "ClearHotPeak_Lag24_Minus_SameHour7DayMean_MWH",
+    "ClearPeak16to18_Lag24_Minus_SameHour7DayMean_MWH",
+    "OvercastPeak16to18_Lag24_Minus_SameHour7DayMean_MWH",
+    "ClearHotPeak16to18_Lag24_Minus_SameHour7DayMean_MWH",
+    "OvercastCoolPeak16to18_Lag1_Minus_SameHour7DayMean_MWH",
+    "OvercastCoolPeak16to18_Lag24_Minus_SameHour7DayMean_MWH",
     "PostPeak_LoadDecay_1Hr_MWH", "PostPeak_LoadDecay_2Hr_MWH",
     "PostPeak_LoadDecay_VsSameHourYesterday_MWH", "PostPeak_LoadDecay_VsSameHour7DayMean_MWH",
     "ClearHotEvening_LoadDecay_Vs7Day_MWH", "DeltaBreeze_PostPeak_LoadDecay_Signal",
@@ -138,6 +273,20 @@ WEATHER_REALISM_PREFIX_COLS = [
     "Auto_Residual_Full_Shadow_Residual_MWH",
     "Auto_Residual_Full_Shadow_AbsError_MWH",
     "Auto_Residual_Full_Shadow_Delta_AbsError_MWH",
+    "Auto_Residual_Structural_HotPeak_Correction_MWH",
+    "Auto_Residual_Structural_HotPeak_Adjusted_Forecast_MWH",
+    "Auto_Residual_Structural_HotPeak_Correction_Applied_Flag",
+    "Auto_Residual_Structural_HotPeak_Source",
+    "Auto_Residual_Structural_HotPeak_Residual_MWH",
+    "Auto_Residual_Structural_HotPeak_AbsError_MWH",
+    "Auto_Residual_Structural_HotPeak_Delta_AbsError_MWH",
+    "Auto_Residual_Broad_HotPeak_Shadow_Correction_MWH",
+    "Auto_Residual_Broad_HotPeak_Shadow_Adjusted_Forecast_MWH",
+    "Auto_Residual_Broad_HotPeak_Shadow_Correction_Applied_Flag",
+    "Auto_Residual_Broad_HotPeak_Shadow_Source",
+    "Auto_Residual_Broad_HotPeak_Shadow_Residual_MWH",
+    "Auto_Residual_Broad_HotPeak_Shadow_AbsError_MWH",
+    "Auto_Residual_Broad_HotPeak_Shadow_Delta_AbsError_MWH",
     "Daily_Peak_Model_Version", "Daily_Peak_Shadow_Mode",
     "Daily_Peak_Base_Forecast_MWH", "Daily_Peak_Correction_MWH",
     "Daily_Peak_Shadow_Adjusted_Forecast_MWH", "Daily_Peak_Correction_Applied_Flag",
@@ -147,6 +296,8 @@ WEATHER_REALISM_PREFIX_COLS = [
     "Daily_Peak_Predicted_PeakHour", "Daily_Peak_Timing_Shift_Hours",
     "Daily_Peak_Residual_MWH", "Daily_Peak_AbsError_MWH",
     "Daily_Peak_Delta_AbsError_MWH",
+    *HOT_RAMP_PEAK_COLUMNS,
+    *HEAT_PERSISTENCE_PEAK_COLUMNS,
 ]
 
 
@@ -895,6 +1046,22 @@ def _run_single_origin_replay(args: tuple) -> tuple[pd.DataFrame | None, list[di
         also_update_cols=("Stage_Selected_Forecast_MWH",),
         evaluation_mode="origin_available_shadow",
     )
+    corrected = apply_hot_ramp_peak_capture(
+        corrected,
+        artifacts.get("hot_ramp_peak_capture_artifact"),
+        config,
+        forecast_col="Final_Backtest_Forecast_MWH",
+        also_update_cols=("Stage_Selected_Forecast_MWH",),
+        evaluation_mode="origin_available_shadow",
+    )
+    corrected = apply_heat_persistence_peak_capture(
+        corrected,
+        artifacts.get("heat_persistence_peak_capture_artifact"),
+        config,
+        forecast_col="Final_Backtest_Forecast_MWH",
+        also_update_cols=("Stage_Selected_Forecast_MWH",),
+        evaluation_mode="origin_available_shadow",
+    )
     if not raw_weather_realism.empty:
         corrected_weather_realism = apply_origin_available_correction_chain(raw_weather_realism, config, artifacts)
         # V12.9: apply the same weather-uncertainty peak hedge the production pipeline applies.
@@ -935,6 +1102,20 @@ def _run_single_origin_replay(args: tuple) -> tuple[pd.DataFrame | None, list[di
         corrected_weather_realism = apply_daily_peak_shadow_model(
             corrected_weather_realism,
             artifacts.get("daily_peak_shadow_artifact"),
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+            evaluation_mode="weather_realism_origin_available_shadow",
+        )
+        corrected_weather_realism = apply_hot_ramp_peak_capture(
+            corrected_weather_realism,
+            artifacts.get("hot_ramp_peak_capture_artifact"),
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
+            evaluation_mode="weather_realism_origin_available_shadow",
+        )
+        corrected_weather_realism = apply_heat_persistence_peak_capture(
+            corrected_weather_realism,
+            artifacts.get("heat_persistence_peak_capture_artifact"),
             config,
             forecast_col="Final_Backtest_Forecast_MWH",
             evaluation_mode="weather_realism_origin_available_shadow",
@@ -1183,6 +1364,20 @@ def _june_hot_origin_diagnostics(bt: pd.DataFrame) -> pd.DataFrame:
         "Auto_Residual_Full_Shadow_Residual_MWH",
         "Auto_Residual_Full_Shadow_AbsError_MWH",
         "Auto_Residual_Full_Shadow_Delta_AbsError_MWH",
+        "Auto_Residual_Structural_HotPeak_Correction_MWH",
+        "Auto_Residual_Structural_HotPeak_Adjusted_Forecast_MWH",
+        "Auto_Residual_Structural_HotPeak_Correction_Applied_Flag",
+        "Auto_Residual_Structural_HotPeak_Source",
+        "Auto_Residual_Structural_HotPeak_Residual_MWH",
+        "Auto_Residual_Structural_HotPeak_AbsError_MWH",
+        "Auto_Residual_Structural_HotPeak_Delta_AbsError_MWH",
+        "Auto_Residual_Broad_HotPeak_Shadow_Correction_MWH",
+        "Auto_Residual_Broad_HotPeak_Shadow_Adjusted_Forecast_MWH",
+        "Auto_Residual_Broad_HotPeak_Shadow_Correction_Applied_Flag",
+        "Auto_Residual_Broad_HotPeak_Shadow_Source",
+        "Auto_Residual_Broad_HotPeak_Shadow_Residual_MWH",
+        "Auto_Residual_Broad_HotPeak_Shadow_AbsError_MWH",
+        "Auto_Residual_Broad_HotPeak_Shadow_Delta_AbsError_MWH",
         "Daily_Peak_Model_Version", "Daily_Peak_Shadow_Mode",
         "Daily_Peak_Base_Forecast_MWH", "Daily_Peak_Correction_MWH",
         "Daily_Peak_Shadow_Adjusted_Forecast_MWH", "Daily_Peak_Correction_Applied_Flag",
@@ -1192,6 +1387,8 @@ def _june_hot_origin_diagnostics(bt: pd.DataFrame) -> pd.DataFrame:
         "Daily_Peak_Predicted_PeakHour", "Daily_Peak_Timing_Shift_Hours",
         "Daily_Peak_Residual_MWH", "Daily_Peak_AbsError_MWH",
         "Daily_Peak_Delta_AbsError_MWH",
+        *HOT_RAMP_PEAK_COLUMNS,
+        *HEAT_PERSISTENCE_PEAK_COLUMNS,
         "Raw_Residual_MWH", "XGB_Residual_MWH", "LGB_Residual_MWH", "CatBoost_Residual_MWH",
         "Stage_Selected_Residual_MWH", "Pre_Focused_Guard_Residual_MWH",
         "Post_Focused_Guard_Residual_MWH", "Final_Residual_MWH", "Final_AbsError_MWH",
@@ -1274,17 +1471,99 @@ def _scorecard_by_values(df: pd.DataFrame, key: str, prefix: str) -> list[pd.Dat
     return frames
 
 
+def _dailymax_ramp_1day(bt: pd.DataFrame, daily_max_temp: pd.Series) -> pd.Series:
+    if "DailyMaxTemp_Ramp_1Day" in bt.columns:
+        ramp = pd.to_numeric(bt["DailyMaxTemp_Ramp_1Day"], errors="coerce")
+        if ramp.notna().any():
+            return ramp
+    if "PriorDay_DailyMaxTemp" in bt.columns:
+        prior = pd.to_numeric(bt["PriorDay_DailyMaxTemp"], errors="coerce")
+        ramp = daily_max_temp - prior
+        if ramp.notna().any():
+            return ramp
+    if "Date" not in bt.columns:
+        return pd.Series(np.nan, index=bt.index)
+    daily = (
+        pd.DataFrame({"Date": bt["Date"].astype(str), "DailyMax": daily_max_temp}, index=bt.index)
+        .groupby("Date", dropna=False)["DailyMax"]
+        .max()
+        .reset_index()
+    )
+    daily["_DateDT"] = pd.to_datetime(daily["Date"], errors="coerce")
+    daily = daily.sort_values("_DateDT")
+    daily["_Ramp"] = daily["DailyMax"].diff()
+    return bt["Date"].astype(str).map(daily.set_index("Date")["_Ramp"]).reindex(bt.index).astype(float)
+
+
+def _consecutive_extreme_days100(bt: pd.DataFrame, daily_max_temp: pd.Series) -> pd.Series:
+    if "ConsecutiveExtremeHotDays100" in bt.columns:
+        consecutive = pd.to_numeric(bt["ConsecutiveExtremeHotDays100"], errors="coerce")
+        if consecutive.notna().any():
+            return consecutive
+    if "Date" not in bt.columns:
+        return pd.Series(np.nan, index=bt.index)
+
+    source = pd.DataFrame({"Date": bt["Date"].astype(str), "DailyMax": daily_max_temp}, index=bt.index)
+    group_cols = ["Date"]
+    if "Replay_Origin_ID" in bt.columns:
+        source["Replay_Origin_ID"] = bt["Replay_Origin_ID"].astype(str)
+        group_cols = ["Replay_Origin_ID", "Date"]
+
+    daily = source.groupby(group_cols, dropna=False)["DailyMax"].max().reset_index()
+    daily["_DateDT"] = pd.to_datetime(daily["Date"], errors="coerce")
+    daily = daily.sort_values((["Replay_Origin_ID"] if "Replay_Origin_ID" in daily.columns else []) + ["_DateDT"])
+
+    if "Replay_Origin_ID" in daily.columns:
+        counts = []
+        for _, group in daily.groupby("Replay_Origin_ID", dropna=False, sort=False):
+            running = 0
+            for value in pd.to_numeric(group["DailyMax"], errors="coerce"):
+                running = running + 1 if pd.notna(value) and float(value) >= 100.0 else 0
+                counts.append(running)
+        daily["_ConsecutiveExtremeHotDays100"] = counts
+        values = pd.Series(
+            daily["_ConsecutiveExtremeHotDays100"].to_numpy(),
+            index=pd.MultiIndex.from_frame(daily[["Replay_Origin_ID", "Date"]]),
+        )
+        lookup_key = pd.MultiIndex.from_arrays([source["Replay_Origin_ID"], source["Date"]])
+        return pd.Series(values.reindex(lookup_key).to_numpy(), index=bt.index, dtype=float)
+
+    running = 0
+    counts = []
+    for value in pd.to_numeric(daily["DailyMax"], errors="coerce"):
+        running = running + 1 if pd.notna(value) and float(value) >= 100.0 else 0
+        counts.append(running)
+    daily["_ConsecutiveExtremeHotDays100"] = counts
+    return bt["Date"].astype(str).map(daily.set_index("Date")["_ConsecutiveExtremeHotDays100"]).reindex(bt.index).astype(float)
+
+
 def _event_slices(bt: pd.DataFrame) -> dict[str, pd.DataFrame]:
     daily_max_temp = (
         pd.to_numeric(bt["Temperature_DailyMax"], errors="coerce")
         if "Temperature_DailyMax" in bt.columns
         else pd.Series(np.nan, index=bt.index)
     )
+    dailymax_ramp_1day = _dailymax_ramp_1day(bt, daily_max_temp)
+    consecutive_extreme = _consecutive_extreme_days100(bt, daily_max_temp)
     hour = pd.to_numeric(bt.get("Hour"), errors="coerce")
     forecast_day = pd.to_numeric(bt.get("Forecast_Day"), errors="coerce")
     return {
         "PeakWindowHours14to18": bt[hour.between(14, 18)].copy(),
+        "PeakWindowHours14to20": bt[hour.between(14, 20)].copy(),
+        "LatePeakHours19to20": bt[hour.between(19, 20)].copy(),
+        "HE18to20CodeHours17to19": bt[hour.between(17, 19)].copy(),
         "HotPeakDailyMax90Plus": bt[bt["HourGroup"].eq("Peak") & daily_max_temp.ge(90.0)].copy(),
+        "HotRampPeak100PlusRamp2HE16to20": bt[
+            hour.between(16, 20)
+            & daily_max_temp.ge(100.0)
+            & dailymax_ramp_1day.ge(2.0)
+        ].copy(),
+        "HeatPersistencePeak100PlusConsec3HE16to20": bt[
+            hour.between(16, 20)
+            & daily_max_temp.ge(100.0)
+            & consecutive_extreme.ge(3.0)
+        ].copy(),
+        "ExtremeHeat105PlusPeakWindowHours14to20": bt[hour.between(14, 20) & daily_max_temp.ge(105.0)].copy(),
         "ShoulderSeasonHeatTransition": bt[
             bt["Season"].isin(["Spring", "Fall"])
             & hour.between(12, 22)
@@ -1310,7 +1589,13 @@ def _seasonal_scorecard(bt: pd.DataFrame, event_slices: dict[str, pd.DataFrame])
     ]
     slice_values = {
         "PeakWindowHours14to18": "peak_window",
+        "PeakWindowHours14to20": "peak_window_14to20_candidate",
+        "LatePeakHours19to20": "late_peak_19to20",
+        "HE18to20CodeHours17to19": "he18to20_code17to19",
         "HotPeakDailyMax90Plus": "hot_peak",
+        "HotRampPeak100PlusRamp2HE16to20": "hot_ramp_peak_100f_ramp2_he16to20",
+        "HeatPersistencePeak100PlusConsec3HE16to20": "heat_persistence_peak_100f_consec3_he16to20",
+        "ExtremeHeat105PlusPeakWindowHours14to20": "extreme_heat_105f_plus_peak",
         "ShoulderSeasonHeatTransition": "shoulder_season_heat_transition",
         "CloudSolarMidday": "cloud_solar_midday",
         "WeekendHours": "weekend",
@@ -1753,10 +2038,15 @@ def build_rolling_origin_replay_bundle(replay_df: pd.DataFrame, config: dict) ->
     excluded_interval_rows = int(_excluded_mask.sum())
     if excluded_interval_rows:
         bt = bt.loc[~_excluded_mask].copy()
+    bt = apply_multisummer_heat_analog_shadow(bt, config=config)
     coverage = _origin_coverage(bt)
     event_slices = _event_slices(bt)
     peak_window = event_slices["PeakWindowHours14to18"]
+    peak_window_14to20 = event_slices["PeakWindowHours14to20"]
+    extreme_heat_peak = event_slices["ExtremeHeat105PlusPeakWindowHours14to20"]
     hot_peak = event_slices["HotPeakDailyMax90Plus"]
+    hot_ramp_peak = event_slices["HotRampPeak100PlusRamp2HE16to20"]
+    heat_persistence_peak = event_slices["HeatPersistencePeak100PlusConsec3HE16to20"]
     shoulder_heat = event_slices["ShoulderSeasonHeatTransition"]
     cloud_solar_midday = event_slices["CloudSolarMidday"]
     weekend = event_slices["WeekendHours"]
@@ -1819,8 +2109,49 @@ def build_rolling_origin_replay_bundle(replay_df: pd.DataFrame, config: dict) ->
         "rolling_origin_replay_peak_window_metrics_by_stage": build_metrics_by_group_by_stage(
             peak_window, ["Replay_Horizon_Bucket", "Hour"], min_count=1,
         ),
+        "rolling_origin_replay_peak_window_bias_scorecard": build_peak_window_bias_scorecard(
+            bt,
+            forecast_col="Final_Backtest_Forecast_MWH",
+            min_count=5,
+        ),
+        "rolling_origin_replay_peak_window_expansion_scorecard": build_peak_window_expansion_scorecard(bt),
+        "rolling_origin_replay_peak_window_14to20_metrics_by_stage": build_peak_window_14to20_metrics_by_stage(
+            peak_window_14to20,
+            min_count=1,
+        ),
+        "rolling_origin_replay_extreme_heat_peak_scorecard": build_extreme_heat_peak_scorecard(bt),
+        "rolling_origin_replay_extreme_heat_peak_metrics_by_stage": build_extreme_heat_peak_metrics_by_stage(
+            extreme_heat_peak,
+            min_count=1,
+        ),
         "rolling_origin_replay_hot_peak_metrics_by_stage": build_metrics_by_group_by_stage(
             hot_peak, ["Replay_Horizon_Bucket", "DailyMaxTempBucket", "Hour"], min_count=1,
+        ),
+        "rolling_origin_replay_hot_peak_candidate_metrics_by_stage": build_metrics_by_group_by_stage(
+            hot_peak, ["Replay_Horizon_Bucket", "Month", "DailyMaxTempBucket", "CloudCoverBucket"], min_count=1,
+        ),
+        "rolling_origin_replay_hot_peak_candidate_scorecard": build_hot_peak_shadow_candidate_scorecard(
+            hot_peak,
+            group_cols=["Replay_Horizon_Bucket", "Month", "DailyMaxTempBucket", "CloudCoverBucket"],
+            min_count=1,
+        ),
+        "rolling_origin_replay_hot_ramp_peak_metrics_by_stage": build_metrics_by_group_by_stage(
+            hot_ramp_peak, ["Replay_Horizon_Bucket", "Month", "DailyMaxTempBucket", "CloudCoverBucket"], min_count=1,
+        ),
+        "rolling_origin_replay_hot_ramp_peak_candidate_scorecard": build_hot_ramp_peak_candidate_scorecard(
+            hot_ramp_peak,
+            group_cols=["Replay_Horizon_Bucket", "Month", "DailyMaxTempBucket", "CloudCoverBucket"],
+            min_count=1,
+        ),
+        "rolling_origin_replay_heat_persistence_peak_metrics_by_stage": build_metrics_by_group_by_stage(
+            heat_persistence_peak,
+            ["Replay_Horizon_Bucket", "Month", "DailyMaxTempBucket", "CloudCoverBucket"],
+            min_count=1,
+        ),
+        "rolling_origin_replay_heat_persistence_peak_candidate_scorecard": build_heat_persistence_peak_candidate_scorecard(
+            heat_persistence_peak,
+            group_cols=["Replay_Horizon_Bucket", "Month", "DailyMaxTempBucket", "CloudCoverBucket"],
+            min_count=1,
         ),
         "rolling_origin_replay_shoulder_heat_metrics_by_stage": build_metrics_by_group_by_stage(
             shoulder_heat, ["Replay_Horizon_Bucket", "Season", "DailyMaxTempBucket", "HourGroup"], min_count=1,
@@ -1840,6 +2171,9 @@ def build_rolling_origin_replay_bundle(replay_df: pd.DataFrame, config: dict) ->
         "rolling_origin_replay_delta_breeze_shape_metrics_by_stage": build_delta_breeze_shape_metrics_by_stage(bt, min_count=1),
         "rolling_origin_replay_daily_peak_shadow_window_scorecard": build_daily_peak_shadow_window_scorecard(bt, config=config),
         "rolling_origin_replay_daily_peak_miss_by_stage": _daily_peak_by_origin(bt),
+        "rolling_origin_replay_daily_peak_he18_20_miss_by_stage": build_daily_peak_window_miss_by_stage(bt),
+        "rolling_origin_replay_heat_analog_shadow_metrics": build_heat_analog_shadow_metrics(bt, config=config, min_count=1),
+        "rolling_origin_replay_heat_analog_shadow_detail": build_heat_analog_shadow_detail(bt, config=config),
         "rolling_origin_replay_focused_guard_rule_audit": build_focused_scorecard_rule_audit(
             bt,
             config,
@@ -1851,6 +2185,16 @@ def build_rolling_origin_replay_bundle(replay_df: pd.DataFrame, config: dict) ->
             config,
         ),
         "daily_peak_shadow_summary": daily_peak_shadow_summary(
+            bt,
+            None,
+            config,
+        ),
+        "hot_ramp_peak_capture_summary": hot_ramp_peak_capture_summary(
+            bt,
+            None,
+            config,
+        ),
+        "heat_persistence_peak_capture_summary": heat_persistence_peak_capture_summary(
             bt,
             None,
             config,

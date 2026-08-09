@@ -279,32 +279,145 @@ def add_weather_features(df: pd.DataFrame) -> pd.DataFrame:
     out["Cooling_Stress"] = out["CDD"] * out["IsLikelySystemPeakHour"]
     out["DailyMax_x_PeakHour"] = out["Temperature_DailyMax"] * out["IsLikelySystemPeakHour"]
     peak_window_14_18 = out["Hour"].between(14, 18).astype(float)
+    peak_window_16_18 = out["Hour"].between(16, 18).astype(float)
     hot_peak_16_20 = (out["Hour"].between(16, 20) & out["Temperature_DailyMax"].ge(90.0)).astype(float)
+    clear_low_cloud = out["CloudCover_Norm"].le(0.10).astype(float)
+    overcast_cloud = out["CloudCover_Norm"].ge(0.60).astype(float)
+    clear_hot_peak_16_20 = hot_peak_16_20 * clear_low_cloud
+    overcast_hot_peak_16_20 = hot_peak_16_20 * overcast_cloud
+    clear_peak_16_18 = peak_window_16_18 * clear_low_cloud
+    overcast_peak_16_18 = peak_window_16_18 * overcast_cloud
+    clear_hot_peak_16_18 = clear_hot_peak_16_20 * peak_window_16_18
     non_business_hot_peak = (
         hot_peak_16_20.eq(1.0)
         & pd.to_numeric(out.get("IsLikelySystemPeakHour", 0), errors="coerce").fillna(0).eq(0)
     ).astype(float)
     daily_max_excess_90 = (out["Temperature_DailyMax"] - 90.0).clip(lower=0.0)
     daily_max_excess_95 = (out["Temperature_DailyMax"] - 95.0).clip(lower=0.0)
+    month = _numeric_series(out, "Month")
+    if month.isna().all():
+        month = pd.to_datetime(out["DT"], errors="coerce").dt.month.astype(float)
+    month_sin = _numeric_series(out, "MonthSin", 0.0).fillna(0.0)
+    month_cos = _numeric_series(out, "MonthCos", 0.0).fillna(0.0)
+
+    daily_max_band_90_92_5 = out["Temperature_DailyMax"].ge(90.0) & out["Temperature_DailyMax"].lt(92.5)
+    daily_max_band_below_75 = out["Temperature_DailyMax"].lt(75.0)
+    daily_max_band_75_85 = out["Temperature_DailyMax"].ge(75.0) & out["Temperature_DailyMax"].lt(85.0)
+    daily_max_band_85_90 = out["Temperature_DailyMax"].ge(85.0) & out["Temperature_DailyMax"].lt(90.0)
+    daily_max_band_92_5_95 = out["Temperature_DailyMax"].ge(92.5) & out["Temperature_DailyMax"].lt(95.0)
+    daily_max_band_95_98 = out["Temperature_DailyMax"].ge(95.0) & out["Temperature_DailyMax"].lt(98.0)
+    daily_max_band_98_100 = out["Temperature_DailyMax"].ge(98.0) & out["Temperature_DailyMax"].lt(100.0)
+    daily_max_band_100_105 = out["Temperature_DailyMax"].ge(100.0) & out["Temperature_DailyMax"].lt(105.0)
+    daily_max_band_105_plus = out["Temperature_DailyMax"].ge(105.0)
 
     # Scorecard-aligned heat interactions. The existing IsLikelySystemPeakHour
     # excludes weekends/holidays and starts at HE16; the production gates score
     # HE14-18 peak windows and HE16-20 hot days regardless of business-day status.
     out["IsPeakWindow14to18"] = peak_window_14_18
+    out["IsPeakWindow16to18"] = peak_window_16_18
     out["IsHotPeakWindow16to20"] = hot_peak_16_20
+    out["ClearHotPeakWindow16to20"] = clear_hot_peak_16_20
+    out["ClearHotPeakWindow16to18"] = clear_hot_peak_16_18
+    out["OvercastHotPeakWindow16to20"] = overcast_hot_peak_16_20
+    out["ClearPeakWindow14to18"] = peak_window_14_18 * clear_low_cloud
+    out["OvercastPeakWindow14to18"] = peak_window_14_18 * overcast_cloud
+    out["ClearPeakWindow16to18"] = clear_peak_16_18
+    out["OvercastPeakWindow16to18"] = overcast_peak_16_18
     out["DailyMaxTempExcess90"] = daily_max_excess_90
     out["DailyMaxTempExcess95"] = daily_max_excess_95
     out["DailyMax_x_PeakWindow14to18"] = out["Temperature_DailyMax"] * peak_window_14_18
+    out["DailyMax_x_PeakWindow16to18"] = out["Temperature_DailyMax"] * peak_window_16_18
     out["CDD_x_PeakWindow14to18"] = out["CDD"] * peak_window_14_18
     out["CDD_x_HotPeakWindow16to20"] = out["CDD"] * hot_peak_16_20
     out["DailyMaxExcess90_x_PeakWindow14to18"] = daily_max_excess_90 * peak_window_14_18
+    out["DailyMaxExcess90_x_PeakWindow16to18"] = daily_max_excess_90 * peak_window_16_18
     out["DailyMaxExcess90_x_HotPeakWindow16to20"] = daily_max_excess_90 * hot_peak_16_20
     out["DailyMaxExcess95_x_HotPeakWindow16to20"] = daily_max_excess_95 * hot_peak_16_20
     out["HeatIndexCDD_x_HotPeakWindow16to20"] = out["HeatIndex_CDD"] * hot_peak_16_20
+    out["CloudCover_x_PeakWindow14to18"] = out["CloudCover_Norm"] * peak_window_14_18
+    out["CloudCover_x_PeakWindow16to18"] = out["CloudCover_Norm"] * peak_window_16_18
+    out["CloudCover_x_HotPeakWindow16to20"] = out["CloudCover_Norm"] * hot_peak_16_20
     out["NonBusinessHotPeakWindow16to20"] = non_business_hot_peak
     out["DailyMaxExcess90_x_NonBusinessHotPeak"] = daily_max_excess_90 * non_business_hot_peak
+    out["PeakWindowDailyMaxBelow75"] = peak_window_14_18 * daily_max_band_below_75.astype(float)
+    out["PeakWindowDailyMax75to85"] = peak_window_14_18 * daily_max_band_75_85.astype(float)
+    out["PeakWindowDailyMax85to90"] = peak_window_14_18 * daily_max_band_85_90.astype(float)
+    out["ClearPeakDailyMaxBelow75"] = out["ClearPeakWindow14to18"] * daily_max_band_below_75.astype(float)
+    out["ClearPeakDailyMax75to85"] = out["ClearPeakWindow14to18"] * daily_max_band_75_85.astype(float)
+    out["ClearPeakDailyMax85to90"] = out["ClearPeakWindow14to18"] * daily_max_band_85_90.astype(float)
+    out["OvercastPeakDailyMaxBelow75"] = out["OvercastPeakWindow14to18"] * daily_max_band_below_75.astype(float)
+    out["OvercastPeakDailyMax75to85"] = out["OvercastPeakWindow14to18"] * daily_max_band_75_85.astype(float)
+    out["OvercastPeakDailyMax85to90"] = out["OvercastPeakWindow14to18"] * daily_max_band_85_90.astype(float)
+    out["PeakHE16to18DailyMaxBelow75"] = peak_window_16_18 * daily_max_band_below_75.astype(float)
+    out["OvercastPeakHE16to18DailyMaxBelow75"] = overcast_peak_16_18 * daily_max_band_below_75.astype(float)
+    out["OvercastCoolPeakWindow16to18"] = out["OvercastPeakHE16to18DailyMaxBelow75"]
+    out["OvercastPeakHE16to18DailyMax90to92_5"] = overcast_peak_16_18 * daily_max_band_90_92_5.astype(float)
+    out["ClearPeakHE16to18DailyMax85to90"] = clear_peak_16_18 * daily_max_band_85_90.astype(float)
+    out["ClearPeakHE16to18DailyMax95to98"] = clear_peak_16_18 * daily_max_band_95_98.astype(float)
+    out["ClearPeakHE16to18DailyMax98to100"] = clear_peak_16_18 * daily_max_band_98_100.astype(float)
+    out["ClearPeakHE16to18DailyMax100to105"] = clear_peak_16_18 * daily_max_band_100_105.astype(float)
+    out["ClearPeakHE16to18DailyMax105Plus"] = clear_peak_16_18 * daily_max_band_105_plus.astype(float)
+    out["HotPeakDailyMax90to92_5"] = hot_peak_16_20 * daily_max_band_90_92_5.astype(float)
+    out["HotPeakDailyMax92_5to95"] = hot_peak_16_20 * daily_max_band_92_5_95.astype(float)
+    out["HotPeakDailyMax95to98"] = hot_peak_16_20 * daily_max_band_95_98.astype(float)
+    out["HotPeakDailyMax98to100"] = hot_peak_16_20 * daily_max_band_98_100.astype(float)
+    out["HotPeakDailyMax100to105"] = hot_peak_16_20 * daily_max_band_100_105.astype(float)
+    out["HotPeakDailyMax105Plus"] = hot_peak_16_20 * daily_max_band_105_plus.astype(float)
+    out["ClearHotPeakDailyMax90to92_5"] = clear_hot_peak_16_20 * daily_max_band_90_92_5.astype(float)
+    out["ClearHotPeakDailyMax92_5to95"] = clear_hot_peak_16_20 * daily_max_band_92_5_95.astype(float)
+    out["ClearHotPeakDailyMax95to98"] = clear_hot_peak_16_20 * daily_max_band_95_98.astype(float)
+    out["ClearHotPeakDailyMax98to100"] = clear_hot_peak_16_20 * daily_max_band_98_100.astype(float)
+    out["ClearHotPeakDailyMax100to105"] = clear_hot_peak_16_20 * daily_max_band_100_105.astype(float)
+    out["ClearHotPeakDailyMax105Plus"] = clear_hot_peak_16_20 * daily_max_band_105_plus.astype(float)
+    out["OvercastHotPeakDailyMax90to92_5"] = overcast_hot_peak_16_20 * daily_max_band_90_92_5.astype(float)
+    out["OvercastHotPeakDailyMax92_5to95"] = overcast_hot_peak_16_20 * daily_max_band_92_5_95.astype(float)
+    out["OvercastHotPeakDailyMax95to98"] = overcast_hot_peak_16_20 * daily_max_band_95_98.astype(float)
+    out["OvercastHotPeakDailyMax98to100"] = overcast_hot_peak_16_20 * daily_max_band_98_100.astype(float)
+    out["OvercastHotPeakDailyMax100to105"] = overcast_hot_peak_16_20 * daily_max_band_100_105.astype(float)
+    out["OvercastHotPeakDailyMax105Plus"] = overcast_hot_peak_16_20 * daily_max_band_105_plus.astype(float)
+    out["ClearHotPeak_x_DailyMaxExcess90"] = clear_hot_peak_16_20 * daily_max_excess_90
+    out["ClearHotPeak_x_DailyMaxExcess95"] = clear_hot_peak_16_20 * daily_max_excess_95
+    out["ClearHotPeak_x_CDD"] = clear_hot_peak_16_20 * out["CDD"]
+    out["OvercastHotPeak_x_DailyMaxExcess90"] = overcast_hot_peak_16_20 * daily_max_excess_90
+    out["OvercastHotPeak_x_DailyMaxExcess95"] = overcast_hot_peak_16_20 * daily_max_excess_95
+    out["OvercastHotPeak_x_CDD"] = overcast_hot_peak_16_20 * out["CDD"]
+    out["Month_x_HotPeak"] = month.fillna(0.0) * hot_peak_16_20
+    out["MonthSin_x_HotPeak"] = month_sin * hot_peak_16_20
+    out["MonthCos_x_HotPeak"] = month_cos * hot_peak_16_20
+    out["Month_x_OvercastPeakWindow14to18"] = month.fillna(0.0) * out["OvercastPeakWindow14to18"]
+    out["MonthSin_x_OvercastPeakWindow14to18"] = month_sin * out["OvercastPeakWindow14to18"]
+    out["MonthCos_x_OvercastPeakWindow14to18"] = month_cos * out["OvercastPeakWindow14to18"]
+    out["Month_x_OvercastPeakHE16to18DailyMaxBelow75"] = (
+        month.fillna(0.0) * out["OvercastPeakHE16to18DailyMaxBelow75"]
+    )
+    out["Month_x_OvercastPeakHE16to18DailyMax90to92_5"] = (
+        month.fillna(0.0) * out["OvercastPeakHE16to18DailyMax90to92_5"]
+    )
+    out["Month_x_ClearPeakHE16to18DailyMax85to90"] = (
+        month.fillna(0.0) * out["ClearPeakHE16to18DailyMax85to90"]
+    )
+    out["Month_x_ClearPeakHE16to18DailyMax95to98"] = (
+        month.fillna(0.0) * out["ClearPeakHE16to18DailyMax95to98"]
+    )
+    out["Month_x_ClearPeakHE16to18DailyMax98to100"] = (
+        month.fillna(0.0) * out["ClearPeakHE16to18DailyMax98to100"]
+    )
+    out["Month_x_ClearPeakHE16to18DailyMax100to105"] = (
+        month.fillna(0.0) * out["ClearPeakHE16to18DailyMax100to105"]
+    )
+    out["Month_x_ClearPeakHE16to18DailyMax105Plus"] = (
+        month.fillna(0.0) * out["ClearPeakHE16to18DailyMax105Plus"]
+    )
+    out["Month_x_ClearHotPeak"] = month.fillna(0.0) * clear_hot_peak_16_20
+    out["MonthSin_x_ClearHotPeak"] = month_sin * clear_hot_peak_16_20
+    out["MonthCos_x_ClearHotPeak"] = month_cos * clear_hot_peak_16_20
+    out["Month_x_OvercastHotPeak"] = month.fillna(0.0) * overcast_hot_peak_16_20
+    out["MonthSin_x_OvercastHotPeak"] = month_sin * overcast_hot_peak_16_20
+    out["MonthCos_x_OvercastHotPeak"] = month_cos * overcast_hot_peak_16_20
     for h in range(14, 21):
         out[f"DailyMaxExcess90_x_HE{h}"] = daily_max_excess_90 * out["Hour"].eq(h).astype(float)
+    for h in range(16, 21):
+        out[f"ClearHotPeak_x_HE{h}"] = clear_hot_peak_16_20 * out["Hour"].eq(h).astype(float)
     # Weather interactions that help capture cloudy/humid/rainy load shape shifts.
     out["Humidity_x_Temp"] = out["Humidity_Norm"] * out["Temperature"]
     out["Wind_x_Temp"] = out["WindSpeed_Mph"] * out["Temperature"]
