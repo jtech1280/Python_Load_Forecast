@@ -54,6 +54,13 @@ DEFAULT_REPLAY_TABLES = {
     "production_readiness_scorecard": "LoadForecastProductionReadinessScorecard",
 }
 
+DEFAULT_CALIBRATION_SEARCH_TABLES = {
+    "calibration_search_summary": "LoadForecastCalibrationSearchSummary",
+    "calibration_search_repeats": "LoadForecastCalibrationSearchRepeat",
+    "calibration_search_trials": "LoadForecastCalibrationSearchTrial",
+    "calibration_search_final_holdout_scorecard": "LoadForecastCalibrationSearchFinalHoldoutScorecard",
+}
+
 DEFAULT_OUTPUT_SQL_CONFIG = {
     "enabled": True,
     "dashboard_read_enabled": False,
@@ -66,6 +73,7 @@ DEFAULT_OUTPUT_SQL_CONFIG = {
     "weather_table": "LoadForecastWeather",
     "forecast_weather_archive_table": "LoadForecastWeatherArchive",
     "replay_tables": DEFAULT_REPLAY_TABLES,
+    "calibration_search_tables": DEFAULT_CALIBRATION_SEARCH_TABLES,
     "chunksize": 1000,
 }
 
@@ -76,11 +84,15 @@ _DATETIME_COLUMNS = {"DT", "ValidTimeUTC", "CapturedAtUTC", "FirstDT", "LastDT"}
 def output_sql_config(config: dict) -> dict:
     cfg = dict(DEFAULT_OUTPUT_SQL_CONFIG)
     cfg["replay_tables"] = dict(DEFAULT_REPLAY_TABLES)
+    cfg["calibration_search_tables"] = dict(DEFAULT_CALIBRATION_SEARCH_TABLES)
     raw = (config.get("output_sql", {}) or {}) if isinstance(config, dict) else {}
     replay_overrides = raw.get("replay_tables") if isinstance(raw, dict) else None
-    cfg.update({k: v for k, v in raw.items() if k != "replay_tables"})
+    calibration_search_overrides = raw.get("calibration_search_tables") if isinstance(raw, dict) else None
+    cfg.update({k: v for k, v in raw.items() if k not in {"replay_tables", "calibration_search_tables"}})
     if isinstance(replay_overrides, dict):
         cfg["replay_tables"].update(replay_overrides)
+    if isinstance(calibration_search_overrides, dict):
+        cfg["calibration_search_tables"].update(calibration_search_overrides)
     return cfg
 
 
@@ -865,6 +877,93 @@ def persist_run_outputs(
             _append_frame(conn, schema, weather_table, prepared_weather, chunksize)
             for name, frame in prepared_replay.items():
                 _append_frame(conn, schema, replay_table_map[name], frame, chunksize)
+    finally:
+        engine.dispose()
+
+    return rid
+
+
+def persist_calibration_search_outputs(
+    config: dict,
+    *,
+    summary: dict,
+    trials_df: pd.DataFrame | None,
+    final_holdout_scorecard: pd.DataFrame | None,
+    source: str = "tune_calibration_optuna",
+    run_id: str | None = None,
+) -> str | None:
+    """Persist a scripts/tune_calibration_optuna.py search run to SQL.
+
+    Uses the same [output_sql] connection, RunID scheme, and auto-create/auto-migrate table
+    logic as persist_run_outputs, but writes to its own table set (output_sql.calibration_
+    search_tables) rather than the forecast/backtest/weather/replay tables -- this never
+    reads or writes production forecast data, only the search tool's own results, so a
+    calibration search run cannot collide with or overwrite a production run's rows.
+    """
+    sql_cfg = output_sql_config(config)
+    if not bool(sql_cfg.get("enabled", False)):
+        return None
+
+    schema = _clean_identifier(sql_cfg.get("schema", "Forecasting"), "schema")
+    run_table = _clean_identifier(sql_cfg.get("run_table", "LoadForecastRun"), "table")
+    table_map = _clean_table_map(sql_cfg.get("calibration_search_tables"))
+    chunksize = int(sql_cfg.get("chunksize") or 1000)
+
+    rid = str(run_id or uuid.uuid4())
+    now = pd.Timestamp.now(tz="UTC").tz_localize(None).to_pydatetime()
+    project_name = str((config.get("project", {}) or {}).get("name") or "")
+
+    repeats = summary.get("repeats") or []
+    summary_row = {k: v for k, v in summary.items() if k != "repeats"}
+
+    frames = {
+        "calibration_search_summary": _one_row_frame_from_dict(summary_row),
+        "calibration_search_repeats": pd.DataFrame(repeats) if repeats else pd.DataFrame(),
+        "calibration_search_trials": trials_df if trials_df is not None else pd.DataFrame(),
+        "calibration_search_final_holdout_scorecard": (
+            final_holdout_scorecard if final_holdout_scorecard is not None else pd.DataFrame()
+        ),
+    }
+    frames = {name: df for name, df in frames.items() if name in table_map and df is not None and not df.empty}
+    content_hash = _frame_hash(trials_df) if trials_df is not None else ""
+
+    engine = _make_sql_engine(sql_cfg)
+    try:
+        with engine.begin() as conn:
+            _ensure_schema(conn, schema)
+            _ensure_run_table(conn, schema, run_table)
+
+            prepared = {name: _prepare_frame_for_sql(df, rid, now) for name, df in frames.items()}
+            for name, frame in prepared.items():
+                if not frame.empty:
+                    _ensure_data_table(conn, schema, table_map[name], frame)
+
+            _insert_run_metadata(
+                conn,
+                schema,
+                run_table,
+                run_id=rid,
+                run_started_at_utc=now,
+                inserted_at_utc=now,
+                project_name=project_name,
+                source=source,
+                forecast_rows=0,
+                backtest_rows=0,
+                weather_rows=0,
+                first_output_dt=None,
+                last_output_dt=None,
+                content_hash=content_hash,
+                metadata={
+                    "calibration_search_tables": {
+                        name: {"table": table_map[name], "rows": int(len(frame))}
+                        for name, frame in prepared.items()
+                        if not frame.empty
+                    }
+                },
+            )
+
+            for name, frame in prepared.items():
+                _append_frame(conn, schema, table_map[name], frame, chunksize)
     finally:
         engine.dispose()
 

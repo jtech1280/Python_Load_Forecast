@@ -38,6 +38,41 @@ class OutputSqlStoreTests(unittest.TestCase):
             "LoadForecastProductionReadinessScorecard",
         )
 
+    def test_calibration_search_tables_default_and_override_merge(self):
+        default_cfg = output_sql_store.output_sql_config({})
+        self.assertEqual(
+            default_cfg["calibration_search_tables"]["calibration_search_summary"],
+            "LoadForecastCalibrationSearchSummary",
+        )
+        self.assertEqual(
+            default_cfg["calibration_search_tables"]["calibration_search_trials"],
+            "LoadForecastCalibrationSearchTrial",
+        )
+
+        overridden_cfg = output_sql_store.output_sql_config(
+            {
+                "output_sql": {
+                    "calibration_search_tables": {
+                        "calibration_search_summary": "CustomCalibrationSummary",
+                    }
+                }
+            }
+        )
+        self.assertEqual(
+            overridden_cfg["calibration_search_tables"]["calibration_search_summary"],
+            "CustomCalibrationSummary",
+        )
+        # Unrelated defaults (repeats/trials/final-holdout table names, and replay_tables)
+        # survive the partial override untouched.
+        self.assertEqual(
+            overridden_cfg["calibration_search_tables"]["calibration_search_trials"],
+            "LoadForecastCalibrationSearchTrial",
+        )
+        self.assertEqual(
+            overridden_cfg["replay_tables"]["rolling_origin_replay_results"],
+            "LoadForecastReplayResult",
+        )
+
     def test_dashboard_read_env_override(self):
         with patch.dict(os.environ, {"DASH_FROM_SQL": "1"}):
             self.assertTrue(output_sql_store.output_sql_dashboard_read_enabled({}))

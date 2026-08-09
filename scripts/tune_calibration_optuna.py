@@ -40,6 +40,18 @@ different random search/holdout splits of a shared origin pool:
     touched by ANY repeat's search or its own per-repeat holdout. The recommended candidate
     is scored against it exactly once, at the end. That score -- not any repeat's search or
     per-repeat-holdout score -- is the number to trust before promoting a config.
+
+NOT wired into your normal production run: this never touches config.yaml, and the recommended
+params are a suggestion, not an applied setting. Nothing here changes production forecast
+behavior until you (or a follow-up tool) copy `recommended_params` into config.yaml's
+`calibration.*` keys yourself.
+
+SQL persistence (--save-sql / --no-save-sql, mirrors forecasting/main.py's flags -- defaults to
+whatever output_sql.enabled resolves to in config.yaml): if enabled, writes the run summary,
+per-repeat results, all trials, and the final-holdout scorecard to their own SQL tables
+(output_sql.calibration_search_tables). These are separate tables from your production
+forecast/backtest/weather/replay output tables -- a search run cannot collide with or overwrite
+a production run's rows.
 """
 
 import argparse
@@ -269,9 +281,8 @@ def run_multi_seed_search(
         df["repeat_index"] = r["repeat_index"]
         df["seed"] = r["seed"]
         trials_frames.append(df)
-    pd.concat(trials_frames, ignore_index=True, sort=False).to_csv(
-        output_dir / "calibration_search_trials.csv", index=False
-    )
+    combined_trials_df = pd.concat(trials_frames, ignore_index=True, sort=False)
+    combined_trials_df.to_csv(output_dir / "calibration_search_trials.csv", index=False)
 
     all_params = [r["best_params"] for r in repeats]
     stability = stability_report(all_params)
@@ -280,6 +291,7 @@ def run_multi_seed_search(
     recommended_config = apply_v125_params(recommended_params, config)
 
     final_holdout_score = None
+    final_scorecard = pd.DataFrame()
     if final_holdout_bundles:
         final_scorecard = scorecard_for(final_holdout_bundles, recommended_config)
         final_holdout_score = scorecard_objective(final_scorecard, objective_weights)
@@ -332,6 +344,19 @@ def run_multi_seed_search(
                 "The recommended config may be overfit -- verify with a fresh replay before promoting it.",
                 flush=True,
             )
+
+    from forecasting.data.output_sql_store import output_sql_enabled, persist_calibration_search_outputs
+
+    if output_sql_enabled(config):
+        sql_run_id = persist_calibration_search_outputs(
+            config,
+            summary=summary,
+            trials_df=combined_trials_df,
+            final_holdout_scorecard=final_scorecard,
+        )
+        if sql_run_id:
+            print(f"Persisted calibration search outputs to SQL Server RunID: {sql_run_id}", flush=True)
+
     return summary
 
 
@@ -361,9 +386,19 @@ def main() -> None:
     )
     parser.add_argument("--output-dir", type=Path, default=Path("forecast_outputs"))
     parser.add_argument("--objective-weights", type=str, default=None, help="JSON dict overriding scorecard_objective's default weights")
+    parser.add_argument(
+        "--save-sql", action="store_true",
+        help="Persist the search summary/repeats/trials/final-holdout-scorecard to SQL Server "
+        "(output_sql.calibration_search_tables) -- separate tables from your production forecast/replay output",
+    )
+    parser.add_argument("--no-save-sql", action="store_true", help="Skip SQL Server persistence for this run")
     args = parser.parse_args()
 
     config = load_forecast_config(args.config)
+    if args.save_sql:
+        config.setdefault("output_sql", {})["enabled"] = True
+    if args.no_save_sql:
+        config.setdefault("output_sql", {})["enabled"] = False
 
     if args.build_cache:
         build_cache(config, args.cache_dir, args.origin_limit)

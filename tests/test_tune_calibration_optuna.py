@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -69,6 +70,8 @@ _DISABLED_STAGES_CONFIG = {
     "daily_peak_shadow_model": {"enabled": False},
     "hot_ramp_peak_capture": {"enabled": False},
     "heat_persistence_peak_capture": {"enabled": False},
+    # output_sql defaults to enabled; tests must not attempt a real SQL Server connection.
+    "output_sql": {"enabled": False},
 }
 
 
@@ -211,6 +214,53 @@ class RunMultiSeedSearchEndToEndTests(unittest.TestCase):
             self.assertEqual(summary["recommended_repeat_index"], 0)
             for stats in summary["parameter_stability"].values():
                 self.assertEqual(stats["range_fraction_of_search_space"], 0.0)
+
+
+@unittest.skipUnless(OPTUNA_AVAILABLE, "optuna not installed")
+class SqlPersistenceWiringTests(unittest.TestCase):
+    """No real SQL Server in this test environment -- these verify the wiring (is it called,
+    with what, and is it skipped when disabled) via a mock, not actual persistence."""
+
+    def _run(self, config: dict, output_dir: Path, cache_dir: Path) -> dict:
+        bundles = [_minimal_bundle(i) for i in range(1, 6)]
+        save_raw_origin_bundles(bundles, cache_dir)
+        return tune_calibration_optuna.run_multi_seed_search(
+            config=config,
+            cache_dir=cache_dir,
+            n_trials=2,
+            n_repeats=2,
+            holdout_fraction=0.25,
+            final_holdout_fraction=0.2,
+            seed=1,
+            output_dir=output_dir,
+            study_name="sql_wiring_study",
+            storage=None,
+            objective_weights=None,
+        )
+
+    def test_persists_to_sql_when_enabled(self):
+        config = dict(_DISABLED_STAGES_CONFIG)
+        config["output_sql"] = {"enabled": True}
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch(
+                "forecasting.data.output_sql_store.persist_calibration_search_outputs",
+                return_value="fake-run-id",
+            ) as mocked:
+                summary = self._run(config, Path(tmp) / "out", Path(tmp) / "cache")
+
+            mocked.assert_called_once()
+            _args, kwargs = mocked.call_args
+            self.assertEqual(kwargs["summary"], summary)
+            self.assertIsInstance(kwargs["trials_df"], pd.DataFrame)
+            self.assertFalse(kwargs["trials_df"].empty)
+            self.assertIsInstance(kwargs["final_holdout_scorecard"], pd.DataFrame)
+
+    def test_skips_sql_when_disabled(self):
+        config = dict(_DISABLED_STAGES_CONFIG)  # output_sql.enabled: False
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("forecasting.data.output_sql_store.persist_calibration_search_outputs") as mocked:
+                self._run(config, Path(tmp) / "out", Path(tmp) / "cache")
+            mocked.assert_not_called()
 
 
 if __name__ == "__main__":
