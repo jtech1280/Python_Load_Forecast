@@ -15,11 +15,15 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 try:
     import optuna  # noqa: F401
+
     OPTUNA_AVAILABLE = True
 except ImportError:
     OPTUNA_AVAILABLE = False
 
-from forecasting.tuning.calibration_search import RawOriginBundle, save_raw_origin_bundles
+from forecasting.tuning.calibration_search import (
+    RawOriginBundle,
+    save_raw_origin_bundles,
+)
 
 if OPTUNA_AVAILABLE:
     tune_calibration_optuna = importlib.import_module("tune_calibration_optuna")
@@ -76,38 +80,66 @@ _DISABLED_STAGES_CONFIG = {
 class SplitBundlesTests(unittest.TestCase):
     def test_split_is_deterministic_and_covers_all_origins(self):
         bundles = [_minimal_bundle(i) for i in range(1, 11)]
-        search1, holdout1 = tune_calibration_optuna.split_bundles(bundles, holdout_fraction=0.3, seed=7)
-        search2, holdout2 = tune_calibration_optuna.split_bundles(bundles, holdout_fraction=0.3, seed=7)
-        self.assertEqual([b.origin_number for b in search1], [b.origin_number for b in search2])
-        self.assertEqual([b.origin_number for b in holdout1], [b.origin_number for b in holdout2])
-        self.assertEqual(set(b.origin_number for b in search1) | set(b.origin_number for b in holdout1), set(range(1, 11)))
-        self.assertEqual(set(b.origin_number for b in search1) & set(b.origin_number for b in holdout1), set())
+        search1, holdout1 = tune_calibration_optuna.split_bundles(
+            bundles, holdout_fraction=0.3, seed=7
+        )
+        search2, holdout2 = tune_calibration_optuna.split_bundles(
+            bundles, holdout_fraction=0.3, seed=7
+        )
+        self.assertEqual(
+            [b.origin_number for b in search1], [b.origin_number for b in search2]
+        )
+        self.assertEqual(
+            [b.origin_number for b in holdout1], [b.origin_number for b in holdout2]
+        )
+        self.assertEqual(
+            set(b.origin_number for b in search1)
+            | set(b.origin_number for b in holdout1),
+            set(range(1, 11)),
+        )
+        self.assertEqual(
+            set(b.origin_number for b in search1)
+            & set(b.origin_number for b in holdout1),
+            set(),
+        )
         self.assertEqual(len(holdout1), 3)
 
     def test_zero_holdout_fraction_keeps_everything_in_search(self):
         bundles = [_minimal_bundle(i) for i in range(1, 5)]
-        search, holdout = tune_calibration_optuna.split_bundles(bundles, holdout_fraction=0.0, seed=1)
+        search, holdout = tune_calibration_optuna.split_bundles(
+            bundles, holdout_fraction=0.0, seed=1
+        )
         self.assertEqual(len(search), 4)
         self.assertEqual(holdout, [])
 
     def test_always_leaves_at_least_one_search_origin(self):
         bundles = [_minimal_bundle(i) for i in range(1, 3)]
-        search, holdout = tune_calibration_optuna.split_bundles(bundles, holdout_fraction=0.99, seed=1)
+        search, holdout = tune_calibration_optuna.split_bundles(
+            bundles, holdout_fraction=0.99, seed=1
+        )
         self.assertGreaterEqual(len(search), 1)
 
 
 @unittest.skipUnless(OPTUNA_AVAILABLE, "optuna not installed")
 class StabilityAndCentralRepeatTests(unittest.TestCase):
     def test_identical_repeats_report_zero_spread(self):
-        params = {name: (low + high) / 2 for name, _path, low, high in tune_calibration_optuna.V125_PARAM_SPACE}
-        report = tune_calibration_optuna.stability_report([dict(params), dict(params), dict(params)])
+        params = {
+            name: (low + high) / 2
+            for name, _path, low, high in tune_calibration_optuna.V125_PARAM_SPACE
+        }
+        report = tune_calibration_optuna.stability_report(
+            [dict(params), dict(params), dict(params)]
+        )
         for stats in report.values():
             self.assertEqual(stats["range_fraction_of_search_space"], 0.0)
 
     def test_central_repeat_is_not_the_outlier(self):
         name0, _path0, low0, high0 = tune_calibration_optuna.V125_PARAM_SPACE[0]
         mid = (low0 + high0) / 2
-        base = {name: (low + high) / 2 for name, _path, low, high in tune_calibration_optuna.V125_PARAM_SPACE}
+        base = {
+            name: (low + high) / 2
+            for name, _path, low, high in tune_calibration_optuna.V125_PARAM_SPACE
+        }
         near_median_a = dict(base)
         near_median_a[name0] = mid + 0.01 * (high0 - low0)
         near_median_b = dict(base)
@@ -121,7 +153,10 @@ class StabilityAndCentralRepeatTests(unittest.TestCase):
 
     def test_wide_spread_flagged_unstable(self):
         name0, _path0, low0, high0 = tune_calibration_optuna.V125_PARAM_SPACE[0]
-        base = {name: (low + high) / 2 for name, _path, low, high in tune_calibration_optuna.V125_PARAM_SPACE}
+        base = {
+            name: (low + high) / 2
+            for name, _path, low, high in tune_calibration_optuna.V125_PARAM_SPACE
+        }
         p1 = dict(base)
         p1[name0] = low0
         p2 = dict(base)
@@ -160,8 +195,12 @@ class RunMultiSeedSearchEndToEndTests(unittest.TestCase):
             for repeat in summary["repeats"]:
                 self.assertIsInstance(repeat["search_set_objective"], float)
 
-            param_names = [n for n, _p, _l, _h in tune_calibration_optuna.V125_PARAM_SPACE]
-            self.assertEqual(set(summary["parameter_stability"].keys()), set(param_names))
+            param_names = [
+                n for n, _p, _l, _h in tune_calibration_optuna.V125_PARAM_SPACE
+            ]
+            self.assertEqual(
+                set(summary["parameter_stability"].keys()), set(param_names)
+            )
             self.assertIn(summary["recommended_repeat_index"], range(n_repeats))
             self.assertEqual(
                 summary["recommended_params"],
@@ -174,10 +213,14 @@ class RunMultiSeedSearchEndToEndTests(unittest.TestCase):
             self.assertGreaterEqual(len(final_holdout), 1)
             for repeat in summary["repeats"]:
                 self.assertEqual(final_holdout & set(repeat["search_origins"]), set())
-                self.assertEqual(final_holdout & set(repeat["repeat_holdout_origins"]), set())
+                self.assertEqual(
+                    final_holdout & set(repeat["repeat_holdout_origins"]), set()
+                )
 
             self.assertTrue((output_dir / "calibration_search_trials.csv").exists())
-            self.assertTrue((output_dir / "calibration_search_final_holdout_scorecard.csv").exists())
+            self.assertTrue(
+                (output_dir / "calibration_search_final_holdout_scorecard.csv").exists()
+            )
             best_params_path = output_dir / "calibration_search_best_params.json"
             self.assertTrue(best_params_path.exists())
             on_disk = json.loads(best_params_path.read_text(encoding="utf-8"))
@@ -185,7 +228,9 @@ class RunMultiSeedSearchEndToEndTests(unittest.TestCase):
 
             trials_df = pd.read_csv(output_dir / "calibration_search_trials.csv")
             self.assertEqual(len(trials_df), n_repeats * n_trials)
-            self.assertEqual(set(trials_df["repeat_index"].unique()), set(range(n_repeats)))
+            self.assertEqual(
+                set(trials_df["repeat_index"].unique()), set(range(n_repeats))
+            )
 
     def test_n_repeats_one_still_works(self):
         bundles = [_minimal_bundle(i) for i in range(1, 6)]

@@ -12,7 +12,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-
 HOT_RAMP_PEAK_COLUMNS = [
     "Hot_Ramp_Peak_Model_Version",
     "Hot_Ramp_Peak_Shadow_Mode",
@@ -76,17 +75,21 @@ def _cfg(config: dict | None) -> dict:
     raw = config or {}
     if "hot_ramp_peak_capture" in raw:
         return raw.get("hot_ramp_peak_capture", {}) or {}
-    return ((raw.get("calibration", {}) or {}).get("hot_ramp_peak_capture", {}) or {})
+    return (raw.get("calibration", {}) or {}).get("hot_ramp_peak_capture", {}) or {}
 
 
 def _heat_persistence_cfg(config: dict | None) -> dict:
     raw = config or {}
     if "heat_persistence_peak_capture" in raw:
         return raw.get("heat_persistence_peak_capture", {}) or {}
-    return ((raw.get("calibration", {}) or {}).get("heat_persistence_peak_capture", {}) or {})
+    return (raw.get("calibration", {}) or {}).get(
+        "heat_persistence_peak_capture", {}
+    ) or {}
 
 
-def _as_num(value: Any, index: pd.Index | None = None, default: float = np.nan) -> pd.Series:
+def _as_num(
+    value: Any, index: pd.Index | None = None, default: float = np.nan
+) -> pd.Series:
     if isinstance(value, pd.Series):
         raw = value
     else:
@@ -94,7 +97,9 @@ def _as_num(value: Any, index: pd.Index | None = None, default: float = np.nan) 
     return pd.to_numeric(raw, errors="coerce")
 
 
-def _optional_num(values: pd.DataFrame, *cols: str, default: float = np.nan) -> pd.Series:
+def _optional_num(
+    values: pd.DataFrame, *cols: str, default: float = np.nan
+) -> pd.Series:
     for col in cols:
         if col in values.columns:
             return _as_num(values[col], values.index).fillna(default)
@@ -106,7 +111,11 @@ def _local_datetime(values: pd.DataFrame) -> pd.Series:
     try:
         return pd.to_datetime(raw, errors="coerce")
     except ValueError:
-        cleaned = raw.astype(str).str.strip().str.replace(r"(?:[+-]\d{2}:?\d{2}|Z)$", "", regex=True)
+        cleaned = (
+            raw.astype(str)
+            .str.strip()
+            .str.replace(r"(?:[+-]\d{2}:?\d{2}|Z)$", "", regex=True)
+        )
         return pd.to_datetime(cleaned, errors="coerce")
 
 
@@ -121,13 +130,17 @@ def _date(values: pd.DataFrame, dt: pd.Series | None = None) -> pd.Series:
 
 def _hour(values: pd.DataFrame, dt: pd.Series | None = None) -> pd.Series:
     dt = dt if dt is not None else _local_datetime(values)
-    hour = _as_num(values.get("Hour", pd.Series(np.nan, index=values.index)), values.index)
+    hour = _as_num(
+        values.get("Hour", pd.Series(np.nan, index=values.index)), values.index
+    )
     return hour.where(hour.notna(), dt.dt.hour).fillna(0.0)
 
 
 def _month(values: pd.DataFrame, dt: pd.Series | None = None) -> pd.Series:
     dt = dt if dt is not None else _local_datetime(values)
-    month = _as_num(values.get("Month", pd.Series(np.nan, index=values.index)), values.index)
+    month = _as_num(
+        values.get("Month", pd.Series(np.nan, index=values.index)), values.index
+    )
     return month.where(month.notna(), dt.dt.month).fillna(1.0)
 
 
@@ -141,7 +154,9 @@ def _forecast_day(values: pd.DataFrame, dt: pd.Series | None = None) -> pd.Serie
     out = pd.Series(np.nan, index=values.index, dtype=float)
     if valid.any():
         first_day = dt.loc[valid].min().normalize()
-        out.loc[valid] = (dt.loc[valid].dt.normalize() - first_day).dt.days.astype(float) + 1.0
+        out.loc[valid] = (dt.loc[valid].dt.normalize() - first_day).dt.days.astype(
+            float
+        ) + 1.0
     return out
 
 
@@ -200,14 +215,18 @@ def _daily_ramp(values: pd.DataFrame, dt: pd.Series | None = None) -> pd.Series:
     return work["_Date"].map(ramp_map).reindex(values.index).astype(float)
 
 
-def _consecutive_extreme_days100(values: pd.DataFrame, dt: pd.Series | None = None) -> pd.Series:
+def _consecutive_extreme_days100(
+    values: pd.DataFrame, dt: pd.Series | None = None
+) -> pd.Series:
     configured = _optional_num(values, "ConsecutiveExtremeHotDays100", default=np.nan)
     if configured.notna().any():
         return configured
 
     dt = dt if dt is not None else _local_datetime(values)
     date = _date(values, dt=dt)
-    work = pd.DataFrame({"_Date": date, "_DailyMax": _daily_max(values)}, index=values.index)
+    work = pd.DataFrame(
+        {"_Date": date, "_DailyMax": _daily_max(values)}, index=values.index
+    )
     daily = work.groupby("_Date", dropna=False)["_DailyMax"].max().reset_index()
     daily["_Date_dt"] = pd.to_datetime(daily["_Date"], errors="coerce")
     daily = daily.sort_values("_Date_dt")
@@ -232,11 +251,17 @@ def _dailymax_3day_mean(values: pd.DataFrame, dt: pd.Series | None = None) -> pd
 
     dt = dt if dt is not None else _local_datetime(values)
     date = _date(values, dt=dt)
-    work = pd.DataFrame({"_Date": date, "_DailyMax": _daily_max(values)}, index=values.index)
+    work = pd.DataFrame(
+        {"_Date": date, "_DailyMax": _daily_max(values)}, index=values.index
+    )
     daily = work.groupby("_Date", dropna=False)["_DailyMax"].max().reset_index()
     daily["_Date_dt"] = pd.to_datetime(daily["_Date"], errors="coerce")
     daily = daily.sort_values("_Date_dt")
-    daily["_DailyMax3DayMean"] = pd.to_numeric(daily["_DailyMax"], errors="coerce").rolling(3, min_periods=1).mean()
+    daily["_DailyMax3DayMean"] = (
+        pd.to_numeric(daily["_DailyMax"], errors="coerce")
+        .rolling(3, min_periods=1)
+        .mean()
+    )
     mean_map = daily.set_index("_Date")["_DailyMax3DayMean"].to_dict()
     return work["_Date"].map(mean_map).reindex(values.index).astype(float)
 
@@ -324,7 +349,10 @@ def _targeted_missing_slice_mask(
     raw_minus_samehour7: pd.Series,
     existing_correction: pd.Series,
 ) -> pd.Series:
-    has_forecast_day_filter = rule.get("min_forecast_day") is not None or rule.get("max_forecast_day") is not None
+    has_forecast_day_filter = (
+        rule.get("min_forecast_day") is not None
+        or rule.get("max_forecast_day") is not None
+    )
     if (
         has_forecast_day_filter
         and bool(rule.get("require_explicit_forecast_day", True))
@@ -342,7 +370,9 @@ def _targeted_missing_slice_mask(
     if hours:
         mask &= hour.astype("Int64").isin([int(h) for h in hours]).fillna(False)
 
-    mask = _bounded_mask(mask, forecast_day, rule, min_key="min_forecast_day", max_key="max_forecast_day")
+    mask = _bounded_mask(
+        mask, forecast_day, rule, min_key="min_forecast_day", max_key="max_forecast_day"
+    )
     mask = _bounded_mask(
         mask,
         daily_max,
@@ -351,7 +381,13 @@ def _targeted_missing_slice_mask(
         max_key="max_maxtemp_f",
         max_exclusive_key="max_maxtemp_f_exclusive",
     )
-    mask = _bounded_mask(mask, cloud, rule, min_key="min_cloud_cover_norm", max_key="max_cloud_cover_norm")
+    mask = _bounded_mask(
+        mask,
+        cloud,
+        rule,
+        min_key="min_cloud_cover_norm",
+        max_key="max_cloud_cover_norm",
+    )
     mask = _bounded_mask(
         mask,
         raw_minus_samehour7,
@@ -369,12 +405,16 @@ def _targeted_missing_slice_mask(
     )
 
     if bool(rule.get("only_if_existing_correction_zero", True)):
-        mask &= existing_correction.le(float(rule.get("existing_correction_epsilon_mwh", 1e-9))).fillna(False)
+        mask &= existing_correction.le(
+            float(rule.get("existing_correction_epsilon_mwh", 1e-9))
+        ).fillna(False)
     return mask.fillna(False)
 
 
 def _enabled_targeted_missing_rules(cfg: dict) -> list[dict[str, Any]]:
-    rules = cfg.get("targeted_missing_slices", []) or cfg.get("targeted_slices", []) or []
+    rules = (
+        cfg.get("targeted_missing_slices", []) or cfg.get("targeted_slices", []) or []
+    )
     enabled: list[dict[str, Any]] = []
     for raw_rule in rules:
         rule = raw_rule or {}
@@ -410,22 +450,27 @@ def _apply_hot_ramp_targeted_missing_slices(
     raw_minus_samehour7 = _optional_num(out, "Raw_Forecast_MWH", default=np.nan) - same7
     for rule in targeted_rules:
         rule_correction = float(rule.get("correction_mwh", 0.0) or 0.0)
-        capped_correction = float(min(rule_correction, float(rule.get("cap_mwh", rule_correction))))
+        capped_correction = float(
+            min(rule_correction, float(rule.get("cap_mwh", rule_correction)))
+        )
         if capped_correction <= 0.0:
             continue
 
-        rule_mask = _targeted_missing_slice_mask(
-            out,
-            rule,
-            hour=row_hour,
-            month=row_month,
-            forecast_day=forecast_day,
-            daily_max=daily_max,
-            cloud=cloud,
-            base=base,
-            raw_minus_samehour7=raw_minus_samehour7,
-            existing_correction=correction,
-        ) & base.notna()
+        rule_mask = (
+            _targeted_missing_slice_mask(
+                out,
+                rule,
+                hour=row_hour,
+                month=row_month,
+                forecast_day=forecast_day,
+                daily_max=daily_max,
+                cloud=cloud,
+                base=base,
+                raw_minus_samehour7=raw_minus_samehour7,
+                existing_correction=correction,
+            )
+            & base.notna()
+        )
 
         if bool(rule.get("respect_cooling_guard", True)):
             blocked = rule_mask & cooling
@@ -443,7 +488,10 @@ def _apply_hot_ramp_targeted_missing_slices(
         guarded_correction = pd.Series(capped_correction, index=out.index, dtype=float)
 
         base_forecast_threshold_mwh = float(
-            rule.get("base_forecast_threshold_mwh", cfg.get("base_forecast_threshold_mwh", np.inf))
+            rule.get(
+                "base_forecast_threshold_mwh",
+                cfg.get("base_forecast_threshold_mwh", np.inf),
+            )
         )
         default_guard_cap = float(cfg.get("cap_mwh", capped_correction))
         max_correction_mwh_if_base_high = float(
@@ -460,7 +508,10 @@ def _apply_hot_ramp_targeted_missing_slices(
             )
 
         warmer_delta_threshold_mwh = float(
-            rule.get("warmer_delta_threshold_mwh", cfg.get("warmer_delta_threshold_mwh", np.inf))
+            rule.get(
+                "warmer_delta_threshold_mwh",
+                cfg.get("warmer_delta_threshold_mwh", np.inf),
+            )
         )
         max_correction_mwh_if_warmer_delta_high = float(
             rule.get(
@@ -468,33 +519,46 @@ def _apply_hot_ramp_targeted_missing_slices(
                 cfg.get("max_correction_mwh_if_warmer_delta_high", default_guard_cap),
             )
         )
-        warmer_delta_high_guard = rule_mask & warmer_delta.gt(warmer_delta_threshold_mwh).fillna(False)
+        warmer_delta_high_guard = rule_mask & warmer_delta.gt(
+            warmer_delta_threshold_mwh
+        ).fillna(False)
         if warmer_delta_high_guard.any():
             guarded_correction.loc[warmer_delta_high_guard] = np.minimum(
                 guarded_correction.loc[warmer_delta_high_guard],
                 max_correction_mwh_if_warmer_delta_high,
             )
 
-        apply_mask = rule_mask & guarded_correction.gt(0.0) & correction.lt(guarded_correction)
+        apply_mask = (
+            rule_mask & guarded_correction.gt(0.0) & correction.lt(guarded_correction)
+        )
         if not apply_mask.any():
             continue
 
         correction.loc[apply_mask] = guarded_correction.loc[apply_mask]
         source.loc[apply_mask] = str(
-            rule.get("source", cfg.get("targeted_slice_source", "hot_ramp_peak_targeted_slice"))
+            rule.get(
+                "source",
+                cfg.get("targeted_slice_source", "hot_ramp_peak_targeted_slice"),
+            )
         )
         out.loc[apply_mask, "Hot_Ramp_Peak_Scope_Flag"] = 1
         out.loc[apply_mask, "Hot_Ramp_Peak_Predicted_Target_MWH"] = (
             base.loc[apply_mask] + guarded_correction.loc[apply_mask]
         )
-        out.loc[apply_mask, "Hot_Ramp_Peak_Predicted_PeakHour"] = row_hour.loc[apply_mask]
+        out.loc[apply_mask, "Hot_Ramp_Peak_Predicted_PeakHour"] = row_hour.loc[
+            apply_mask
+        ]
         out.loc[apply_mask, "Hot_Ramp_Peak_Base_PeakHour"] = row_hour.loc[apply_mask]
-        out.loc[apply_mask, "Hot_Ramp_Peak_Timing_Selected_PeakHour"] = row_hour.loc[apply_mask]
+        out.loc[apply_mask, "Hot_Ramp_Peak_Timing_Selected_PeakHour"] = row_hour.loc[
+            apply_mask
+        ]
         out.loc[apply_mask, "Hot_Ramp_Peak_Timing_Source"] = "targeted_slice_row_hour"
         out.loc[apply_mask, "Hot_Ramp_Peak_Timing_Override_Flag"] = 0
         out.loc[apply_mask, "Hot_Ramp_Peak_Timing_Block_Source"] = ""
         out.loc[apply_mask, "Hot_Ramp_Peak_Timing_Confidence_MWH"] = np.nan
-        out.loc[apply_mask, "Hot_Ramp_Peak_Learned_Residual_MWH"] = guarded_correction.loc[apply_mask]
+        out.loc[apply_mask, "Hot_Ramp_Peak_Learned_Residual_MWH"] = (
+            guarded_correction.loc[apply_mask]
+        )
         out.loc[apply_mask, "Hot_Ramp_Peak_Base_High_Guard_Applied"] = (
             base_high_guard.loc[apply_mask].astype(int)
         )
@@ -532,12 +596,18 @@ def _finalize_hot_ramp_peak_capture(
 
     if not shadow_mode and forecast_col in out.columns:
         out[forecast_col] = adjusted
-        if forecast_col == "Final_Backtest_Forecast_MWH" and "Final_Forecast_MWH" in out.columns:
+        if (
+            forecast_col == "Final_Backtest_Forecast_MWH"
+            and "Final_Forecast_MWH" in out.columns
+        ):
             out["Final_Forecast_MWH"] = adjusted
         for col in also_update_cols:
             if col in out.columns and col != forecast_col:
                 out[col] = adjusted
-        if forecast_col in {"Final_Backtest_Forecast_MWH", "Final_Forecast_MWH"} and actual.notna().any():
+        if (
+            forecast_col in {"Final_Backtest_Forecast_MWH", "Final_Forecast_MWH"}
+            and actual.notna().any()
+        ):
             out["Final_Residual_MWH"] = actual - _as_num(out[forecast_col], out.index)
             out["Final_AbsError_MWH"] = out["Final_Residual_MWH"].abs()
             out["Final_APE"] = np.where(
@@ -562,7 +632,9 @@ def _persistence_bucket(consecutive_extreme: float) -> str:
     return "NoPersistence"
 
 
-def _hour_weights(hours: pd.Series, center_hour: float, spread_hours: float) -> pd.Series:
+def _hour_weights(
+    hours: pd.Series, center_hour: float, spread_hours: float
+) -> pd.Series:
     h = _as_num(hours, hours.index)
     if spread_hours <= 0:
         raw = h.eq(round(center_hour)).astype(float)
@@ -586,7 +658,9 @@ _TIMING_SOURCE_COLUMNS = {
 
 
 def _timing_source_specs(selector_cfg: dict) -> list[tuple[str, str]]:
-    raw_sources = selector_cfg.get("timing_sources", selector_cfg.get("sources", ["xgb_component"]))
+    raw_sources = selector_cfg.get(
+        "timing_sources", selector_cfg.get("sources", ["xgb_component"])
+    )
     specs: list[tuple[str, str]] = []
     for raw in _as_list(raw_sources):
         if isinstance(raw, str):
@@ -671,7 +745,9 @@ def _select_hot_ramp_timing_hour(
     if not bool(selector_cfg.get("enabled", False)):
         return _base_timing_selection(
             base_peak_hour,
-            source=str(selector_cfg.get("disabled_source", "base_timing_selector_disabled")),
+            source=str(
+                selector_cfg.get("disabled_source", "base_timing_selector_disabled")
+            ),
             block_source="selector_disabled",
         )
 
@@ -679,18 +755,31 @@ def _select_hot_ramp_timing_hour(
         block_min_temp = selector_cfg.get("strong_hot_ramp_min_maxtemp_f")
         block_min_ramp = selector_cfg.get("strong_hot_ramp_min_dailymax_ramp_1day_f")
         if block_min_temp is not None and block_min_ramp is not None:
-            block = day_temp >= float(block_min_temp) and day_ramp >= float(block_min_ramp)
+            block = day_temp >= float(block_min_temp) and day_ramp >= float(
+                block_min_ramp
+            )
         else:
             block = day_strong
         if block:
             return _base_timing_selection(
                 base_peak_hour,
-                source=str(selector_cfg.get("strong_hot_ramp_fallback_source", "base_strong_hot_ramp_fallback")),
-                block_source=str(selector_cfg.get("strong_hot_ramp_block_source", "strong_hot_ramp_timing_blocked")),
+                source=str(
+                    selector_cfg.get(
+                        "strong_hot_ramp_fallback_source",
+                        "base_strong_hot_ramp_fallback",
+                    )
+                ),
+                block_source=str(
+                    selector_cfg.get(
+                        "strong_hot_ramp_block_source", "strong_hot_ramp_timing_blocked"
+                    )
+                ),
             )
 
     fallback_hours = [int(h) for h in cfg.get("hours", [16, 17, 18, 19, 20])]
-    allowed_hours = {int(h) for h in _as_list(selector_cfg.get("allowed_hours", fallback_hours))}
+    allowed_hours = {
+        int(h) for h in _as_list(selector_cfg.get("allowed_hours", fallback_hours))
+    }
     min_margin = float(selector_cfg.get("min_peak_margin_mwh", 1.0))
     records: list[dict[str, Any]] = []
     for source_name, column in _timing_source_specs(selector_cfg):
@@ -709,38 +798,58 @@ def _select_hot_ramp_timing_hour(
     if not records:
         return _base_timing_selection(
             base_peak_hour,
-            source=str(selector_cfg.get("no_candidate_source", "base_no_timing_candidate")),
+            source=str(
+                selector_cfg.get("no_candidate_source", "base_no_timing_candidate")
+            ),
             block_source="no_confident_timing_candidate",
         )
 
-    priority_values = _as_list(selector_cfg.get("source_priority", [record["source"] for record in records]))
-    source_priority = {str(source_name): pos for pos, source_name in enumerate(priority_values)}
+    priority_values = _as_list(
+        selector_cfg.get("source_priority", [record["source"] for record in records])
+    )
+    source_priority = {
+        str(source_name): pos for pos, source_name in enumerate(priority_values)
+    }
     consensus_required = max(1, int(selector_cfg.get("consensus_required", 1)))
     max_spread = float(selector_cfg.get("max_consensus_hour_spread", 0.0))
     required_source = selector_cfg.get("required_source")
-    required_source = str(required_source) if required_source not in {None, ""} else None
+    required_source = (
+        str(required_source) if required_source not in {None, ""} else None
+    )
 
     clusters: list[list[dict[str, Any]]] = []
     for record in records:
-        cluster = [item for item in records if abs(float(item["hour"]) - float(record["hour"])) <= max_spread]
+        cluster = [
+            item
+            for item in records
+            if abs(float(item["hour"]) - float(record["hour"])) <= max_spread
+        ]
         if len(cluster) < consensus_required:
             continue
-        if required_source is not None and not any(str(item["source"]) == required_source for item in cluster):
+        if required_source is not None and not any(
+            str(item["source"]) == required_source for item in cluster
+        ):
             continue
         clusters.append(cluster)
 
     if not clusters:
-        confidence = max((float(record["margin"]) for record in records), default=np.nan)
+        confidence = max(
+            (float(record["margin"]) for record in records), default=np.nan
+        )
         return _base_timing_selection(
             base_peak_hour,
-            source=str(selector_cfg.get("no_consensus_source", "base_no_timing_consensus")),
+            source=str(
+                selector_cfg.get("no_consensus_source", "base_no_timing_consensus")
+            ),
             block_source="no_timing_consensus",
             confidence=confidence,
         )
 
     def cluster_key(cluster: list[dict[str, Any]]) -> tuple[int, float, int]:
         confidence = min(float(item["margin"]) for item in cluster)
-        best_priority = min(source_priority.get(str(item["source"]), 9999) for item in cluster)
+        best_priority = min(
+            source_priority.get(str(item["source"]), 9999) for item in cluster
+        )
         return (len(cluster), confidence, -best_priority)
 
     selected_cluster = max(clusters, key=cluster_key)
@@ -750,7 +859,9 @@ def _select_hot_ramp_timing_hour(
     )
     selected_hour = float(selected_record["hour"])
     confidence = min(float(item["margin"]) for item in selected_cluster)
-    override = int(np.isfinite(selected_hour) and abs(selected_hour - float(base_peak_hour)) > 1e-9)
+    override = int(
+        np.isfinite(selected_hour) and abs(selected_hour - float(base_peak_hour)) > 1e-9
+    )
     source_suffix = "consensus" if override else "aligned"
     return {
         "selected_peak_hour": selected_hour,
@@ -773,12 +884,19 @@ def _timed_peak_correction(
     selector_cfg: dict,
     timing_override: bool,
 ) -> pd.Series:
-    weights = _hour_weights(row_hour.loc[adjustment_idx], selected_peak_hour, spread_hours=spread_hours)
+    weights = _hour_weights(
+        row_hour.loc[adjustment_idx], selected_peak_hour, spread_hours=spread_hours
+    )
     day_correction = raw_correction * weights
-    if not (timing_override and bool(selector_cfg.get("target_selected_hour_to_daily_peak", True))):
+    if not (
+        timing_override
+        and bool(selector_cfg.get("target_selected_hour_to_daily_peak", True))
+    ):
         return day_correction
 
-    selected_mask = row_hour.loc[adjustment_idx].round().eq(round(selected_peak_hour)).fillna(False)
+    selected_mask = (
+        row_hour.loc[adjustment_idx].round().eq(round(selected_peak_hour)).fillna(False)
+    )
     selected_idx = selected_mask[selected_mask].index
     if len(selected_idx) == 0:
         return day_correction
@@ -788,7 +906,9 @@ def _timed_peak_correction(
     selected_hour_correction = max(raw_correction, target_peak - selected_base)
     max_extra = selector_cfg.get("max_selected_hour_extra_correction_mwh")
     if max_extra is not None:
-        selected_hour_correction = min(selected_hour_correction, raw_correction + float(max_extra))
+        selected_hour_correction = min(
+            selected_hour_correction, raw_correction + float(max_extra)
+        )
     if selected_hour_correction <= raw_correction + 1e-9:
         return day_correction
 
@@ -796,13 +916,19 @@ def _timed_peak_correction(
     adjusted = base.loc[adjustment_idx] + day_correction
     non_selected = ~selected_mask
     over_target = non_selected & adjusted.gt(target_peak).fillna(False)
-    if over_target.any() and bool(selector_cfg.get("cap_nonselected_hours_to_target", True)):
-        day_correction.loc[over_target] = (target_peak - base.loc[over_target]).clip(lower=0.0)
+    if over_target.any() and bool(
+        selector_cfg.get("cap_nonselected_hours_to_target", True)
+    ):
+        day_correction.loc[over_target] = (target_peak - base.loc[over_target]).clip(
+            lower=0.0
+        )
     return day_correction.clip(lower=0.0)
 
 
 def _cooling_underway_guard(values: pd.DataFrame, cfg: dict) -> pd.Series:
-    guard_cfg = cfg.get("cooling_underway_guard", {}) or cfg.get("cooling_guard", {}) or {}
+    guard_cfg = (
+        cfg.get("cooling_underway_guard", {}) or cfg.get("cooling_guard", {}) or {}
+    )
     if not bool(guard_cfg.get("enabled", False)):
         return pd.Series(False, index=values.index, dtype=bool)
 
@@ -818,16 +944,34 @@ def _cooling_underway_guard(values: pd.DataFrame, cfg: dict) -> pd.Series:
     if drop.isna().all():
         drop = daily_max - temp
     add_min(drop, "min_drop_from_dailymax_f")
-    add_min(_optional_num(values, "TempDrop_Next1Hr_F", default=np.nan), "min_forecast_drop_next1hr_f")
-    add_min(_optional_num(values, "TempDrop_Next2Hr_F", default=np.nan), "min_forecast_drop_next2hr_f")
-    add_min(_optional_num(values, "TempDrop_Next3Hr_F", default=np.nan), "min_forecast_drop_next3hr_f")
-    add_min(_optional_num(values, "DeltaBreeze_Cooling_Signal", default=0.0), "min_delta_breeze_cooling_signal")
+    add_min(
+        _optional_num(values, "TempDrop_Next1Hr_F", default=np.nan),
+        "min_forecast_drop_next1hr_f",
+    )
+    add_min(
+        _optional_num(values, "TempDrop_Next2Hr_F", default=np.nan),
+        "min_forecast_drop_next2hr_f",
+    )
+    add_min(
+        _optional_num(values, "TempDrop_Next3Hr_F", default=np.nan),
+        "min_forecast_drop_next3hr_f",
+    )
+    add_min(
+        _optional_num(values, "DeltaBreeze_Cooling_Signal", default=0.0),
+        "min_delta_breeze_cooling_signal",
+    )
     add_min(
         _optional_num(values, "DeltaBreeze_PostPeak_LoadDecay_Signal", default=0.0),
         "min_delta_breeze_post_peak_load_decay_signal",
     )
-    add_min(_optional_num(values, "PostPeak_LoadDecay_1Hr_MWH", default=np.nan), "min_post_peak_load_decay_1hr_mwh")
-    add_min(_optional_num(values, "PostPeak_LoadDecay_2Hr_MWH", default=np.nan), "min_post_peak_load_decay_2hr_mwh")
+    add_min(
+        _optional_num(values, "PostPeak_LoadDecay_1Hr_MWH", default=np.nan),
+        "min_post_peak_load_decay_1hr_mwh",
+    )
+    add_min(
+        _optional_num(values, "PostPeak_LoadDecay_2Hr_MWH", default=np.nan),
+        "min_post_peak_load_decay_2hr_mwh",
+    )
 
     if not masks:
         return pd.Series(False, index=values.index, dtype=bool)
@@ -850,7 +994,9 @@ def _cooling_underway_guard(values: pd.DataFrame, cfg: dict) -> pd.Series:
     return guard.fillna(False)
 
 
-def _scope_mask(values: pd.DataFrame, cfg: dict, *, enforce_forecast_day: bool = True) -> tuple[pd.Series, pd.Series]:
+def _scope_mask(
+    values: pd.DataFrame, cfg: dict, *, enforce_forecast_day: bool = True
+) -> tuple[pd.Series, pd.Series]:
     dt = _local_datetime(values)
     hour = _hour(values, dt=dt).astype(int)
     forecast_day = _forecast_day(values, dt=dt)
@@ -879,7 +1025,9 @@ def _scope_mask(values: pd.DataFrame, cfg: dict, *, enforce_forecast_day: bool =
     return mask.fillna(False), cooling.fillna(False)
 
 
-def _daily_training_frame(values: pd.DataFrame, cfg: dict, forecast_col: str) -> pd.DataFrame:
+def _daily_training_frame(
+    values: pd.DataFrame, cfg: dict, forecast_col: str
+) -> pd.DataFrame:
     if values is None or values.empty:
         return pd.DataFrame()
     work = values.copy()
@@ -893,8 +1041,15 @@ def _daily_training_frame(values: pd.DataFrame, cfg: dict, forecast_col: str) ->
     work["_DailyMax"] = _daily_max(work)
     work["_Ramp1D"] = _daily_ramp(work, dt=dt)
     work["_Cloud"] = _cloud_norm(work)
-    work["_Same7"] = _optional_num(work, "MWH_SameHour7DayMean", "Baseline_Rolling7DaySameHourAvg_MWH", default=np.nan)
-    work["_Lag24"] = _optional_num(work, "MWH_Lag24", "Baseline_SameHourYesterday_MWH", default=np.nan)
+    work["_Same7"] = _optional_num(
+        work,
+        "MWH_SameHour7DayMean",
+        "Baseline_Rolling7DaySameHourAvg_MWH",
+        default=np.nan,
+    )
+    work["_Lag24"] = _optional_num(
+        work, "MWH_Lag24", "Baseline_SameHourYesterday_MWH", default=np.nan
+    )
 
     scope, cooling = _scope_mask(
         work,
@@ -931,7 +1086,9 @@ def _daily_training_frame(values: pd.DataFrame, cfg: dict, forecast_col: str) ->
                 "Date": str(date),
                 "Forecast_Day": forecast_day,
                 "HorizonBucket": _horizon_bucket(forecast_day),
-                "Month": int(base_row["_Month"]) if pd.notna(base_row["_Month"]) else np.nan,
+                "Month": (
+                    int(base_row["_Month"]) if pd.notna(base_row["_Month"]) else np.nan
+                ),
                 "DailyMaxTempBucket": _temp_bucket(daily_max),
                 "CloudCoverBucket": _cloud_bucket(cloud),
                 "Temperature_DailyMax": daily_max,
@@ -943,10 +1100,18 @@ def _daily_training_frame(values: pd.DataFrame, cfg: dict, forecast_col: str) ->
                 "Actual_DailyPeak_MWH": actual_peak,
                 "Target_PeakResidual_MWH": actual_peak - base_peak,
                 "SameHour7_AtBasePeak_MWH": same7,
-                "SameHour7_TargetResidual_MWH": actual_peak - same7 if np.isfinite(same7) else np.nan,
+                "SameHour7_TargetResidual_MWH": (
+                    actual_peak - same7 if np.isfinite(same7) else np.nan
+                ),
                 "Lag24_AtBasePeak_MWH": lag24,
-                "Lag24_TargetResidual_MWH": actual_peak - lag24 if np.isfinite(lag24) else np.nan,
-                "Lag24_RampSlope_MWH_Per_F": (actual_peak - lag24) / max(ramp, 1.0) if np.isfinite(lag24) else np.nan,
+                "Lag24_TargetResidual_MWH": (
+                    actual_peak - lag24 if np.isfinite(lag24) else np.nan
+                ),
+                "Lag24_RampSlope_MWH_Per_F": (
+                    (actual_peak - lag24) / max(ramp, 1.0)
+                    if np.isfinite(lag24)
+                    else np.nan
+                ),
             }
         )
     return pd.DataFrame(rows)
@@ -971,7 +1136,9 @@ def _persistence_scope_mask(
     mask = (
         hour.isin(hours)
         & daily_max.ge(float(cfg.get("min_maxtemp_f", 100.0))).fillna(False)
-        & consecutive_extreme.ge(float(cfg.get("min_consecutive_extreme_days100", 3.0))).fillna(False)
+        & consecutive_extreme.ge(
+            float(cfg.get("min_consecutive_extreme_days100", 3.0))
+        ).fillna(False)
     )
     min_3day = cfg.get("min_dailymax_3day_mean_f", 100.0)
     if min_3day is not None:
@@ -998,7 +1165,9 @@ def _persistence_scope_mask(
     return mask.fillna(False), cooling.fillna(False)
 
 
-def _daily_persistence_training_frame(values: pd.DataFrame, cfg: dict, forecast_col: str) -> pd.DataFrame:
+def _daily_persistence_training_frame(
+    values: pd.DataFrame, cfg: dict, forecast_col: str
+) -> pd.DataFrame:
     if values is None or values.empty:
         return pd.DataFrame()
     work = values.copy()
@@ -1014,8 +1183,15 @@ def _daily_persistence_training_frame(values: pd.DataFrame, cfg: dict, forecast_
     work["_DailyMax3DayMean"] = _dailymax_3day_mean(work, dt=dt)
     work["_ConsecutiveExtreme"] = _consecutive_extreme_days100(work, dt=dt)
     work["_Cloud"] = _cloud_norm(work)
-    work["_Same7"] = _optional_num(work, "MWH_SameHour7DayMean", "Baseline_Rolling7DaySameHourAvg_MWH", default=np.nan)
-    work["_Lag24"] = _optional_num(work, "MWH_Lag24", "Baseline_SameHourYesterday_MWH", default=np.nan)
+    work["_Same7"] = _optional_num(
+        work,
+        "MWH_SameHour7DayMean",
+        "Baseline_Rolling7DaySameHourAvg_MWH",
+        default=np.nan,
+    )
+    work["_Lag24"] = _optional_num(
+        work, "MWH_Lag24", "Baseline_SameHourYesterday_MWH", default=np.nan
+    )
 
     scope, cooling = _persistence_scope_mask(
         work,
@@ -1054,7 +1230,9 @@ def _daily_persistence_training_frame(values: pd.DataFrame, cfg: dict, forecast_
                 "Date": str(date),
                 "Forecast_Day": forecast_day,
                 "HorizonBucket": _horizon_bucket(forecast_day),
-                "Month": int(base_row["_Month"]) if pd.notna(base_row["_Month"]) else np.nan,
+                "Month": (
+                    int(base_row["_Month"]) if pd.notna(base_row["_Month"]) else np.nan
+                ),
                 "DailyMaxTempBucket": _temp_bucket(daily_max),
                 "CloudCoverBucket": _cloud_bucket(cloud),
                 "PersistenceBucket": _persistence_bucket(consecutive_extreme),
@@ -1069,9 +1247,13 @@ def _daily_persistence_training_frame(values: pd.DataFrame, cfg: dict, forecast_
                 "Actual_DailyPeak_MWH": actual_peak,
                 "Target_PeakResidual_MWH": actual_peak - base_peak,
                 "SameHour7_AtBasePeak_MWH": same7,
-                "SameHour7_TargetResidual_MWH": actual_peak - same7 if np.isfinite(same7) else np.nan,
+                "SameHour7_TargetResidual_MWH": (
+                    actual_peak - same7 if np.isfinite(same7) else np.nan
+                ),
                 "Lag24_AtBasePeak_MWH": lag24,
-                "Lag24_TargetResidual_MWH": actual_peak - lag24 if np.isfinite(lag24) else np.nan,
+                "Lag24_TargetResidual_MWH": (
+                    actual_peak - lag24 if np.isfinite(lag24) else np.nan
+                ),
             }
         )
     return pd.DataFrame(rows)
@@ -1082,7 +1264,9 @@ def _mean_if_valid(series: pd.Series, default: float = 0.0) -> float:
     return float(values.mean()) if not values.empty else float(default)
 
 
-def _lookup_records(daily: pd.DataFrame, keys: list[str], min_days: int) -> list[dict[str, Any]]:
+def _lookup_records(
+    daily: pd.DataFrame, keys: list[str], min_days: int
+) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     if daily.empty or not all(k in daily.columns for k in keys):
         return rows
@@ -1096,7 +1280,9 @@ def _lookup_records(daily: pd.DataFrame, keys: list[str], min_days: int) -> list
             {
                 "N": int(len(group)),
                 "PeakResidual_MWH": _mean_if_valid(group["Target_PeakResidual_MWH"]),
-                "SameHour7Residual_MWH": _mean_if_valid(group["SameHour7_TargetResidual_MWH"]),
+                "SameHour7Residual_MWH": _mean_if_valid(
+                    group["SameHour7_TargetResidual_MWH"]
+                ),
                 "Lag24Residual_MWH": _mean_if_valid(group["Lag24_TargetResidual_MWH"]),
                 "Lag24RampSlope_MWH_Per_F": _mean_if_valid(
                     group["Lag24_RampSlope_MWH_Per_F"]
@@ -1114,7 +1300,9 @@ def _hot_ramp_anchorless_shadow_artifact(cfg: dict, forecast_col: str) -> dict:
         "daily_training_frame": pd.DataFrame(),
         "lookups": {},
         "metadata": {
-            "model_version": str(cfg.get("model_version", "hot_ramp_peak_capture_shadow_v1")),
+            "model_version": str(
+                cfg.get("model_version", "hot_ramp_peak_capture_shadow_v1")
+            ),
             "training_days": 0,
             "training_start_date": "",
             "training_end_date": "",
@@ -1139,7 +1327,9 @@ def _heat_persistence_anchorless_shadow_artifact(cfg: dict, forecast_col: str) -
         "daily_training_frame": pd.DataFrame(),
         "lookups": {},
         "metadata": {
-            "model_version": str(cfg.get("model_version", "heat_persistence_peak_capture_shadow_v1")),
+            "model_version": str(
+                cfg.get("model_version", "heat_persistence_peak_capture_shadow_v1")
+            ),
             "training_days": 0,
             "training_start_date": "",
             "training_end_date": "",
@@ -1190,7 +1380,9 @@ def build_hot_ramp_peak_capture_artifact(
         ["HorizonBucket"],
     ]
     lookups = {
-        "+".join(keys): _lookup_records(daily, keys, min_days=int(cfg.get("min_lookup_days", 3)))
+        "+".join(keys): _lookup_records(
+            daily, keys, min_days=int(cfg.get("min_lookup_days", 3))
+        )
         for keys in lookup_levels
     }
 
@@ -1198,18 +1390,32 @@ def build_hot_ramp_peak_capture_artifact(
         "daily_training_frame": daily,
         "lookups": lookups,
         "metadata": {
-            "model_version": str(cfg.get("model_version", "hot_ramp_peak_capture_shadow_v1")),
+            "model_version": str(
+                cfg.get("model_version", "hot_ramp_peak_capture_shadow_v1")
+            ),
             "training_days": int(len(daily)),
             "training_start_date": str(daily["Date"].min()),
             "training_end_date": str(daily["Date"].max()),
-            "target_peak_residual_mean_mwh": float(daily["Target_PeakResidual_MWH"].mean()),
-            "target_peak_residual_mae_mwh": float(daily["Target_PeakResidual_MWH"].abs().mean()),
+            "target_peak_residual_mean_mwh": float(
+                daily["Target_PeakResidual_MWH"].mean()
+            ),
+            "target_peak_residual_mae_mwh": float(
+                daily["Target_PeakResidual_MWH"].abs().mean()
+            ),
             "recent_hot_peak_anchor_mwh": float(recent["Actual_DailyPeak_MWH"].max()),
             "recent_hot_peak_anchor_days": int(len(recent)),
-            "recent_hot_peak_anchor_max_temp_f": float(recent["Temperature_DailyMax"].max()),
-            "global_peak_residual_mwh": _mean_if_valid(daily["Target_PeakResidual_MWH"]),
-            "global_samehour7_residual_mwh": _mean_if_valid(daily["SameHour7_TargetResidual_MWH"]),
-            "global_lag24_residual_mwh": _mean_if_valid(daily["Lag24_TargetResidual_MWH"]),
+            "recent_hot_peak_anchor_max_temp_f": float(
+                recent["Temperature_DailyMax"].max()
+            ),
+            "global_peak_residual_mwh": _mean_if_valid(
+                daily["Target_PeakResidual_MWH"]
+            ),
+            "global_samehour7_residual_mwh": _mean_if_valid(
+                daily["SameHour7_TargetResidual_MWH"]
+            ),
+            "global_lag24_residual_mwh": _mean_if_valid(
+                daily["Lag24_TargetResidual_MWH"]
+            ),
             "global_lag24_ramp_slope_mwh_per_f": global_slope_value,
             "forecast_col": forecast_col,
             "shadow_mode": bool(cfg.get("shadow_mode", True)),
@@ -1226,7 +1432,9 @@ def build_heat_persistence_peak_capture_artifact(
     cfg = _heat_persistence_cfg(config)
     if backtest_df is None or backtest_df.empty or not bool(cfg.get("enabled", False)):
         return None
-    daily = _daily_persistence_training_frame(backtest_df, cfg, forecast_col=forecast_col)
+    daily = _daily_persistence_training_frame(
+        backtest_df, cfg, forecast_col=forecast_col
+    )
     if daily.empty:
         return None
 
@@ -1237,15 +1445,28 @@ def build_heat_persistence_peak_capture_artifact(
     recent_days = int(cfg.get("recent_anchor_days", 3))
     recent = daily.sort_values("Date").tail(max(1, recent_days))
     lookup_levels = [
-        ["HorizonBucket", "Month", "DailyMaxTempBucket", "CloudCoverBucket", "PersistenceBucket"],
-        ["HorizonBucket", "DailyMaxTempBucket", "CloudCoverBucket", "PersistenceBucket"],
+        [
+            "HorizonBucket",
+            "Month",
+            "DailyMaxTempBucket",
+            "CloudCoverBucket",
+            "PersistenceBucket",
+        ],
+        [
+            "HorizonBucket",
+            "DailyMaxTempBucket",
+            "CloudCoverBucket",
+            "PersistenceBucket",
+        ],
         ["DailyMaxTempBucket", "CloudCoverBucket", "PersistenceBucket"],
         ["DailyMaxTempBucket", "PersistenceBucket"],
         ["PersistenceBucket"],
         ["HorizonBucket"],
     ]
     lookups = {
-        "+".join(keys): _lookup_records(daily, keys, min_days=int(cfg.get("min_lookup_days", 2)))
+        "+".join(keys): _lookup_records(
+            daily, keys, min_days=int(cfg.get("min_lookup_days", 2))
+        )
         for keys in lookup_levels
     }
 
@@ -1253,18 +1474,34 @@ def build_heat_persistence_peak_capture_artifact(
         "daily_training_frame": daily,
         "lookups": lookups,
         "metadata": {
-            "model_version": str(cfg.get("model_version", "heat_persistence_peak_capture_shadow_v1")),
+            "model_version": str(
+                cfg.get("model_version", "heat_persistence_peak_capture_shadow_v1")
+            ),
             "training_days": int(len(daily)),
             "training_start_date": str(daily["Date"].min()),
             "training_end_date": str(daily["Date"].max()),
-            "target_peak_residual_mean_mwh": float(daily["Target_PeakResidual_MWH"].mean()),
-            "target_peak_residual_mae_mwh": float(daily["Target_PeakResidual_MWH"].abs().mean()),
-            "recent_heat_persistence_peak_anchor_mwh": float(recent["Actual_DailyPeak_MWH"].max()),
+            "target_peak_residual_mean_mwh": float(
+                daily["Target_PeakResidual_MWH"].mean()
+            ),
+            "target_peak_residual_mae_mwh": float(
+                daily["Target_PeakResidual_MWH"].abs().mean()
+            ),
+            "recent_heat_persistence_peak_anchor_mwh": float(
+                recent["Actual_DailyPeak_MWH"].max()
+            ),
             "recent_heat_persistence_anchor_days": int(len(recent)),
-            "recent_heat_persistence_anchor_max_temp_f": float(recent["Temperature_DailyMax"].max()),
-            "global_peak_residual_mwh": _mean_if_valid(daily["Target_PeakResidual_MWH"]),
-            "global_samehour7_residual_mwh": _mean_if_valid(daily["SameHour7_TargetResidual_MWH"]),
-            "global_lag24_residual_mwh": _mean_if_valid(daily["Lag24_TargetResidual_MWH"]),
+            "recent_heat_persistence_anchor_max_temp_f": float(
+                recent["Temperature_DailyMax"].max()
+            ),
+            "global_peak_residual_mwh": _mean_if_valid(
+                daily["Target_PeakResidual_MWH"]
+            ),
+            "global_samehour7_residual_mwh": _mean_if_valid(
+                daily["SameHour7_TargetResidual_MWH"]
+            ),
+            "global_lag24_residual_mwh": _mean_if_valid(
+                daily["Lag24_TargetResidual_MWH"]
+            ),
             "forecast_col": forecast_col,
             "shadow_mode": bool(cfg.get("shadow_mode", True)),
         },
@@ -1289,7 +1526,9 @@ def _init_columns(
     evaluation_mode: str,
     shadow_mode: bool,
 ) -> pd.DataFrame:
-    out["Hot_Ramp_Peak_Model_Version"] = str(cfg.get("model_version", "hot_ramp_peak_capture_shadow_v1"))
+    out["Hot_Ramp_Peak_Model_Version"] = str(
+        cfg.get("model_version", "hot_ramp_peak_capture_shadow_v1")
+    )
     out["Hot_Ramp_Peak_Shadow_Mode"] = int(bool(shadow_mode))
     out["Hot_Ramp_Peak_Base_Forecast_MWH"] = base
     out["Hot_Ramp_Peak_Correction_MWH"] = 0.0
@@ -1374,9 +1613,20 @@ def apply_hot_ramp_peak_capture(
 ) -> pd.DataFrame:
     out = df.copy()
     cfg = _cfg(config)
-    shadow_mode = bool(cfg.get("shadow_mode", True)) if force_shadow is None else bool(force_shadow)
+    shadow_mode = (
+        bool(cfg.get("shadow_mode", True))
+        if force_shadow is None
+        else bool(force_shadow)
+    )
     base = _base_forecast(out, forecast_col=forecast_col)
-    out = _init_columns(out, base, cfg=cfg, source="disabled", evaluation_mode=evaluation_mode, shadow_mode=shadow_mode)
+    out = _init_columns(
+        out,
+        base,
+        cfg=cfg,
+        source="disabled",
+        evaluation_mode=evaluation_mode,
+        shadow_mode=shadow_mode,
+    )
     if out.empty or not bool(cfg.get("enabled", False)):
         return out
 
@@ -1388,13 +1638,22 @@ def apply_hot_ramp_peak_capture(
     daily_max = _daily_max(out)
     ramp = _daily_ramp(out, dt=dt)
     cloud = _cloud_norm(out)
-    same7 = _optional_num(out, "MWH_SameHour7DayMean", "Baseline_Rolling7DaySameHourAvg_MWH", default=np.nan)
-    lag24 = _optional_num(out, "MWH_Lag24", "Baseline_SameHourYesterday_MWH", default=np.nan)
+    same7 = _optional_num(
+        out,
+        "MWH_SameHour7DayMean",
+        "Baseline_Rolling7DaySameHourAvg_MWH",
+        default=np.nan,
+    )
+    lag24 = _optional_num(
+        out, "MWH_Lag24", "Baseline_SameHourYesterday_MWH", default=np.nan
+    )
     warmer = _optional_num(out, "WeatherScenario_warmer_P50_MWH", default=np.nan)
     warmer_delta = (warmer - base).clip(lower=0.0).fillna(0.0)
 
     scope, cooling = _scope_mask(out, cfg)
-    guard_cfg = cfg.get("cooling_underway_guard", {}) or cfg.get("cooling_guard", {}) or {}
+    guard_cfg = (
+        cfg.get("cooling_underway_guard", {}) or cfg.get("cooling_guard", {}) or {}
+    )
     enabled_targeted_rules = _enabled_targeted_missing_rules(cfg)
     if not artifact or not artifact.get("metadata"):
         if shadow_mode and bool(cfg.get("allow_anchorless_shadow_fallback", False)):
@@ -1434,8 +1693,12 @@ def apply_hot_ramp_peak_capture(
 
     strong = (
         scope
-        & daily_max.ge(float(cfg.get("strong_ramp_min_maxtemp_f", cfg.get("min_maxtemp_f", 100.0)))).fillna(False)
-        & ramp.ge(float(cfg.get("strong_ramp_min_dailymax_ramp_1day_f", 3.0))).fillna(False)
+        & daily_max.ge(
+            float(cfg.get("strong_ramp_min_maxtemp_f", cfg.get("min_maxtemp_f", 100.0)))
+        ).fillna(False)
+        & ramp.ge(float(cfg.get("strong_ramp_min_dailymax_ramp_1day_f", 3.0))).fillna(
+            False
+        )
     )
     out.loc[scope, "Hot_Ramp_Peak_Scope_Flag"] = 1
     out.loc[strong, "Hot_Ramp_Peak_Strong_Ramp_Flag"] = 1
@@ -1469,9 +1732,13 @@ def apply_hot_ramp_peak_capture(
 
     # New guardrail config values
     base_forecast_threshold_mwh = float(cfg.get("base_forecast_threshold_mwh", np.inf))
-    max_correction_mwh_if_base_high = float(cfg.get("max_correction_mwh_if_base_high", cap))
+    max_correction_mwh_if_base_high = float(
+        cfg.get("max_correction_mwh_if_base_high", cap)
+    )
     warmer_delta_threshold_mwh = float(cfg.get("warmer_delta_threshold_mwh", np.inf))
-    max_correction_mwh_if_warmer_delta_high = float(cfg.get("max_correction_mwh_if_warmer_delta_high", cap))
+    max_correction_mwh_if_warmer_delta_high = float(
+        cfg.get("max_correction_mwh_if_warmer_delta_high", cap)
+    )
 
     valid_scope = scope & ~cooling & base.notna()
     for date, idx in out.groupby(row_date, dropna=False).groups.items():
@@ -1490,7 +1757,11 @@ def apply_hot_ramp_peak_capture(
         day_ramp = float(ramp.loc[candidate_idx].max())
         day_cloud = float(cloud.loc[candidate_idx].max())
         day_forecast = float(forecast_day.loc[peak_idx])
-        day_month = int(row_month.loc[peak_idx]) if pd.notna(row_month.loc[peak_idx]) else np.nan
+        day_month = (
+            int(row_month.loc[peak_idx])
+            if pd.notna(row_month.loc[peak_idx])
+            else np.nan
+        )
         attrs = {
             "HorizonBucket": _horizon_bucket(day_forecast),
             "Month": day_month,
@@ -1498,17 +1769,36 @@ def apply_hot_ramp_peak_capture(
             "CloudCoverBucket": _cloud_bucket(day_cloud),
         }
         lookup = _lookup_row(artifact, attrs) or {}
-        learned_residual = float(lookup.get("PeakResidual_MWH", metadata.get("global_peak_residual_mwh", 0.0)))
+        learned_residual = float(
+            lookup.get(
+                "PeakResidual_MWH", metadata.get("global_peak_residual_mwh", 0.0)
+            )
+        )
         same7_residual = float(
-            lookup.get("SameHour7Residual_MWH", metadata.get("global_samehour7_residual_mwh", learned_residual))
+            lookup.get(
+                "SameHour7Residual_MWH",
+                metadata.get("global_samehour7_residual_mwh", learned_residual),
+            )
         )
         lag24_residual = float(
-            lookup.get("Lag24Residual_MWH", metadata.get("global_lag24_residual_mwh", learned_residual))
+            lookup.get(
+                "Lag24Residual_MWH",
+                metadata.get("global_lag24_residual_mwh", learned_residual),
+            )
         )
         lag24_slope = float(
-            lookup.get("Lag24RampSlope_MWH_Per_F", metadata.get("global_lag24_ramp_slope_mwh_per_f", 0.0))
+            lookup.get(
+                "Lag24RampSlope_MWH_Per_F",
+                metadata.get("global_lag24_ramp_slope_mwh_per_f", 0.0),
+            )
         )
-        lag24_slope = float(np.clip(lag24_slope, -float(cfg.get("lag24_ramp_slope_cap_mwh_per_f", 4.0)), float(cfg.get("lag24_ramp_slope_cap_mwh_per_f", 4.0))))
+        lag24_slope = float(
+            np.clip(
+                lag24_slope,
+                -float(cfg.get("lag24_ramp_slope_cap_mwh_per_f", 4.0)),
+                float(cfg.get("lag24_ramp_slope_cap_mwh_per_f", 4.0)),
+            )
+        )
 
         if (
             block_negative_learned
@@ -1516,7 +1806,9 @@ def apply_hot_ramp_peak_capture(
             and learned_residual < min_learned_residual
         ):
             source.loc[candidate_idx] = str(
-                cfg.get("negative_learned_source", "hot_ramp_peak_negative_learned_residual")
+                cfg.get(
+                    "negative_learned_source", "hot_ramp_peak_negative_learned_residual"
+                )
             )
             continue
 
@@ -1529,8 +1821,12 @@ def apply_hot_ramp_peak_capture(
 
         targets = [base_peak + max(learned_residual, 0.0)]
         historical_targets: list[float] = []
-        same7_peak = float(same7.loc[peak_idx]) if pd.notna(same7.loc[peak_idx]) else np.nan
-        lag24_peak = float(lag24.loc[peak_idx]) if pd.notna(lag24.loc[peak_idx]) else np.nan
+        same7_peak = (
+            float(same7.loc[peak_idx]) if pd.notna(same7.loc[peak_idx]) else np.nan
+        )
+        lag24_peak = (
+            float(lag24.loc[peak_idx]) if pd.notna(lag24.loc[peak_idx]) else np.nan
+        )
         if np.isfinite(same7_peak):
             historical_targets.append(same7_peak + same7_residual)
         if np.isfinite(lag24_peak):
@@ -1541,7 +1837,9 @@ def apply_hot_ramp_peak_capture(
             historical_targets.append(recent_anchor)
         if anchor_supported:
             targets.extend(historical_targets)
-        day_warmer_delta = float(warmer_delta.loc[candidate_idx].max()) if len(candidate_idx) else 0.0
+        day_warmer_delta = (
+            float(warmer_delta.loc[candidate_idx].max()) if len(candidate_idx) else 0.0
+        )
         if day_warmer_delta > 0.0:
             targets.append(base_peak + day_warmer_delta * warmer_fraction)
 
@@ -1561,7 +1859,10 @@ def apply_hot_ramp_peak_capture(
             and raw_correction < day_floor
         ):
             source.loc[candidate_idx] = str(
-                cfg.get("insufficient_anchor_support_source", "hot_ramp_peak_insufficient_anchor_support")
+                cfg.get(
+                    "insufficient_anchor_support_source",
+                    "hot_ramp_peak_insufficient_anchor_support",
+                )
             )
             continue
         if day_floor > 0.0 and raw_correction > -1e-9:
@@ -1577,15 +1878,23 @@ def apply_hot_ramp_peak_capture(
 
         warmer_delta_high_guard_applied = 0
         if day_warmer_delta > warmer_delta_threshold_mwh:
-            raw_correction = min(raw_correction, max_correction_mwh_if_warmer_delta_high)
+            raw_correction = min(
+                raw_correction, max_correction_mwh_if_warmer_delta_high
+            )
             warmer_delta_high_guard_applied = 1
 
         if raw_correction < min_abs:
-            source.loc[candidate_idx] = str(cfg.get("below_min_source", "hot_ramp_peak_below_min_correction"))
+            source.loc[candidate_idx] = str(
+                cfg.get("below_min_source", "hot_ramp_peak_below_min_correction")
+            )
             continue
 
-        adjustment_idx = day_index[row_hour.loc[day_index].astype("Int64").isin(hours).fillna(False)]
-        adjustment_idx = pd.Index([i for i in adjustment_idx if bool(valid_scope.loc[i])])
+        adjustment_idx = day_index[
+            row_hour.loc[day_index].astype("Int64").isin(hours).fillna(False)
+        ]
+        adjustment_idx = pd.Index(
+            [i for i in adjustment_idx if bool(valid_scope.loc[i])]
+        )
         if len(adjustment_idx) == 0:
             source.loc[candidate_idx] = "hot_ramp_peak_no_adjustment_rows"
             continue
@@ -1614,27 +1923,44 @@ def apply_hot_ramp_peak_capture(
         )
         source.loc[adjustment_idx] = str(cfg.get("source", "hot_ramp_peak_shadow"))
         out.loc[day_index, "Hot_Ramp_Peak_Base_DailyPeak_MWH"] = base_peak
-        out.loc[day_index, "Hot_Ramp_Peak_Predicted_Target_MWH"] = base_peak + raw_correction
+        out.loc[day_index, "Hot_Ramp_Peak_Predicted_Target_MWH"] = (
+            base_peak + raw_correction
+        )
         out.loc[day_index, "Hot_Ramp_Peak_Predicted_PeakHour"] = selected_peak_hour
         out.loc[day_index, "Hot_Ramp_Peak_Base_PeakHour"] = base_peak_hour
-        out.loc[day_index, "Hot_Ramp_Peak_Timing_Selected_PeakHour"] = selected_peak_hour
+        out.loc[day_index, "Hot_Ramp_Peak_Timing_Selected_PeakHour"] = (
+            selected_peak_hour
+        )
         out.loc[day_index, "Hot_Ramp_Peak_Timing_Source"] = str(timing["source"])
-        out.loc[day_index, "Hot_Ramp_Peak_Timing_Override_Flag"] = int(timing["override"])
-        out.loc[day_index, "Hot_Ramp_Peak_Timing_Block_Source"] = str(timing["block_source"])
-        out.loc[day_index, "Hot_Ramp_Peak_Timing_Confidence_MWH"] = float(timing["confidence"])
+        out.loc[day_index, "Hot_Ramp_Peak_Timing_Override_Flag"] = int(
+            timing["override"]
+        )
+        out.loc[day_index, "Hot_Ramp_Peak_Timing_Block_Source"] = str(
+            timing["block_source"]
+        )
+        out.loc[day_index, "Hot_Ramp_Peak_Timing_Confidence_MWH"] = float(
+            timing["confidence"]
+        )
         out.loc[day_index, "Hot_Ramp_Peak_Learned_Residual_MWH"] = learned_residual
         out.loc[day_index, "Hot_Ramp_Peak_Recent_Anchor_MWH"] = recent_anchor
         out.loc[day_index, "Hot_Ramp_Peak_SameHour7_Anchor_MWH"] = (
             same7_peak + same7_residual if np.isfinite(same7_peak) else np.nan
         )
         out.loc[day_index, "Hot_Ramp_Peak_Lag24_Anchor_MWH"] = (
-            max(lag24_peak + lag24_residual, lag24_peak + lag24_slope * max(day_ramp, 0.0))
+            max(
+                lag24_peak + lag24_residual,
+                lag24_peak + lag24_slope * max(day_ramp, 0.0),
+            )
             if np.isfinite(lag24_peak)
             else np.nan
         )
         out.loc[day_index, "Hot_Ramp_Peak_WarmerScenario_Delta_MWH"] = day_warmer_delta
-        out.loc[day_index, "Hot_Ramp_Peak_Base_High_Guard_Applied"] = base_high_guard_applied
-        out.loc[day_index, "Hot_Ramp_Peak_Warmer_Delta_High_Guard_Applied"] = warmer_delta_high_guard_applied
+        out.loc[day_index, "Hot_Ramp_Peak_Base_High_Guard_Applied"] = (
+            base_high_guard_applied
+        )
+        out.loc[day_index, "Hot_Ramp_Peak_Warmer_Delta_High_Guard_Applied"] = (
+            warmer_delta_high_guard_applied
+        )
 
     correction, source = _apply_hot_ramp_targeted_missing_slices(
         out,
@@ -1677,7 +2003,11 @@ def apply_heat_persistence_peak_capture(
 ) -> pd.DataFrame:
     out = df.copy()
     cfg = _heat_persistence_cfg(config)
-    shadow_mode = bool(cfg.get("shadow_mode", True)) if force_shadow is None else bool(force_shadow)
+    shadow_mode = (
+        bool(cfg.get("shadow_mode", True))
+        if force_shadow is None
+        else bool(force_shadow)
+    )
     base = _base_forecast(out, forecast_col=forecast_col)
     out = _init_heat_persistence_columns(
         out,
@@ -1705,18 +2035,34 @@ def apply_heat_persistence_peak_capture(
     dailymax_3day = _dailymax_3day_mean(out, dt=dt)
     consecutive_extreme = _consecutive_extreme_days100(out, dt=dt)
     cloud = _cloud_norm(out)
-    same7 = _optional_num(out, "MWH_SameHour7DayMean", "Baseline_Rolling7DaySameHourAvg_MWH", default=np.nan)
-    lag24 = _optional_num(out, "MWH_Lag24", "Baseline_SameHourYesterday_MWH", default=np.nan)
+    same7 = _optional_num(
+        out,
+        "MWH_SameHour7DayMean",
+        "Baseline_Rolling7DaySameHourAvg_MWH",
+        default=np.nan,
+    )
+    lag24 = _optional_num(
+        out, "MWH_Lag24", "Baseline_SameHourYesterday_MWH", default=np.nan
+    )
     warmer = _optional_num(out, "WeatherScenario_warmer_P50_MWH", default=np.nan)
     warmer_delta = (warmer - base).clip(lower=0.0).fillna(0.0)
 
     scope, cooling = _persistence_scope_mask(out, cfg)
-    guard_cfg = cfg.get("cooling_underway_guard", {}) or cfg.get("cooling_guard", {}) or {}
+    guard_cfg = (
+        cfg.get("cooling_underway_guard", {}) or cfg.get("cooling_guard", {}) or {}
+    )
     strong = (
         scope
-        & daily_max.ge(float(cfg.get("strong_min_maxtemp_f", cfg.get("min_maxtemp_f", 100.0)))).fillna(False)
+        & daily_max.ge(
+            float(cfg.get("strong_min_maxtemp_f", cfg.get("min_maxtemp_f", 100.0)))
+        ).fillna(False)
         & consecutive_extreme.ge(
-            float(cfg.get("strong_min_consecutive_extreme_days100", cfg.get("min_consecutive_extreme_days100", 3.0)))
+            float(
+                cfg.get(
+                    "strong_min_consecutive_extreme_days100",
+                    cfg.get("min_consecutive_extreme_days100", 3.0),
+                )
+            )
         ).fillna(False)
     )
     out.loc[scope, "Heat_Persistence_Peak_Scope_Flag"] = 1
@@ -1760,7 +2106,11 @@ def apply_heat_persistence_peak_capture(
         day_cloud = float(cloud.loc[candidate_idx].max())
         day_consecutive = float(consecutive_extreme.loc[candidate_idx].max())
         day_forecast = float(forecast_day.loc[peak_idx])
-        day_month = int(row_month.loc[peak_idx]) if pd.notna(row_month.loc[peak_idx]) else np.nan
+        day_month = (
+            int(row_month.loc[peak_idx])
+            if pd.notna(row_month.loc[peak_idx])
+            else np.nan
+        )
         attrs = {
             "HorizonBucket": _horizon_bucket(day_forecast),
             "Month": day_month,
@@ -1769,25 +2119,43 @@ def apply_heat_persistence_peak_capture(
             "PersistenceBucket": _persistence_bucket(day_consecutive),
         }
         lookup = _lookup_row(artifact, attrs) or {}
-        learned_residual = float(lookup.get("PeakResidual_MWH", metadata.get("global_peak_residual_mwh", 0.0)))
+        learned_residual = float(
+            lookup.get(
+                "PeakResidual_MWH", metadata.get("global_peak_residual_mwh", 0.0)
+            )
+        )
         same7_residual = float(
-            lookup.get("SameHour7Residual_MWH", metadata.get("global_samehour7_residual_mwh", learned_residual))
+            lookup.get(
+                "SameHour7Residual_MWH",
+                metadata.get("global_samehour7_residual_mwh", learned_residual),
+            )
         )
         lag24_residual = float(
-            lookup.get("Lag24Residual_MWH", metadata.get("global_lag24_residual_mwh", learned_residual))
+            lookup.get(
+                "Lag24Residual_MWH",
+                metadata.get("global_lag24_residual_mwh", learned_residual),
+            )
         )
 
         targets = [base_peak + learned_residual]
-        same7_peak = float(same7.loc[peak_idx]) if pd.notna(same7.loc[peak_idx]) else np.nan
-        lag24_peak = float(lag24.loc[peak_idx]) if pd.notna(lag24.loc[peak_idx]) else np.nan
+        same7_peak = (
+            float(same7.loc[peak_idx]) if pd.notna(same7.loc[peak_idx]) else np.nan
+        )
+        lag24_peak = (
+            float(lag24.loc[peak_idx]) if pd.notna(lag24.loc[peak_idx]) else np.nan
+        )
         if np.isfinite(same7_peak):
             targets.append(same7_peak + same7_residual)
         if np.isfinite(lag24_peak):
             targets.append(lag24_peak + lag24_residual)
-        recent_anchor = float(metadata.get("recent_heat_persistence_peak_anchor_mwh", np.nan))
+        recent_anchor = float(
+            metadata.get("recent_heat_persistence_peak_anchor_mwh", np.nan)
+        )
         if np.isfinite(recent_anchor):
             targets.append(recent_anchor)
-        day_warmer_delta = float(warmer_delta.loc[candidate_idx].max()) if len(candidate_idx) else 0.0
+        day_warmer_delta = (
+            float(warmer_delta.loc[candidate_idx].max()) if len(candidate_idx) else 0.0
+        )
         if day_warmer_delta > 0.0:
             targets.append(base_peak + day_warmer_delta * warmer_fraction)
 
@@ -1810,22 +2178,36 @@ def apply_heat_persistence_peak_capture(
         raw_correction = float(np.clip(raw_correction, 0.0, day_cap))
         if raw_correction < min_abs:
             source.loc[candidate_idx] = str(
-                cfg.get("below_min_source", "heat_persistence_peak_below_min_correction")
+                cfg.get(
+                    "below_min_source", "heat_persistence_peak_below_min_correction"
+                )
             )
             continue
 
-        adjustment_idx = day_index[row_hour.loc[day_index].astype("Int64").isin(hours).fillna(False)]
-        adjustment_idx = pd.Index([i for i in adjustment_idx if bool(valid_scope.loc[i])])
+        adjustment_idx = day_index[
+            row_hour.loc[day_index].astype("Int64").isin(hours).fillna(False)
+        ]
+        adjustment_idx = pd.Index(
+            [i for i in adjustment_idx if bool(valid_scope.loc[i])]
+        )
         if len(adjustment_idx) == 0:
             source.loc[candidate_idx] = "heat_persistence_peak_no_adjustment_rows"
             continue
-        weights = _hour_weights(row_hour.loc[adjustment_idx], peak_hour, spread_hours=spread_hours)
+        weights = _hour_weights(
+            row_hour.loc[adjustment_idx], peak_hour, spread_hours=spread_hours
+        )
         correction.loc[adjustment_idx] = raw_correction * weights
-        source.loc[adjustment_idx] = str(cfg.get("source", "heat_persistence_peak_shadow"))
+        source.loc[adjustment_idx] = str(
+            cfg.get("source", "heat_persistence_peak_shadow")
+        )
         out.loc[day_index, "Heat_Persistence_Peak_Base_DailyPeak_MWH"] = base_peak
-        out.loc[day_index, "Heat_Persistence_Peak_Predicted_Target_MWH"] = base_peak + raw_correction
+        out.loc[day_index, "Heat_Persistence_Peak_Predicted_Target_MWH"] = (
+            base_peak + raw_correction
+        )
         out.loc[day_index, "Heat_Persistence_Peak_Predicted_PeakHour"] = peak_hour
-        out.loc[day_index, "Heat_Persistence_Peak_Learned_Residual_MWH"] = learned_residual
+        out.loc[day_index, "Heat_Persistence_Peak_Learned_Residual_MWH"] = (
+            learned_residual
+        )
         out.loc[day_index, "Heat_Persistence_Peak_Recent_Anchor_MWH"] = recent_anchor
         out.loc[day_index, "Heat_Persistence_Peak_SameHour7_Anchor_MWH"] = (
             same7_peak + same7_residual if np.isfinite(same7_peak) else np.nan
@@ -1833,14 +2215,18 @@ def apply_heat_persistence_peak_capture(
         out.loc[day_index, "Heat_Persistence_Peak_Lag24_Anchor_MWH"] = (
             lag24_peak + lag24_residual if np.isfinite(lag24_peak) else np.nan
         )
-        out.loc[day_index, "Heat_Persistence_Peak_WarmerScenario_Delta_MWH"] = day_warmer_delta
+        out.loc[day_index, "Heat_Persistence_Peak_WarmerScenario_Delta_MWH"] = (
+            day_warmer_delta
+        )
 
     correction = correction.where(base.notna(), 0.0)
     adjusted = (base + correction).clip(lower=0.0)
     source.loc[base.isna()] = "invalid_base_forecast"
     out["Heat_Persistence_Peak_Correction_MWH"] = correction
     out["Heat_Persistence_Peak_Shadow_Forecast_MWH"] = adjusted
-    out["Heat_Persistence_Peak_Correction_Applied_Flag"] = correction.ne(0.0).astype(int)
+    out["Heat_Persistence_Peak_Correction_Applied_Flag"] = correction.ne(0.0).astype(
+        int
+    )
     out["Heat_Persistence_Peak_Source"] = source
 
     actual = _optional_num(out, "Actual_MWH", "Actual", default=np.nan)
@@ -1848,16 +2234,24 @@ def apply_heat_persistence_peak_capture(
     residual = actual - adjusted
     out["Heat_Persistence_Peak_Residual_MWH"] = residual
     out["Heat_Persistence_Peak_AbsError_MWH"] = residual.abs()
-    out["Heat_Persistence_Peak_Delta_AbsError_MWH"] = residual.abs() - base_residual.abs()
+    out["Heat_Persistence_Peak_Delta_AbsError_MWH"] = (
+        residual.abs() - base_residual.abs()
+    )
 
     if not shadow_mode and forecast_col in out.columns:
         out[forecast_col] = adjusted
-        if forecast_col == "Final_Backtest_Forecast_MWH" and "Final_Forecast_MWH" in out.columns:
+        if (
+            forecast_col == "Final_Backtest_Forecast_MWH"
+            and "Final_Forecast_MWH" in out.columns
+        ):
             out["Final_Forecast_MWH"] = adjusted
         for col in also_update_cols:
             if col in out.columns and col != forecast_col:
                 out[col] = adjusted
-        if forecast_col in {"Final_Backtest_Forecast_MWH", "Final_Forecast_MWH"} and actual.notna().any():
+        if (
+            forecast_col in {"Final_Backtest_Forecast_MWH", "Final_Forecast_MWH"}
+            and actual.notna().any()
+        ):
             out["Final_Residual_MWH"] = actual - _as_num(out[forecast_col], out.index)
             out["Final_AbsError_MWH"] = out["Final_Residual_MWH"].abs()
             out["Final_APE"] = np.where(
@@ -1868,23 +2262,35 @@ def apply_heat_persistence_peak_capture(
     return out
 
 
-def hot_ramp_peak_capture_summary(backtest_df: pd.DataFrame | None, artifact: dict | None, config: dict | None) -> dict:
+def hot_ramp_peak_capture_summary(
+    backtest_df: pd.DataFrame | None, artifact: dict | None, config: dict | None
+) -> dict:
     cfg = _cfg(config)
     summary: dict[str, Any] = {
         "enabled": bool(cfg.get("enabled", False)),
         "shadow_mode": bool(cfg.get("shadow_mode", True)),
-        "model_version": str(cfg.get("model_version", "hot_ramp_peak_capture_shadow_v1")),
+        "model_version": str(
+            cfg.get("model_version", "hot_ramp_peak_capture_shadow_v1")
+        ),
     }
     if artifact and artifact.get("metadata"):
         summary["artifact"] = dict(artifact.get("metadata") or {})
-    if backtest_df is None or backtest_df.empty or "Hot_Ramp_Peak_Shadow_Forecast_MWH" not in backtest_df.columns:
+    if (
+        backtest_df is None
+        or backtest_df.empty
+        or "Hot_Ramp_Peak_Shadow_Forecast_MWH" not in backtest_df.columns
+    ):
         summary["evaluation_rows"] = 0
         return summary
 
     actual = _optional_num(backtest_df, "Actual_MWH", "Actual", default=np.nan)
     base = _optional_num(backtest_df, "Hot_Ramp_Peak_Base_Forecast_MWH", default=np.nan)
-    shadow = _optional_num(backtest_df, "Hot_Ramp_Peak_Shadow_Forecast_MWH", default=np.nan)
-    applied = _optional_num(backtest_df, "Hot_Ramp_Peak_Correction_Applied_Flag", default=0.0).eq(1)
+    shadow = _optional_num(
+        backtest_df, "Hot_Ramp_Peak_Shadow_Forecast_MWH", default=np.nan
+    )
+    applied = _optional_num(
+        backtest_df, "Hot_Ramp_Peak_Correction_Applied_Flag", default=0.0
+    ).eq(1)
     valid = actual.notna() & base.notna() & shadow.notna() & applied
     summary["evaluation_rows"] = int(valid.sum())
     if not valid.any():
@@ -1900,10 +2306,17 @@ def hot_ramp_peak_capture_summary(backtest_df: pd.DataFrame | None, artifact: di
     summary["underforecast_rate_pct"] = float((residual > 0.0).mean() * 100.0)
     summary["improved_rows"] = int((delta < 0.0).sum())
     summary["worsened_rows"] = int((delta > 0.0).sum())
-    summary["mean_correction_mwh"] = float(_optional_num(backtest_df.loc[valid], "Hot_Ramp_Peak_Correction_MWH", default=0.0).mean())
+    summary["mean_correction_mwh"] = float(
+        _optional_num(
+            backtest_df.loc[valid], "Hot_Ramp_Peak_Correction_MWH", default=0.0
+        ).mean()
+    )
     summary["source_counts"] = {
         str(k): int(v)
-        for k, v in backtest_df["Hot_Ramp_Peak_Source"].value_counts(dropna=False).head(20).items()
+        for k, v in backtest_df["Hot_Ramp_Peak_Source"]
+        .value_counts(dropna=False)
+        .head(20)
+        .items()
     }
     return summary
 
@@ -1917,7 +2330,9 @@ def heat_persistence_peak_capture_summary(
     summary: dict[str, Any] = {
         "enabled": bool(cfg.get("enabled", False)),
         "shadow_mode": bool(cfg.get("shadow_mode", True)),
-        "model_version": str(cfg.get("model_version", "heat_persistence_peak_capture_shadow_v1")),
+        "model_version": str(
+            cfg.get("model_version", "heat_persistence_peak_capture_shadow_v1")
+        ),
     }
     if artifact and artifact.get("metadata"):
         summary["artifact"] = dict(artifact.get("metadata") or {})
@@ -1930,9 +2345,15 @@ def heat_persistence_peak_capture_summary(
         return summary
 
     actual = _optional_num(backtest_df, "Actual_MWH", "Actual", default=np.nan)
-    base = _optional_num(backtest_df, "Heat_Persistence_Peak_Base_Forecast_MWH", default=np.nan)
-    shadow = _optional_num(backtest_df, "Heat_Persistence_Peak_Shadow_Forecast_MWH", default=np.nan)
-    applied = _optional_num(backtest_df, "Heat_Persistence_Peak_Correction_Applied_Flag", default=0.0).eq(1)
+    base = _optional_num(
+        backtest_df, "Heat_Persistence_Peak_Base_Forecast_MWH", default=np.nan
+    )
+    shadow = _optional_num(
+        backtest_df, "Heat_Persistence_Peak_Shadow_Forecast_MWH", default=np.nan
+    )
+    applied = _optional_num(
+        backtest_df, "Heat_Persistence_Peak_Correction_Applied_Flag", default=0.0
+    ).eq(1)
     valid = actual.notna() & base.notna() & shadow.notna() & applied
     summary["evaluation_rows"] = int(valid.sum())
     if not valid.any():
@@ -1949,10 +2370,15 @@ def heat_persistence_peak_capture_summary(
     summary["improved_rows"] = int((delta < 0.0).sum())
     summary["worsened_rows"] = int((delta > 0.0).sum())
     summary["mean_correction_mwh"] = float(
-        _optional_num(backtest_df.loc[valid], "Heat_Persistence_Peak_Correction_MWH", default=0.0).mean()
+        _optional_num(
+            backtest_df.loc[valid], "Heat_Persistence_Peak_Correction_MWH", default=0.0
+        ).mean()
     )
     summary["source_counts"] = {
         str(k): int(v)
-        for k, v in backtest_df["Heat_Persistence_Peak_Source"].value_counts(dropna=False).head(20).items()
+        for k, v in backtest_df["Heat_Persistence_Peak_Source"]
+        .value_counts(dropna=False)
+        .head(20)
+        .items()
     }
     return summary

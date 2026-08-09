@@ -37,16 +37,16 @@ def roseville_holidays(year: int) -> set[pd.Timestamp]:
     and Christmas Day.
     """
     return {
-        _observed_fixed_holiday(year, 1, 1),        # New Year's Day
-        _nth_weekday(year, 1, 0, 3),                # Martin Luther King Jr. Day
-        _nth_weekday(year, 2, 0, 3),                # Presidents' Day
-        _last_weekday(year, 5, 0),                  # Memorial Day
-        _observed_fixed_holiday(year, 7, 4),        # Independence Day
-        _nth_weekday(year, 9, 0, 1),                # Labor Day
-        _nth_weekday(year, 10, 0, 2),               # Columbus Day
-        _observed_fixed_holiday(year, 11, 11),      # Veterans Day
-        _nth_weekday(year, 11, 3, 4),               # Thanksgiving Day
-        _observed_fixed_holiday(year, 12, 25),      # Christmas Day
+        _observed_fixed_holiday(year, 1, 1),  # New Year's Day
+        _nth_weekday(year, 1, 0, 3),  # Martin Luther King Jr. Day
+        _nth_weekday(year, 2, 0, 3),  # Presidents' Day
+        _last_weekday(year, 5, 0),  # Memorial Day
+        _observed_fixed_holiday(year, 7, 4),  # Independence Day
+        _nth_weekday(year, 9, 0, 1),  # Labor Day
+        _nth_weekday(year, 10, 0, 2),  # Columbus Day
+        _observed_fixed_holiday(year, 11, 11),  # Veterans Day
+        _nth_weekday(year, 11, 3, 4),  # Thanksgiving Day
+        _observed_fixed_holiday(year, 12, 25),  # Christmas Day
     }
 
 
@@ -68,12 +68,15 @@ def _holiday_frame(dates: pd.Series) -> pd.DataFrame:
     is_holiday = d.isin(holiday_norm)
     is_pre = (d + pd.Timedelta(days=1)).isin(holiday_norm)
     is_post = (d - pd.Timedelta(days=1)).isin(holiday_norm)
-    return pd.DataFrame({
-        "IsHoliday": is_holiday.astype(int),
-        "IsPreHoliday": is_pre.astype(int),
-        "IsPostHoliday": is_post.astype(int),
-        "IsHolidayAdjacent": (is_holiday | is_pre | is_post).astype(int),
-    }, index=dates.index)
+    return pd.DataFrame(
+        {
+            "IsHoliday": is_holiday.astype(int),
+            "IsPreHoliday": is_pre.astype(int),
+            "IsPostHoliday": is_post.astype(int),
+            "IsHolidayAdjacent": (is_holiday | is_pre | is_post).astype(int),
+        },
+        index=dates.index,
+    )
 
 
 def _hour_group(hour: int) -> str:
@@ -104,7 +107,9 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     hol = _holiday_frame(out["DT"])
     for c in hol.columns:
         out[c] = hol[c].values
-    out["IsBusinessDay"] = ((out["IsWeekend"] == 0) & (out["IsHoliday"] == 0)).astype(int)
+    out["IsBusinessDay"] = ((out["IsWeekend"] == 0) & (out["IsHoliday"] == 0)).astype(
+        int
+    )
 
     # Cyclical encodings let the model understand wrap-around boundaries.
     out["HourSin"] = np.sin(2.0 * math.pi * out["Hour"] / 24.0)
@@ -122,13 +127,20 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     # Roseville TOU/load-behavior flags. Hour follows the model's official completed-hour label.
     out["IsSummerSeason"] = out["Month"].between(6, 9).astype(int)
     out["IsWinterSeason"] = (~out["Month"].between(6, 9)).astype(int)
-    offpeak = (out["IsWeekend"].eq(1) | out["IsHoliday"].eq(1) | (out["Hour"] < 7) | (out["Hour"] >= 22))
-    superpeak = (out["IsBusinessDay"].eq(1) & out["Hour"].between(16, 18))
-    onpeak = (out["IsBusinessDay"].eq(1) & ~offpeak & ~superpeak)
+    offpeak = (
+        out["IsWeekend"].eq(1)
+        | out["IsHoliday"].eq(1)
+        | (out["Hour"] < 7)
+        | (out["Hour"] >= 22)
+    )
+    superpeak = out["IsBusinessDay"].eq(1) & out["Hour"].between(16, 18)
+    onpeak = out["IsBusinessDay"].eq(1) & ~offpeak & ~superpeak
     out["IsOffPeak"] = offpeak.astype(int)
     out["IsOnPeak"] = onpeak.astype(int)
     out["IsSuperPeak"] = superpeak.astype(int)
-    out["IsLikelySystemPeakHour"] = (out["Hour"].between(16, 20) & out["IsBusinessDay"].eq(1)).astype(int)
+    out["IsLikelySystemPeakHour"] = (
+        out["Hour"].between(16, 20) & out["IsBusinessDay"].eq(1)
+    ).astype(int)
     return out
 
 

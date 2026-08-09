@@ -13,7 +13,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-
 FINAL_STAGE_NAMES = {
     "final_corrected",
     "final_corrected_production",
@@ -22,12 +21,20 @@ FINAL_STAGE_NAMES = {
 
 
 def _final_rows(metrics: pd.DataFrame, stage_col: str) -> pd.DataFrame:
-    if not isinstance(metrics, pd.DataFrame) or metrics.empty or stage_col not in metrics.columns:
+    if (
+        not isinstance(metrics, pd.DataFrame)
+        or metrics.empty
+        or stage_col not in metrics.columns
+    ):
         return pd.DataFrame()
     return metrics[metrics[stage_col].astype(str).isin(FINAL_STAGE_NAMES)].copy()
 
 
-def _objective_score(stage_metrics: pd.DataFrame, segment_metrics: pd.DataFrame, weights: dict[str, float] | None = None) -> float:
+def _objective_score(
+    stage_metrics: pd.DataFrame,
+    segment_metrics: pd.DataFrame,
+    weights: dict[str, float] | None = None,
+) -> float:
     weights = weights or {}
     w_overall = float(weights.get("overall_mae", 0.40))
     w_peak = float(weights.get("peak_mae", 0.25))
@@ -36,32 +43,58 @@ def _objective_score(stage_metrics: pd.DataFrame, segment_metrics: pd.DataFrame,
     w_cloud = float(weights.get("cloudy_midday_mae", 0.05))
 
     final = _final_rows(stage_metrics, "Model")
-    overall_mae = float(final["MAE_MWH"].iloc[0]) if not final.empty and "MAE_MWH" in final else 1e6
+    overall_mae = (
+        float(final["MAE_MWH"].iloc[0])
+        if not final.empty and "MAE_MWH" in final
+        else 1e6
+    )
 
     peak_mae = overall_mae
     warm_bias = 0.0
     cloud_mae = overall_mae
     if isinstance(segment_metrics, pd.DataFrame) and not segment_metrics.empty:
-        final_seg = segment_metrics[segment_metrics.get("Stage", "").eq("final_corrected")].copy() if "Stage" in segment_metrics.columns else segment_metrics.copy()
+        final_seg = (
+            segment_metrics[
+                segment_metrics.get("Stage", "").eq("final_corrected")
+            ].copy()
+            if "Stage" in segment_metrics.columns
+            else segment_metrics.copy()
+        )
         if "HourGroup" in final_seg.columns:
             peak = final_seg[final_seg["HourGroup"].astype(str).eq("Peak")]
             if not peak.empty and "MAE_MWH" in peak:
                 peak_mae = float(peak["MAE_MWH"].mean())
         if {"DailyMaxTempBucket", "HourGroup", "Bias_MWH"}.issubset(final_seg.columns):
-            warm = final_seg[final_seg["DailyMaxTempBucket"].astype(str).isin(["75-85", "85-90"]) & final_seg["HourGroup"].astype(str).eq("Peak")]
+            warm = final_seg[
+                final_seg["DailyMaxTempBucket"].astype(str).isin(["75-85", "85-90"])
+                & final_seg["HourGroup"].astype(str).eq("Peak")
+            ]
             if not warm.empty:
                 warm_bias = float(np.abs(warm["Bias_MWH"]).mean())
         if {"CloudCoverBucket", "HourGroup", "MAE_MWH"}.issubset(final_seg.columns):
-            cloudy = final_seg[final_seg["CloudCoverBucket"].astype(str).isin(["Mostly Cloudy", "Overcast"]) & final_seg["HourGroup"].astype(str).eq("Midday")]
+            cloudy = final_seg[
+                final_seg["CloudCoverBucket"]
+                .astype(str)
+                .isin(["Mostly Cloudy", "Overcast"])
+                & final_seg["HourGroup"].astype(str).eq("Midday")
+            ]
             if not cloudy.empty:
                 cloud_mae = float(cloudy["MAE_MWH"].mean())
 
     # daily peak miss term is filled by caller when available; use peak MAE fallback here.
     peak_miss = peak_mae
-    return w_overall * overall_mae + w_peak * peak_mae + w_peak_miss * peak_miss + w_warm_bias * warm_bias + w_cloud * cloud_mae
+    return (
+        w_overall * overall_mae
+        + w_peak * peak_mae
+        + w_peak_miss * peak_miss
+        + w_warm_bias * warm_bias
+        + w_cloud * cloud_mae
+    )
 
 
-def scorecard_objective(scorecard: pd.DataFrame, weights: dict[str, float] | None = None) -> float:
+def scorecard_objective(
+    scorecard: pd.DataFrame, weights: dict[str, float] | None = None
+) -> float:
     """Objective for the season-balanced replay scorecard.
 
     It intentionally uses only slices emitted by ``rolling_origin_replay_scorecard.csv`` so correction
@@ -74,13 +107,19 @@ def scorecard_objective(scorecard: pd.DataFrame, weights: dict[str, float] | Non
 
     def _metric(slice_name: str, column: str, default: float) -> float:
         rows = final[final["Slice"].astype(str).eq(slice_name)]
-        if rows.empty or column not in rows or pd.to_numeric(rows[column], errors="coerce").dropna().empty:
+        if (
+            rows.empty
+            or column not in rows
+            or pd.to_numeric(rows[column], errors="coerce").dropna().empty
+        ):
             return default
         return float(pd.to_numeric(rows[column], errors="coerce").dropna().mean())
 
     overall_mae = _metric("Overall", "MAE_MWH", 1e6)
     peak_mae = _metric("PeakWindowHours14to18", "MAE_MWH", overall_mae)
-    peak_miss = abs(_metric("PeakWindowHours14to18", "Underforecast_At_Actual_Peak_MWH", peak_mae))
+    peak_miss = abs(
+        _metric("PeakWindowHours14to18", "Underforecast_At_Actual_Peak_MWH", peak_mae)
+    )
     warm_bias = abs(_metric("HotPeakDailyMax90Plus", "Bias_MWH", 0.0))
     cloud_mae = _metric("CloudSolarMidday", "MAE_MWH", overall_mae)
     return (
@@ -97,14 +136,34 @@ def scorecard_objective(scorecard: pd.DataFrame, weights: dict[str, float] | Non
 # concrete trial's params, e.g. to re-score a held-out set) so the two can never drift.
 V125_PARAM_SPACE: tuple[tuple[str, tuple[str, ...], float, float], ...] = (
     ("cloud_solar_shape_blend", ("calibration", "cloud_solar_shape_blend"), 0.55, 0.95),
-    ("cloud_solar_shape_cap_mwh", ("calibration", "cloud_solar_shape_cap_mwh"), 8.0, 24.0),
+    (
+        "cloud_solar_shape_cap_mwh",
+        ("calibration", "cloud_solar_shape_cap_mwh"),
+        8.0,
+        24.0,
+    ),
     ("warm_ramp_blend", ("calibration", "warm_ramp_blend"), 0.55, 0.98),
     ("warm_ramp_cap_mwh", ("calibration", "warm_ramp_cap_mwh"), 8.0, 22.0),
     ("recent_blend", ("calibration", "recent_residual", "blend"), 0.60, 0.98),
     ("recent_cap_mwh", ("calibration", "recent_residual", "cap_mwh"), 6.0, 16.0),
-    ("w_solar_loss_hourgroup", ("calibration", "recent_residual", "weights", "solar_loss_hourgroup"), 0.03, 0.16),
-    ("w_temp_cloud_hourgroup", ("calibration", "recent_residual", "weights", "temp_cloud_hourgroup"), 0.02, 0.12),
-    ("w_same_hour", ("calibration", "recent_residual", "weights", "same_hour"), 0.08, 0.25),
+    (
+        "w_solar_loss_hourgroup",
+        ("calibration", "recent_residual", "weights", "solar_loss_hourgroup"),
+        0.03,
+        0.16,
+    ),
+    (
+        "w_temp_cloud_hourgroup",
+        ("calibration", "recent_residual", "weights", "temp_cloud_hourgroup"),
+        0.02,
+        0.12,
+    ),
+    (
+        "w_same_hour",
+        ("calibration", "recent_residual", "weights", "same_hour"),
+        0.08,
+        0.25,
+    ),
 )
 
 

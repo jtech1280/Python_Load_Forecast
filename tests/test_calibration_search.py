@@ -82,8 +82,13 @@ class ScoreBundlesTests(unittest.TestCase):
         out = score_bundles([bundle], _minimal_config(cap_mwh=10.0))
         self.assertFalse(out.empty)
         self.assertTrue((out["Replay_Calibration_Days"] == 3).all())
-        self.assertEqual(out["Replay_Calibration_Start_DT"].iloc[0], bundle.raw_calibration["DT"].min())
-        self.assertEqual(out["Replay_Calibration_End_DT"].iloc[0], bundle.raw_calibration["DT"].max())
+        self.assertEqual(
+            out["Replay_Calibration_Start_DT"].iloc[0],
+            bundle.raw_calibration["DT"].min(),
+        )
+        self.assertEqual(
+            out["Replay_Calibration_End_DT"].iloc[0], bundle.raw_calibration["DT"].max()
+        )
         self.assertIn("Final_Backtest_Forecast_MWH", out.columns)
 
     def test_score_bundles_is_sensitive_to_calibration_cap(self):
@@ -118,11 +123,15 @@ class RawOriginBundlePersistenceTests(unittest.TestCase):
             loaded = load_raw_origin_bundles(cache_dir)
             self.assertEqual(len(loaded), 2)
             self.assertEqual([b.origin_number for b in loaded], [1, 2])
-            pd.testing.assert_frame_equal(loaded[0].raw_calibration, bundles[0].raw_calibration)
+            pd.testing.assert_frame_equal(
+                loaded[0].raw_calibration, bundles[0].raw_calibration
+            )
             self.assertEqual(loaded[0].calibration_days, bundles[0].calibration_days)
 
     def test_load_missing_cache_dir_returns_empty_list(self):
-        self.assertEqual(load_raw_origin_bundles("/nonexistent/path/does/not/exist"), [])
+        self.assertEqual(
+            load_raw_origin_bundles("/nonexistent/path/does/not/exist"), []
+        )
 
 
 if __name__ == "__main__":

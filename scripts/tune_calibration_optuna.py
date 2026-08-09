@@ -55,7 +55,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from forecasting.backtest.rolling_origin_replay import build_rolling_origin_replay_bundle
+from forecasting.backtest.rolling_origin_replay import (
+    build_rolling_origin_replay_bundle,
+)
 from forecasting.config_utils import load_forecast_config
 from forecasting.tuning.calibration_search import (
     RawOriginBundle,
@@ -107,11 +109,16 @@ def scorecard_for(bundles: list[RawOriginBundle], config: dict) -> pd.DataFrame:
 def build_cache(config: dict, cache_dir: Path, origin_limit: int | None) -> None:
     from forecasting.forecast.forecast_pipeline import run_pipeline
 
-    print("Running the full pipeline once to build train_df/features for the replay cache...", flush=True)
+    print(
+        "Running the full pipeline once to build train_df/features for the replay cache...",
+        flush=True,
+    )
     results = run_pipeline(config)
     train_df = results["historical_fit_df"]
     features = results.get("features", [])
-    bundles = build_raw_origin_bundles(train_df, features, config, origin_limit=origin_limit)
+    bundles = build_raw_origin_bundles(
+        train_df, features, config, origin_limit=origin_limit
+    )
     if not bundles:
         raise SystemExit(
             "No origins produced a usable raw forecast bundle; check "
@@ -158,7 +165,9 @@ def pick_central_repeat(all_params: list[dict[str, float]]) -> int:
     """
     vectors = [_normalized_param_vector(p) for p in all_params]
     medians = [float(np.median(col)) for col in zip(*vectors)]
-    distances = [sum((v - m) ** 2 for v, m in zip(vec, medians)) ** 0.5 for vec in vectors]
+    distances = [
+        sum((v - m) ** 2 for v, m in zip(vec, medians)) ** 0.5 for vec in vectors
+    ]
     return int(min(range(len(distances)), key=lambda i: distances[i]))
 
 
@@ -175,7 +184,9 @@ def _run_one_repeat(
 
     def objective(trial: "optuna.Trial") -> float:
         trial_config = suggest_v125_params(trial, config)
-        return scorecard_objective(scorecard_for(search_bundles, trial_config), objective_weights)
+        return scorecard_objective(
+            scorecard_for(search_bundles, trial_config), objective_weights
+        )
 
     study = optuna.create_study(
         direction="minimize",
@@ -227,13 +238,17 @@ def run_multi_seed_search(
 
     bundles = load_raw_origin_bundles(cache_dir)
     if not bundles:
-        raise SystemExit(f"No cached raw origin bundles found in {cache_dir}. Run with --build-cache first.")
+        raise SystemExit(
+            f"No cached raw origin bundles found in {cache_dir}. Run with --build-cache first."
+        )
 
     # Carve out a final validation set up front, seeded independently of the repeat seeds so
     # it never lines up with any repeat's own search/holdout split. Never used for any
     # selection decision -- only to report the recommended candidate's true generalization.
     final_holdout_seed = seed + 10_000
-    pool_bundles, final_holdout_bundles = split_bundles(bundles, final_holdout_fraction, final_holdout_seed)
+    pool_bundles, final_holdout_bundles = split_bundles(
+        bundles, final_holdout_fraction, final_holdout_seed
+    )
     print(
         f"Loaded {len(bundles)} cached origins: {len(pool_bundles)} in the search pool, "
         f"{len(final_holdout_bundles)} reserved as a final validation set never used during search.",
@@ -243,7 +258,9 @@ def run_multi_seed_search(
     repeats: list[dict] = []
     for i in range(n_repeats):
         repeat_seed = seed + i
-        search_bundles, repeat_holdout_bundles = split_bundles(pool_bundles, holdout_fraction, repeat_seed)
+        search_bundles, repeat_holdout_bundles = split_bundles(
+            pool_bundles, holdout_fraction, repeat_seed
+        )
         print(
             f"Repeat {i + 1}/{n_repeats} (seed={repeat_seed}): "
             f"{len(search_bundles)} search origins, {len(repeat_holdout_bundles)} repeat-holdout origins.",
@@ -283,10 +300,14 @@ def run_multi_seed_search(
     if final_holdout_bundles:
         final_scorecard = scorecard_for(final_holdout_bundles, recommended_config)
         final_holdout_score = scorecard_objective(final_scorecard, objective_weights)
-        final_scorecard.to_csv(output_dir / "calibration_search_final_holdout_scorecard.csv", index=False)
+        final_scorecard.to_csv(
+            output_dir / "calibration_search_final_holdout_scorecard.csv", index=False
+        )
 
     unstable_params = [
-        name for name, stats in stability.items() if stats["range_fraction_of_search_space"] > UNSTABLE_PARAM_THRESHOLD
+        name
+        for name, stats in stability.items()
+        if stats["range_fraction_of_search_space"] > UNSTABLE_PARAM_THRESHOLD
     ]
 
     summary = {
@@ -311,7 +332,9 @@ def run_multi_seed_search(
         "final_holdout_origins": [b.origin_number for b in final_holdout_bundles],
         "final_holdout_objective": final_holdout_score,
     }
-    (output_dir / "calibration_search_best_params.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    (output_dir / "calibration_search_best_params.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
     print(json.dumps(summary, indent=2))
 
     if unstable_params:
@@ -325,7 +348,11 @@ def run_multi_seed_search(
     search_scores = [r["search_set_objective"] for r in repeats]
     if final_holdout_score is not None and search_scores:
         mean_search = sum(search_scores) / len(search_scores)
-        if mean_search and (final_holdout_score - mean_search) / abs(mean_search) > OVERFIT_WARNING_THRESHOLD:
+        if (
+            mean_search
+            and (final_holdout_score - mean_search) / abs(mean_search)
+            > OVERFIT_WARNING_THRESHOLD
+        ):
             print(
                 "WARNING: the final held-out objective is notably worse than the average "
                 f"search-set objective across repeats (>{int(OVERFIT_WARNING_THRESHOLD * 100)}% relative gap). "
@@ -336,31 +363,71 @@ def run_multi_seed_search(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Automated calibration-parameter search over the rolling-origin replay.")
-    parser.add_argument("--config", type=str, default=None, help="Path to config.yaml (default: forecasting/config.yaml)")
-    parser.add_argument("--cache-dir", type=Path, default=Path("forecast_outputs/calibration_search_cache"))
-    parser.add_argument("--build-cache", action="store_true", help="(Re)build the raw per-origin forecast cache (expensive: retrains models)")
-    parser.add_argument("--origin-limit", type=int, default=None, help="Cap the number of origins used when building the cache (useful for a quick smoke test)")
-    parser.add_argument("--n-trials", type=int, default=50, help="Optuna trials per repeat")
+    parser = argparse.ArgumentParser(
+        description="Automated calibration-parameter search over the rolling-origin replay."
+    )
     parser.add_argument(
-        "--n-repeats", type=int, default=5,
+        "--config",
+        type=str,
+        default=None,
+        help="Path to config.yaml (default: forecasting/config.yaml)",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=Path("forecast_outputs/calibration_search_cache"),
+    )
+    parser.add_argument(
+        "--build-cache",
+        action="store_true",
+        help="(Re)build the raw per-origin forecast cache (expensive: retrains models)",
+    )
+    parser.add_argument(
+        "--origin-limit",
+        type=int,
+        default=None,
+        help="Cap the number of origins used when building the cache (useful for a quick smoke test)",
+    )
+    parser.add_argument(
+        "--n-trials", type=int, default=50, help="Optuna trials per repeat"
+    )
+    parser.add_argument(
+        "--n-repeats",
+        type=int,
+        default=5,
         help="Independent search repeats with different search/holdout splits of the pool, to check "
         "whether the search consistently converges on similar parameters or is overfitting a particular split",
     )
-    parser.add_argument("--holdout-fraction", type=float, default=0.25, help="Fraction of the search pool held out per repeat, scored once per repeat")
     parser.add_argument(
-        "--final-holdout-fraction", type=float, default=0.2,
+        "--holdout-fraction",
+        type=float,
+        default=0.25,
+        help="Fraction of the search pool held out per repeat, scored once per repeat",
+    )
+    parser.add_argument(
+        "--final-holdout-fraction",
+        type=float,
+        default=0.2,
         help="Fraction of ALL cached origins reserved up front and never used by any repeat's search -- "
         "the recommended config's score against this is the number to trust",
     )
-    parser.add_argument("--seed", type=int, default=42, help="Base seed; repeat i uses seed+i")
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Base seed; repeat i uses seed+i"
+    )
     parser.add_argument("--study-name", type=str, default="calibration_search")
     parser.add_argument(
-        "--storage", type=str, default=None,
+        "--storage",
+        type=str,
+        default=None,
         help="Optional optuna storage URL (e.g. sqlite:///forecast_outputs/calibration_search.db) to persist/resume studies",
     )
     parser.add_argument("--output-dir", type=Path, default=Path("forecast_outputs"))
-    parser.add_argument("--objective-weights", type=str, default=None, help="JSON dict overriding scorecard_objective's default weights")
+    parser.add_argument(
+        "--objective-weights",
+        type=str,
+        default=None,
+        help="JSON dict overriding scorecard_objective's default weights",
+    )
     args = parser.parse_args()
 
     config = load_forecast_config(args.config)

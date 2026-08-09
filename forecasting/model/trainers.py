@@ -25,7 +25,9 @@ def train_tree_models(
     """
     cfg = config or {}
     if parallel_tree_training_enabled(cfg):
-        print(f"Training XGBoost and LightGBM concurrently for {stage_name} (XGB GPU + LGB CPU performance mode)...")
+        print(
+            f"Training XGBoost and LightGBM concurrently for {stage_name} (XGB GPU + LGB CPU performance mode)..."
+        )
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="tree-train") as ex:
             xgb_future = ex.submit(train_xgb, df, features, cfg)
             lgb_future = ex.submit(train_lgb, df, features, cfg)
@@ -33,7 +35,9 @@ def train_tree_models(
             lgb_model, _ = lgb_future.result()
         return xgb_model, lgb_model, xgb_features
 
-    print(f"Training XGBoost and LightGBM sequentially for {stage_name} (all configured threads per model)...")
+    print(
+        f"Training XGBoost and LightGBM sequentially for {stage_name} (all configured threads per model)..."
+    )
     xgb_model, xgb_features = train_xgb(df, features, config=cfg)
     lgb_model, _ = train_lgb(df, xgb_features, config=cfg)
     return xgb_model, lgb_model, xgb_features

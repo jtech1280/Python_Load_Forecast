@@ -36,11 +36,16 @@ def _as_bool(value, default: bool = False) -> bool:
 
 
 def catboost_enabled(config: dict | None) -> bool:
-    return _as_bool(_cfg(config, "model", "catboost", "enabled", default=False), default=False)
+    return _as_bool(
+        _cfg(config, "model", "catboost", "enabled", default=False), default=False
+    )
 
 
 def catboost_blend_enabled(config: dict | None) -> bool:
-    return catboost_enabled(config) and _as_bool(_cfg(config, "model", "catboost", "blend_into_production", default=False), default=False)
+    return catboost_enabled(config) and _as_bool(
+        _cfg(config, "model", "catboost", "blend_into_production", default=False),
+        default=False,
+    )
 
 
 def _available_features(df: pd.DataFrame, features: list[str]) -> list[str]:
@@ -87,6 +92,7 @@ def _early_stopping_cfg(config: dict | None) -> dict[str, Any]:
 def _import_catboost():
     try:
         from catboost import CatBoostRegressor
+
         return CatBoostRegressor, None
     except Exception as exc:
         return None, exc
@@ -101,14 +107,18 @@ def _base_params(config: dict | None) -> dict[str, Any]:
         "l2_leaf_reg": float(p.get("l2_leaf_reg", 4.0)),
         "loss_function": str(p.get("loss_function", "RMSE")),
         "random_seed": int(p.get("random_seed", 42)),
-        "thread_count": int(resolve_n_jobs(config, "catboost", default=p.get("thread_count", -1))),
+        "thread_count": int(
+            resolve_n_jobs(config, "catboost", default=p.get("thread_count", -1))
+        ),
         "verbose": False,
         "allow_writing_files": False,
     }
 
 
 def _gpu_requested(config: dict | None) -> bool:
-    hw_use_gpu = _as_bool(_cfg(config, "hardware", "use_gpu", default=True), default=True)
+    hw_use_gpu = _as_bool(
+        _cfg(config, "hardware", "use_gpu", default=True), default=True
+    )
     p = _cfg(config, "model", "catboost", default={}) or {}
     task = str(p.get("task_type", "GPU")).upper()
     return hw_use_gpu and task == "GPU"
@@ -133,7 +143,9 @@ def _attempts(config: dict | None) -> list[tuple[str, dict[str, Any]]]:
     return attempts
 
 
-def train_catboost(df: pd.DataFrame, features: list[str] | None = None, config: dict | None = None):
+def train_catboost(
+    df: pd.DataFrame, features: list[str] | None = None, config: dict | None = None
+):
     """Train CatBoost as an optional benchmark. Returns (model, features) or (None, features)."""
     global _LAST_CATBOOST_TRAINING_INFO
     cfg = config or {}
@@ -148,7 +160,9 @@ def train_catboost(df: pd.DataFrame, features: list[str] | None = None, config: 
             "n_rows": int(len(df)),
             "n_features": int(len(features)),
         }
-        print("WARNING: CatBoost benchmark skipped because catboost is not installed or failed to import.")
+        print(
+            "WARNING: CatBoost benchmark skipped because catboost is not installed or failed to import."
+        )
         return None, features
 
     es_cfg = _early_stopping_cfg(cfg)
@@ -169,7 +183,9 @@ def train_catboost(df: pd.DataFrame, features: list[str] | None = None, config: 
     if valid_df is not None and not valid_df.empty:
         X_valid = _prepare_x(valid_df, features)
         y_valid = pd.to_numeric(valid_df["MWH"], errors="coerce").astype(float)
-    has_eval_set = X_valid is not None and y_valid is not None and len(X_valid) and len(y_valid)
+    has_eval_set = (
+        X_valid is not None and y_valid is not None and len(X_valid) and len(y_valid)
+    )
 
     mono_vector = catboost_monotone_param(features, cfg)
 
@@ -180,7 +196,9 @@ def train_catboost(df: pd.DataFrame, features: list[str] | None = None, config: 
             attempt_params["monotone_constraints"] = mono_vector
     if has_eval_set:
         for _, attempt_params in attempts:
-            attempt_params["eval_metric"] = str(es_cfg.get("metric", "mae")).strip().upper()
+            attempt_params["eval_metric"] = (
+                str(es_cfg.get("metric", "mae")).strip().upper()
+            )
 
     for backend_name, params in attempts:
         try:
@@ -212,7 +230,11 @@ def train_catboost(df: pd.DataFrame, features: list[str] | None = None, config: 
                     "rounds": int(es_cfg.get("rounds", 75)),
                     "validation_days": float(es_cfg.get("validation_days", 45)),
                     "best_iteration": best_iteration,
-                    "tree_count": int(model.tree_count_) if hasattr(model, "tree_count_") else None,
+                    "tree_count": (
+                        int(model.tree_count_)
+                        if hasattr(model, "tree_count_")
+                        else None
+                    ),
                 },
                 "n_rows": int(len(df)),
                 "n_features": int(len(features)),
@@ -242,7 +264,9 @@ def get_last_catboost_training_info() -> dict[str, Any]:
 
 def write_catboost_training_info(config: dict | None) -> None:
     try:
-        out_dir = Path(_cfg(config, "project", "output_dir", default="forecast_outputs"))
+        out_dir = Path(
+            _cfg(config, "project", "output_dir", default="forecast_outputs")
+        )
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "catboost_training_backend.json").write_text(
             json.dumps(get_last_catboost_training_info(), indent=2, default=str),

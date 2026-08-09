@@ -35,7 +35,10 @@ from forecasting.backtest.rolling_origin_replay import (
     _replay_cfg,
     apply_origin_correction_chain,
 )
-from forecasting.forecast.forecast_pipeline import build_correction_artifacts, _production_ensemble_weights
+from forecasting.forecast.forecast_pipeline import (
+    build_correction_artifacts,
+    _production_ensemble_weights,
+)
 
 
 @dataclass
@@ -83,7 +86,10 @@ def build_raw_origin_bundles(
 
     bundles: list[RawOriginBundle] = []
     for origin_number, origin_dt in enumerate(origins, start=1):
-        print(f"[calibration_search] building raw bundle for origin {origin_number}/{len(origins)}: {origin_dt}", flush=True)
+        print(
+            f"[calibration_search] building raw bundle for origin {origin_number}/{len(origins)}: {origin_dt}",
+            flush=True,
+        )
         pre_origin = work[work["DT"] < origin_dt].copy()
         raw_calibration = run_rolling_backtest(
             train_df=pre_origin,
@@ -95,8 +101,18 @@ def build_raw_origin_bundles(
             skip_prophet=skip_calibration_prophet,
         )
         raw_calibration.attrs = {}
-        raw_origin, raw_weather_realism, raw_realized_scenarios, raw_weather_scenarios = _origin_raw_forecasts(
-            work, features, config, origin_dt, horizon_days, origin_number,
+        (
+            raw_origin,
+            raw_weather_realism,
+            raw_realized_scenarios,
+            raw_weather_scenarios,
+        ) = _origin_raw_forecasts(
+            work,
+            features,
+            config,
+            origin_dt,
+            horizon_days,
+            origin_number,
         )
         if raw_origin.empty:
             continue
@@ -120,7 +136,9 @@ def _bundle_path(cache_dir: Path, bundle: RawOriginBundle) -> Path:
     return cache_dir / f"origin_{bundle.origin_number:03d}_{date_tag}.pkl"
 
 
-def save_raw_origin_bundles(bundles: list[RawOriginBundle], cache_dir: str | Path) -> list[Path]:
+def save_raw_origin_bundles(
+    bundles: list[RawOriginBundle], cache_dir: str | Path
+) -> list[Path]:
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     paths = []
@@ -166,10 +184,16 @@ def score_bundles(bundles: list[RawOriginBundle], config: dict) -> pd.DataFrame:
             continue
         corrected["Replay_Calibration_Days"] = bundle.calibration_days
         corrected["Replay_Calibration_Start_DT"] = (
-            bundle.raw_calibration["DT"].min() if not bundle.raw_calibration.empty else pd.NaT
+            bundle.raw_calibration["DT"].min()
+            if not bundle.raw_calibration.empty
+            else pd.NaT
         )
         corrected["Replay_Calibration_End_DT"] = (
-            bundle.raw_calibration["DT"].max() if not bundle.raw_calibration.empty else pd.NaT
+            bundle.raw_calibration["DT"].max()
+            if not bundle.raw_calibration.empty
+            else pd.NaT
         )
         frames.append(corrected)
-    return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+    return (
+        pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+    )

@@ -9,7 +9,6 @@ import subprocess
 import sys
 from zoneinfo import ZoneInfo
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if __package__ in {None, ""} and str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -28,7 +27,9 @@ def _normalize_project_paths(config: dict) -> dict:
 def _disable_windows_platform_wmi_probe() -> None:
     if os.name != "nt":
         return
-    enabled = str(os.environ.get("FORECAST_ENABLE_PLATFORM_WMI", "0")).strip().lower() in {
+    enabled = str(
+        os.environ.get("FORECAST_ENABLE_PLATFORM_WMI", "0")
+    ).strip().lower() in {
         "1",
         "true",
         "yes",
@@ -141,7 +142,9 @@ def _acquire_replay_lock(output_dir: Path) -> tuple[int, Path] | None:
 class _ForecastProgressBar:
     def __init__(self) -> None:
         self._bar = None
-        self._disabled = str(os.environ.get("FORECAST_PROGRESS", "1")).strip().lower() in {
+        self._disabled = str(
+            os.environ.get("FORECAST_PROGRESS", "1")
+        ).strip().lower() in {
             "0",
             "false",
             "no",
@@ -190,7 +193,9 @@ def _resolve_default_argv(argv: list[str] | None) -> list[str] | None:
     if cli_args:
         return cli_args
 
-    enabled = str(os.environ.get("FORECAST_DEFAULT_RUN_ARGS", "1")).strip().lower() not in {
+    enabled = str(
+        os.environ.get("FORECAST_DEFAULT_RUN_ARGS", "1")
+    ).strip().lower() not in {
         "0",
         "false",
         "no",
@@ -274,7 +279,8 @@ def _archive_replay_diagnostic_snapshots(
         "rolling_origin_replay_origin_metrics_by_stage": None,
         "rolling_origin_replay_peak_window_bias_scorecard": None,
         "production_readiness_scorecard": None,
-        "june_hot_origin_diagnostics": replay_hash_columns + [
+        "june_hot_origin_diagnostics": replay_hash_columns
+        + [
             "Analog_Count_SameHour_PreOrigin",
             "Analog_Actual_Mean_SameHour_PreOrigin_MWH",
             "Actual_Minus_Analog_SameHour_Mean_MWH",
@@ -314,15 +320,30 @@ def _parse_local_clock(value: object, default: str) -> dt_time:
         )
     except Exception:
         fallback = str(default).split(":")
-        return dt_time(hour=int(fallback[0]), minute=int(fallback[1]) if len(fallback) > 1 else 0)
+        return dt_time(
+            hour=int(fallback[0]), minute=int(fallback[1]) if len(fallback) > 1 else 0
+        )
 
 
-def _weather_import_window_for_now(config: dict | None, now: datetime | None = None) -> tuple[datetime, datetime, datetime] | None:
-    policy = (((config or {}).get("openmeteo", {}) or {}).get("forecast_import_policy", {}) or {})
+def _weather_import_window_for_now(
+    config: dict | None, now: datetime | None = None
+) -> tuple[datetime, datetime, datetime] | None:
+    policy = ((config or {}).get("openmeteo", {}) or {}).get(
+        "forecast_import_policy", {}
+    ) or {}
     if not bool(policy.get("enabled", False)):
         return None
-    tz = ZoneInfo(str(((config or {}).get("project", {}) or {}).get("timezone") or "America/Los_Angeles"))
-    now_local = now.astimezone(tz) if now is not None and now.tzinfo is not None else (now.replace(tzinfo=tz) if now is not None else datetime.now(tz))
+    tz = ZoneInfo(
+        str(
+            ((config or {}).get("project", {}) or {}).get("timezone")
+            or "America/Los_Angeles"
+        )
+    )
+    now_local = (
+        now.astimezone(tz)
+        if now is not None and now.tzinfo is not None
+        else (now.replace(tzinfo=tz) if now is not None else datetime.now(tz))
+    )
     start_time = _parse_local_clock(policy.get("import_window_start_local"), "05:30")
     end_time = _parse_local_clock(policy.get("import_window_end_local"), "08:00")
     start = datetime.combine(now_local.date(), start_time, tzinfo=tz)
@@ -358,7 +379,7 @@ def _solar_refresh_blocked_by_weather_import_policy(
 
 
 def _build_solar_command(output_dir: Path, config: dict | None = None) -> list[str]:
-    solar_cfg = ((config or {}).get("solar", {}) or {})
+    solar_cfg = (config or {}).get("solar", {}) or {}
     cmd = [
         sys.executable,
         "forecasting/solar/solar_forecaster.py",
@@ -368,9 +389,13 @@ def _build_solar_command(output_dir: Path, config: dict | None = None) -> list[s
     _add_optional_solar_arg(cmd, "--driver", solar_cfg.get("driver"))
     _add_optional_solar_arg(cmd, "--dest-server", solar_cfg.get("dest_server"))
     _add_optional_solar_arg(cmd, "--dest-db", solar_cfg.get("dest_db"))
-    _add_optional_solar_arg(cmd, "--production-source", solar_cfg.get("production_source"))
+    _add_optional_solar_arg(
+        cmd, "--production-source", solar_cfg.get("production_source")
+    )
     _add_optional_solar_arg(cmd, "--parquet-root", solar_cfg.get("parquet_root"))
-    _add_optional_solar_arg(cmd, "--weather-cache-dir", solar_cfg.get("weather_cache_dir"))
+    _add_optional_solar_arg(
+        cmd, "--weather-cache-dir", solar_cfg.get("weather_cache_dir")
+    )
 
     solar_outputs = {
         "--output-15min": "roseville_solar_forecast.csv",
@@ -414,7 +439,9 @@ def _run_solar_forecast(
         )
         return
     if not require_backtest_outputs:
-        blocked, reason = _solar_refresh_blocked_by_weather_import_policy(config, hourly_path)
+        blocked, reason = _solar_refresh_blocked_by_weather_import_policy(
+            config, hourly_path
+        )
         if blocked:
             if hourly_path.exists():
                 print(reason, flush=True)
@@ -429,7 +456,9 @@ def _run_solar_forecast(
     except subprocess.CalledProcessError:
         if allow_stale_on_failure and hourly_path.exists():
             stat = hourly_path.stat()
-            modified = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            modified = datetime.fromtimestamp(stat.st_mtime).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
             print(
                 "WARNING: solar forecast refresh failed; continuing with existing "
                 f"{hourly_path} last modified {modified}.",
@@ -448,15 +477,19 @@ def _run_solar_forecast(
         ]
         missing = [path for path in required_outputs if not path.exists()]
         stale_or_empty = [
-            path for path in required_outputs
-            if path.exists() and (path.stat().st_size <= 0 or path.stat().st_mtime < started_at - 1.0)
+            path
+            for path in required_outputs
+            if path.exists()
+            and (path.stat().st_size <= 0 or path.stat().st_mtime < started_at - 1.0)
         ]
         if missing or stale_or_empty:
             details = []
             if missing:
                 details.append("missing: " + ", ".join(str(path) for path in missing))
             if stale_or_empty:
-                details.append("stale/empty: " + ", ".join(str(path) for path in stale_or_empty))
+                details.append(
+                    "stale/empty: " + ", ".join(str(path) for path in stale_or_empty)
+                )
             raise RuntimeError(
                 "Solar forecast refresh completed, but required solar backtest outputs were not refreshed; "
                 + "; ".join(details)
@@ -464,37 +497,168 @@ def _run_solar_forecast(
 
 
 def main(argv: list[str] | None = None):
-    parser = argparse.ArgumentParser(description="Roseville System Load Forecast V12.8 (targeted solar-loss refinement + risk bands + max CPU/GPU)")
-    parser.add_argument("--run-dashboard", action="store_true", help="Launch Dash dashboard after forecast")
-    parser.add_argument("--dashboard-port", type=int, default=8050, help="Port for --run-dashboard (default: 8050)")
-    parser.add_argument("--horizon-days", type=int, default=None, help="Override forecast horizon days (default from config)")
-    parser.add_argument("--save-csv", action="store_true", help="Export forecast/backtest CSVs to output directory")
-    parser.add_argument("--save-sql", action="store_true", help="Persist forecast/backtest/weather outputs to SQL Server")
-    parser.add_argument("--no-save-sql", action="store_true", help="Skip SQL Server output persistence for this run")
-    parser.add_argument("--skip-diagnostics", action="store_true", help="Skip detailed tuning diagnostics export")
-    parser.add_argument("--skip-solar-forecast", action="store_true", help="Skip solar forecast refresh and use existing solar forecast CSV if present")
-    parser.add_argument("--allow-stale-solar-forecast", action="store_true", help="Continue with existing solar forecast CSV if solar refresh fails")
-    parser.add_argument("--strict-solar-forecast", action="store_true", help="Require fresh solar refresh outputs; this is the default for rolling-origin replay")
-    parser.add_argument("--disable-prophet", action="store_true", help="Skip Prophet benchmark training/prediction even if enabled in config.yaml")
-    parser.add_argument("--disable-catboost", action="store_true", help="Skip CatBoost benchmark training/prediction even if enabled in config.yaml")
-    parser.add_argument("--disable-five-min-load", action="store_true", help="Disable PowerSupply 5-minute load features for A/B replay testing")
-    parser.add_argument("--disable-local-weather", action="store_true", help="Disable local PowerSupply weather station diagnostics/calibration")
-    parser.add_argument("--use-local-weather-calibration", action="store_true", help="Apply Berry Sub historical temperature bias calibration to Open-Meteo temperature")
-    parser.add_argument("--blend-catboost", action="store_true", help="Allow CatBoost to affect production Raw_Forecast_MWH using config ensemble weight")
-    parser.add_argument("--cpu-only", action="store_true", help="Disable GPU attempts and force CPU training")
-    parser.add_argument("--use-gpu", action="store_true", help="Force-enable XGBoost GPU attempts even if config.yaml disables them")
-    parser.add_argument("--use-lgb-gpu", action="store_true", help="Also attempt LightGBM GPU training; falls back to CPU if configured")
-    parser.add_argument("--gpu-priority", action="store_true", help="Use all supported GPU model backends and train tree models sequentially to prioritize GPU work")
-    parser.add_argument("--cpu-threads", type=int, default=None, help="CPU threads for OpenMP/BLAS/XGB/LGB. Use -1 for all visible logical cores.")
-    parser.add_argument("--safe-performance", action="store_true", help="Disable parallel tree-model training; each model still uses configured CPU threads")
-    parser.add_argument("--force-parallel-cpu-training", action="store_true", help="Allow XGB CPU and LGB CPU to train concurrently; can oversubscribe CPUs")
-    parser.add_argument("--rolling-origin-replay", action="store_true", help="Run opt-in multi-origin production-horizon replay diagnostics")
-    parser.add_argument("--replay-max-origins", type=int, default=None, help="Override rolling replay origin count")
-    parser.add_argument("--replay-origin-step-days", type=int, default=None, help="Override days between rolling replay origins")
-    parser.add_argument("--replay-origins-per-season", type=int, default=None, help="Override scorecard origins selected per season")
-    parser.add_argument("--replay-fixed-origins", type=str, default=None, help="Comma-separated fixed rolling replay origin dates")
-    parser.add_argument("--replay-fixed-origins-file", type=str, default=None, help="Text file containing one fixed rolling replay origin date per line")
-    parser.add_argument("--train-start-date", type=str, default=None, help="Override training and historical weather start date, e.g. 2018-01-01")
+    parser = argparse.ArgumentParser(
+        description="Roseville System Load Forecast V12.8 (targeted solar-loss refinement + risk bands + max CPU/GPU)"
+    )
+    parser.add_argument(
+        "--run-dashboard",
+        action="store_true",
+        help="Launch Dash dashboard after forecast",
+    )
+    parser.add_argument(
+        "--dashboard-port",
+        type=int,
+        default=8050,
+        help="Port for --run-dashboard (default: 8050)",
+    )
+    parser.add_argument(
+        "--horizon-days",
+        type=int,
+        default=None,
+        help="Override forecast horizon days (default from config)",
+    )
+    parser.add_argument(
+        "--save-csv",
+        action="store_true",
+        help="Export forecast/backtest CSVs to output directory",
+    )
+    parser.add_argument(
+        "--save-sql",
+        action="store_true",
+        help="Persist forecast/backtest/weather outputs to SQL Server",
+    )
+    parser.add_argument(
+        "--no-save-sql",
+        action="store_true",
+        help="Skip SQL Server output persistence for this run",
+    )
+    parser.add_argument(
+        "--skip-diagnostics",
+        action="store_true",
+        help="Skip detailed tuning diagnostics export",
+    )
+    parser.add_argument(
+        "--skip-solar-forecast",
+        action="store_true",
+        help="Skip solar forecast refresh and use existing solar forecast CSV if present",
+    )
+    parser.add_argument(
+        "--allow-stale-solar-forecast",
+        action="store_true",
+        help="Continue with existing solar forecast CSV if solar refresh fails",
+    )
+    parser.add_argument(
+        "--strict-solar-forecast",
+        action="store_true",
+        help="Require fresh solar refresh outputs; this is the default for rolling-origin replay",
+    )
+    parser.add_argument(
+        "--disable-prophet",
+        action="store_true",
+        help="Skip Prophet benchmark training/prediction even if enabled in config.yaml",
+    )
+    parser.add_argument(
+        "--disable-catboost",
+        action="store_true",
+        help="Skip CatBoost benchmark training/prediction even if enabled in config.yaml",
+    )
+    parser.add_argument(
+        "--disable-five-min-load",
+        action="store_true",
+        help="Disable PowerSupply 5-minute load features for A/B replay testing",
+    )
+    parser.add_argument(
+        "--disable-local-weather",
+        action="store_true",
+        help="Disable local PowerSupply weather station diagnostics/calibration",
+    )
+    parser.add_argument(
+        "--use-local-weather-calibration",
+        action="store_true",
+        help="Apply Berry Sub historical temperature bias calibration to Open-Meteo temperature",
+    )
+    parser.add_argument(
+        "--blend-catboost",
+        action="store_true",
+        help="Allow CatBoost to affect production Raw_Forecast_MWH using config ensemble weight",
+    )
+    parser.add_argument(
+        "--cpu-only",
+        action="store_true",
+        help="Disable GPU attempts and force CPU training",
+    )
+    parser.add_argument(
+        "--use-gpu",
+        action="store_true",
+        help="Force-enable XGBoost GPU attempts even if config.yaml disables them",
+    )
+    parser.add_argument(
+        "--use-lgb-gpu",
+        action="store_true",
+        help="Also attempt LightGBM GPU training; falls back to CPU if configured",
+    )
+    parser.add_argument(
+        "--gpu-priority",
+        action="store_true",
+        help="Use all supported GPU model backends and train tree models sequentially to prioritize GPU work",
+    )
+    parser.add_argument(
+        "--cpu-threads",
+        type=int,
+        default=None,
+        help="CPU threads for OpenMP/BLAS/XGB/LGB. Use -1 for all visible logical cores.",
+    )
+    parser.add_argument(
+        "--safe-performance",
+        action="store_true",
+        help="Disable parallel tree-model training; each model still uses configured CPU threads",
+    )
+    parser.add_argument(
+        "--force-parallel-cpu-training",
+        action="store_true",
+        help="Allow XGB CPU and LGB CPU to train concurrently; can oversubscribe CPUs",
+    )
+    parser.add_argument(
+        "--rolling-origin-replay",
+        action="store_true",
+        help="Run opt-in multi-origin production-horizon replay diagnostics",
+    )
+    parser.add_argument(
+        "--replay-max-origins",
+        type=int,
+        default=None,
+        help="Override rolling replay origin count",
+    )
+    parser.add_argument(
+        "--replay-origin-step-days",
+        type=int,
+        default=None,
+        help="Override days between rolling replay origins",
+    )
+    parser.add_argument(
+        "--replay-origins-per-season",
+        type=int,
+        default=None,
+        help="Override scorecard origins selected per season",
+    )
+    parser.add_argument(
+        "--replay-fixed-origins",
+        type=str,
+        default=None,
+        help="Comma-separated fixed rolling replay origin dates",
+    )
+    parser.add_argument(
+        "--replay-fixed-origins-file",
+        type=str,
+        default=None,
+        help="Text file containing one fixed rolling replay origin date per line",
+    )
+    parser.add_argument(
+        "--train-start-date",
+        type=str,
+        default=None,
+        help="Override training and historical weather start date, e.g. 2018-01-01",
+    )
     args = parser.parse_args(_resolve_default_argv(argv))
 
     config = _normalize_project_paths(load_config())
@@ -506,11 +670,15 @@ def main(argv: list[str] | None = None):
 
     if args.disable_prophet:
         config.setdefault("model", {}).setdefault("prophet", {})["enabled"] = False
-        config.setdefault("model", {}).setdefault("ensemble_weights", {})["prophet"] = 0.0
+        config.setdefault("model", {}).setdefault("ensemble_weights", {})[
+            "prophet"
+        ] = 0.0
 
     if args.disable_catboost:
         config.setdefault("model", {}).setdefault("catboost", {})["enabled"] = False
-        config.setdefault("model", {}).setdefault("ensemble_weights", {})["catboost"] = 0.0
+        config.setdefault("model", {}).setdefault("ensemble_weights", {})[
+            "catboost"
+        ] = 0.0
 
     if args.disable_five_min_load:
         config.setdefault("five_min_load", {})["enabled"] = False
@@ -520,16 +688,29 @@ def main(argv: list[str] | None = None):
 
     if args.use_local_weather_calibration:
         config.setdefault("local_weather", {})["enabled"] = True
-        config.setdefault("local_weather", {}).setdefault("temperature_calibration", {})["enabled"] = True
+        config.setdefault("local_weather", {}).setdefault(
+            "temperature_calibration", {}
+        )["enabled"] = True
 
     if args.blend_catboost:
-        config.setdefault("model", {}).setdefault("catboost", {})["blend_into_production"] = True
-        config.setdefault("model", {}).setdefault("ensemble_weights", {})["catboost"] = float(config.get("model", {}).get("ensemble_weights", {}).get("catboost", 0.20) or 0.20)
+        config.setdefault("model", {}).setdefault("catboost", {})[
+            "blend_into_production"
+        ] = True
+        config.setdefault("model", {}).setdefault("ensemble_weights", {})[
+            "catboost"
+        ] = float(
+            config.get("model", {}).get("ensemble_weights", {}).get("catboost", 0.20)
+            or 0.20
+        )
 
     if args.cpu_threads is not None:
         config.setdefault("hardware", {})["cpu_threads"] = int(args.cpu_threads)
-        config.setdefault("model", {}).setdefault("xgb", {})["n_jobs"] = int(args.cpu_threads)
-        config.setdefault("model", {}).setdefault("lgb", {})["n_jobs"] = int(args.cpu_threads)
+        config.setdefault("model", {}).setdefault("xgb", {})["n_jobs"] = int(
+            args.cpu_threads
+        )
+        config.setdefault("model", {}).setdefault("lgb", {})["n_jobs"] = int(
+            args.cpu_threads
+        )
 
     if args.safe_performance:
         config.setdefault("hardware", {})["performance_mode"] = "safe"
@@ -566,35 +747,57 @@ def main(argv: list[str] | None = None):
         config.setdefault("model", {}).setdefault("catboost", {})["task_type"] = "GPU"
 
     if args.rolling_origin_replay:
-        config.setdefault("training", {}).setdefault("rolling_origin_replay", {})["enabled"] = True
+        config.setdefault("training", {}).setdefault("rolling_origin_replay", {})[
+            "enabled"
+        ] = True
     if args.replay_max_origins is not None:
-        config.setdefault("training", {}).setdefault("rolling_origin_replay", {})["max_origins"] = int(args.replay_max_origins)
+        config.setdefault("training", {}).setdefault("rolling_origin_replay", {})[
+            "max_origins"
+        ] = int(args.replay_max_origins)
     if args.replay_origin_step_days is not None:
-        config.setdefault("training", {}).setdefault("rolling_origin_replay", {})["origin_step_days"] = int(args.replay_origin_step_days)
+        config.setdefault("training", {}).setdefault("rolling_origin_replay", {})[
+            "origin_step_days"
+        ] = int(args.replay_origin_step_days)
     if args.replay_origins_per_season is not None:
-        config.setdefault("training", {}).setdefault("rolling_origin_replay", {})["origins_per_season"] = int(args.replay_origins_per_season)
+        config.setdefault("training", {}).setdefault("rolling_origin_replay", {})[
+            "origins_per_season"
+        ] = int(args.replay_origins_per_season)
     if args.replay_fixed_origins:
-        config.setdefault("training", {}).setdefault("rolling_origin_replay", {})["fixed_origins"] = str(args.replay_fixed_origins)
+        config.setdefault("training", {}).setdefault("rolling_origin_replay", {})[
+            "fixed_origins"
+        ] = str(args.replay_fixed_origins)
     if args.replay_fixed_origins_file:
-        config.setdefault("training", {}).setdefault("rolling_origin_replay", {})["fixed_origins_file"] = str(args.replay_fixed_origins_file)
+        config.setdefault("training", {}).setdefault("rolling_origin_replay", {})[
+            "fixed_origins_file"
+        ] = str(args.replay_fixed_origins_file)
     if args.train_start_date:
         # Keep load-history and Open-Meteo history aligned so older load rows are not dropped
         # later by missing weather features.
-        config.setdefault("training", {})["train_start_date"] = str(args.train_start_date)
-        config.setdefault("openmeteo", {})["historical_start"] = str(args.train_start_date)
+        config.setdefault("training", {})["train_start_date"] = str(
+            args.train_start_date
+        )
+        config.setdefault("openmeteo", {})["historical_start"] = str(
+            args.train_start_date
+        )
 
     output_dir = Path(config["project"]["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     _disable_windows_platform_wmi_probe()
-    replay_cfg = ((config.get("training", {}) or {}).get("rolling_origin_replay", {}) or {})
-    if bool(replay_cfg.get("enabled", False)) and not bool(replay_cfg.get("allow_concurrent", False)):
+    replay_cfg = (config.get("training", {}) or {}).get(
+        "rolling_origin_replay", {}
+    ) or {}
+    if bool(replay_cfg.get("enabled", False)) and not bool(
+        replay_cfg.get("allow_concurrent", False)
+    ):
         lock = _acquire_replay_lock(output_dir)
         if lock is not None:
             _, lock_path = lock
             print(f"Acquired rolling-origin replay lock: {lock_path}", flush=True)
 
     replay_enabled = bool(replay_cfg.get("enabled", False))
-    allow_stale_solar = bool(args.allow_stale_solar_forecast) and not bool(args.strict_solar_forecast)
+    allow_stale_solar = bool(args.allow_stale_solar_forecast) and not bool(
+        args.strict_solar_forecast
+    )
     _run_solar_forecast(
         output_dir,
         config=config,
@@ -604,7 +807,10 @@ def main(argv: list[str] | None = None):
     )
 
     # Apply thread env before importing NumPy / XGBoost / LightGBM-heavy modules.
-    from forecasting.utils.performance import apply_runtime_thread_settings, write_runtime_performance_info
+    from forecasting.utils.performance import (
+        apply_runtime_thread_settings,
+        write_runtime_performance_info,
+    )
 
     perf_info = apply_runtime_thread_settings(config)
     write_runtime_performance_info(config, perf_info)
@@ -619,10 +825,21 @@ def main(argv: list[str] | None = None):
     # Delayed imports keep runtime thread settings effective.
     from forecasting.forecast.forecast_pipeline import run_pipeline
     from forecasting.diagnostics import export_diagnostics_bundle
-    from forecasting.diagnostics.forecast_diagnostics import build_production_readiness_scorecard
-    from forecasting.model.xgb_model import write_xgb_training_info, get_last_xgb_training_info
-    from forecasting.model.lgb_model import write_lgb_training_info, get_last_lgb_training_info
-    from forecasting.model.catboost_model import write_catboost_training_info, get_last_catboost_training_info
+    from forecasting.diagnostics.forecast_diagnostics import (
+        build_production_readiness_scorecard,
+    )
+    from forecasting.model.xgb_model import (
+        write_xgb_training_info,
+        get_last_xgb_training_info,
+    )
+    from forecasting.model.lgb_model import (
+        write_lgb_training_info,
+        get_last_lgb_training_info,
+    )
+    from forecasting.model.catboost_model import (
+        write_catboost_training_info,
+        get_last_catboost_training_info,
+    )
     from forecasting.utils.output_archive import save_distinct_snapshot
 
     progress = _ForecastProgressBar()
@@ -635,7 +852,9 @@ def main(argv: list[str] | None = None):
     finally:
         progress.close()
 
-    replay_cfg = ((config.get("training", {}) or {}).get("rolling_origin_replay", {}) or {})
+    replay_cfg = (config.get("training", {}) or {}).get(
+        "rolling_origin_replay", {}
+    ) or {}
     replay_enabled = bool(replay_cfg.get("enabled", False))
     if results is not None and replay_enabled:
         from forecasting.backtest.rolling_origin_replay import (
@@ -648,11 +867,15 @@ def main(argv: list[str] | None = None):
             features=results.get("features", []),
             config=config,
         )
-        results.setdefault("diagnostics", {}).update(build_rolling_origin_replay_bundle(replay_df, config))
-        results.setdefault("diagnostics", {})["production_readiness_scorecard"] = build_production_readiness_scorecard(
-            results.get("backtest"),
-            replay_df,
-            config=config,
+        results.setdefault("diagnostics", {}).update(
+            build_rolling_origin_replay_bundle(replay_df, config)
+        )
+        results.setdefault("diagnostics", {})["production_readiness_scorecard"] = (
+            build_production_readiness_scorecard(
+                results.get("backtest"),
+                replay_df,
+                config=config,
+            )
         )
         print(
             "Rolling-origin replay: "
@@ -722,17 +945,36 @@ def main(argv: list[str] | None = None):
             metadata={"Source": "production_forecast"},
         )
         results["backtest"].to_csv(backtest_csv, index=False)
-        diag_summary = (results.get("diagnostics", {}) or {}).get("diagnostics_summary", {}) or {}
+        diag_summary = (results.get("diagnostics", {}) or {}).get(
+            "diagnostics_summary", {}
+        ) or {}
         raw_metrics = diag_summary.get("raw_model", results.get("backtest_metrics", {}))
         final_metrics = diag_summary.get("final_corrected_model", {})
         # V12.8: backtest_metrics.json defaults to final corrected metrics to avoid judging
         # production performance by raw XGB/LGB. Raw metrics are preserved separately.
-        metrics_json.write_text(json.dumps(final_metrics or results.get("backtest_metrics", {}), indent=2, default=str), encoding="utf-8")
-        metrics_raw_json.write_text(json.dumps(raw_metrics, indent=2, default=str), encoding="utf-8")
-        metrics_final_json.write_text(json.dumps(final_metrics, indent=2, default=str), encoding="utf-8")
-        features_txt.write_text("\n".join(results.get("features", [])), encoding="utf-8")
-        prophet_features_txt.write_text("\n".join(results.get("prophet_features", [])), encoding="utf-8")
-        catboost_features_txt.write_text("\n".join(results.get("catboost_features", [])), encoding="utf-8")
+        metrics_json.write_text(
+            json.dumps(
+                final_metrics or results.get("backtest_metrics", {}),
+                indent=2,
+                default=str,
+            ),
+            encoding="utf-8",
+        )
+        metrics_raw_json.write_text(
+            json.dumps(raw_metrics, indent=2, default=str), encoding="utf-8"
+        )
+        metrics_final_json.write_text(
+            json.dumps(final_metrics, indent=2, default=str), encoding="utf-8"
+        )
+        features_txt.write_text(
+            "\n".join(results.get("features", [])), encoding="utf-8"
+        )
+        prophet_features_txt.write_text(
+            "\n".join(results.get("prophet_features", [])), encoding="utf-8"
+        )
+        catboost_features_txt.write_text(
+            "\n".join(results.get("catboost_features", [])), encoding="utf-8"
+        )
 
         print(f"Saved forecast to: {forecast_csv}")
         if forecast_snapshot is not None:
@@ -745,16 +987,24 @@ def main(argv: list[str] | None = None):
         write_catboost_training_info(config)
         write_runtime_performance_info(config, perf_info)
         print(f"Saved Prophet regressor list to: {prophet_features_txt}")
-        print(f"XGBoost backend: {get_last_xgb_training_info().get('selected_backend')}")
-        print(f"LightGBM backend: {get_last_lgb_training_info().get('selected_backend')}")
-        print(f"CatBoost backend: {get_last_catboost_training_info().get('selected_backend')}")
+        print(
+            f"XGBoost backend: {get_last_xgb_training_info().get('selected_backend')}"
+        )
+        print(
+            f"LightGBM backend: {get_last_lgb_training_info().get('selected_backend')}"
+        )
+        print(
+            f"CatBoost backend: {get_last_catboost_training_info().get('selected_backend')}"
+        )
 
         diagnostics_enabled = bool(config.get("diagnostics", {}).get("enabled", True))
         if diagnostics_enabled and not args.skip_diagnostics:
             diagnostics = results.get("diagnostics", {})
             written = export_diagnostics_bundle(diagnostics, output_dir)
             print(f"Saved diagnostics files: {len(written)}")
-            print(f"Saved diagnostics manifest to: {written.get('diagnostics_manifest')}")
+            print(
+                f"Saved diagnostics manifest to: {written.get('diagnostics_manifest')}"
+            )
             replay_snapshots = _archive_replay_diagnostic_snapshots(
                 diagnostics,
                 output_dir,
@@ -764,14 +1014,19 @@ def main(argv: list[str] | None = None):
                 print(f"Archived replay diagnostic snapshots: {len(replay_snapshots)}")
 
     if results is not None:
-        from forecasting.data.output_sql_store import output_sql_enabled, persist_run_outputs
+        from forecasting.data.output_sql_store import (
+            output_sql_enabled,
+            persist_run_outputs,
+        )
 
         if output_sql_enabled(config):
             sql_run_id = persist_run_outputs(
                 config,
                 forecast_df=(results.get("future", {}) or {}).get("display"),
                 backtest_df=results.get("backtest"),
-                weather_df=(results.get("diagnostics", {}) or {}).get("forecast_weather_used"),
+                weather_df=(results.get("diagnostics", {}) or {}).get(
+                    "forecast_weather_used"
+                ),
                 replay_diagnostics=results.get("diagnostics"),
                 source="forecasting.main",
                 metadata={
@@ -786,6 +1041,7 @@ def main(argv: list[str] | None = None):
 
     if args.run_dashboard and results is not None:
         from forecasting.dashboard.dashboard_app import create_dashboard_app
+
         app = create_dashboard_app(
             historical_fit_df=results["historical_fit_df"],
             future_results=results["future"],

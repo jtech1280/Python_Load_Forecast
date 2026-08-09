@@ -30,8 +30,13 @@ class MainLauncherTests(unittest.TestCase):
             self.assertEqual(forecast_main._resolve_default_argv(None), ["--save-csv"])
 
     def test_explicit_dashboard_arg_is_preserved(self):
-        with patch.object(sys, "argv", ["forecasting/main.py", "--save-csv", "--run-dashboard"]):
-            self.assertEqual(forecast_main._resolve_default_argv(None), ["--save-csv", "--run-dashboard"])
+        with patch.object(
+            sys, "argv", ["forecasting/main.py", "--save-csv", "--run-dashboard"]
+        ):
+            self.assertEqual(
+                forecast_main._resolve_default_argv(None),
+                ["--save-csv", "--run-dashboard"],
+            )
 
     def test_default_script_args_can_be_disabled(self):
         with patch.object(sys, "argv", ["forecasting/main.py"]):
@@ -139,14 +144,23 @@ class MainLauncherTests(unittest.TestCase):
             }
 
             cmd = forecast_main._build_solar_command(output_dir, config=config)
-            arg_map = {cmd[i]: cmd[i + 1] for i in range(len(cmd) - 1) if cmd[i].startswith("--")}
+            arg_map = {
+                cmd[i]: cmd[i + 1]
+                for i in range(len(cmd) - 1)
+                if cmd[i].startswith("--")
+            }
 
             self.assertEqual(arg_map["--driver"], "ODBC Driver 18 for SQL Server")
             self.assertEqual(arg_map["--dest-server"], "server-b")
             self.assertEqual(arg_map["--dest-db"], "ForecastB")
             self.assertEqual(arg_map["--parquet-root"], "D:/PY_LRS")
-            self.assertEqual(arg_map["--weather-cache-dir"], str(output_dir / "solar_weather"))
-            self.assertEqual(arg_map["--output-hourly"], str(output_dir / "roseville_solar_forecast_hourly.csv"))
+            self.assertEqual(
+                arg_map["--weather-cache-dir"], str(output_dir / "solar_weather")
+            )
+            self.assertEqual(
+                arg_map["--output-hourly"],
+                str(output_dir / "roseville_solar_forecast_hourly.csv"),
+            )
 
     def test_solar_forecast_refresh_failure_can_use_existing_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -157,14 +171,20 @@ class MainLauncherTests(unittest.TestCase):
             with patch.object(
                 forecast_main.subprocess,
                 "run",
-                side_effect=subprocess.CalledProcessError(1, ["python", "solar_forecaster.py"]),
+                side_effect=subprocess.CalledProcessError(
+                    1, ["python", "solar_forecaster.py"]
+                ),
             ):
                 with redirect_stdout(StringIO()) as stdout:
-                    forecast_main._run_solar_forecast(output_dir, allow_stale_on_failure=True)
+                    forecast_main._run_solar_forecast(
+                        output_dir, allow_stale_on_failure=True
+                    )
 
             self.assertIn("continuing with existing", stdout.getvalue())
 
-    def test_solar_forecast_refresh_skips_outside_weather_import_window_with_existing_file(self):
+    def test_solar_forecast_refresh_skips_outside_weather_import_window_with_existing_file(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
             hourly = output_dir / "roseville_solar_forecast_hourly.csv"
@@ -190,14 +210,23 @@ class MainLauncherTests(unittest.TestCase):
                         datetime(2026, 8, 1, 7, 45),
                     ),
                 ),
-                patch.object(forecast_main.subprocess, "run", side_effect=AssertionError("unexpected solar refresh")),
+                patch.object(
+                    forecast_main.subprocess,
+                    "run",
+                    side_effect=AssertionError("unexpected solar refresh"),
+                ),
             ):
                 with redirect_stdout(StringIO()) as stdout:
                     forecast_main._run_solar_forecast(output_dir, config=config)
 
-            self.assertIn("Skipping solar forecast refresh outside Open-Meteo morning import window", stdout.getvalue())
+            self.assertIn(
+                "Skipping solar forecast refresh outside Open-Meteo morning import window",
+                stdout.getvalue(),
+            )
 
-    def test_solar_forecast_refresh_raises_outside_weather_import_window_without_existing_file(self):
+    def test_solar_forecast_refresh_raises_outside_weather_import_window_without_existing_file(
+        self,
+    ):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
             config = {
@@ -220,7 +249,9 @@ class MainLauncherTests(unittest.TestCase):
                     datetime(2026, 8, 1, 7, 45),
                 ),
             ):
-                with self.assertRaisesRegex(RuntimeError, "outside the configured morning window"):
+                with self.assertRaisesRegex(
+                    RuntimeError, "outside the configured morning window"
+                ):
                     forecast_main._run_solar_forecast(output_dir, config=config)
 
     def test_solar_forecast_refresh_failure_raises_without_existing_file(self):
@@ -230,18 +261,30 @@ class MainLauncherTests(unittest.TestCase):
             with patch.object(
                 forecast_main.subprocess,
                 "run",
-                side_effect=subprocess.CalledProcessError(1, ["python", "solar_forecaster.py"]),
+                side_effect=subprocess.CalledProcessError(
+                    1, ["python", "solar_forecaster.py"]
+                ),
             ):
                 with self.assertRaises(subprocess.CalledProcessError):
-                    forecast_main._run_solar_forecast(output_dir, allow_stale_on_failure=True)
+                    forecast_main._run_solar_forecast(
+                        output_dir, allow_stale_on_failure=True
+                    )
 
     def test_solar_forecast_replay_validation_requires_backtest_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
 
-            with patch.object(forecast_main.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)):
-                with self.assertRaisesRegex(RuntimeError, "required solar backtest outputs"):
-                    forecast_main._run_solar_forecast(output_dir, require_backtest_outputs=True)
+            with patch.object(
+                forecast_main.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "required solar backtest outputs"
+                ):
+                    forecast_main._run_solar_forecast(
+                        output_dir, require_backtest_outputs=True
+                    )
 
     def test_solar_forecast_replay_validation_accepts_fresh_backtest_outputs(self):
         required_names = [
@@ -262,7 +305,9 @@ class MainLauncherTests(unittest.TestCase):
                 return subprocess.CompletedProcess([], 0)
 
             with patch.object(forecast_main.subprocess, "run", side_effect=fake_run):
-                forecast_main._run_solar_forecast(output_dir, require_backtest_outputs=True)
+                forecast_main._run_solar_forecast(
+                    output_dir, require_backtest_outputs=True
+                )
 
 
 if __name__ == "__main__":

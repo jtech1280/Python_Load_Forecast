@@ -36,7 +36,10 @@ def _latest_replay(output_dir: Path) -> Path:
         reverse=True,
     )
     for path in files:
-        if "smoke" not in path.stem.lower() and "scenario_path_full" in path.stem.lower():
+        if (
+            "smoke" not in path.stem.lower()
+            and "scenario_path_full" in path.stem.lower()
+        ):
             return path
     if files:
         return files[0]
@@ -67,13 +70,24 @@ def _feature_frame(frame: pd.DataFrame) -> pd.DataFrame:
             "WarmRamp": _as_num(frame, "Warm_Ramp_Adjusted_Forecast_MWH"),
             "CloudSolar": _as_num(frame, "Cloud_Solar_Adjusted_Forecast_MWH"),
             "RecentCorrected": _as_num(frame, "Recent_Corrected_Forecast_MWH"),
-            "SelectedMinusRaw": _as_num(frame, "Final_Backtest_Forecast_MWH") - _as_num(frame, "Raw_Forecast_MWH"),
-            "SelectedMinusRecent": _as_num(frame, "Final_Backtest_Forecast_MWH") - _as_num(frame, "Recent_Corrected_Forecast_MWH"),
-            "SelectedMinusPeak": _as_num(frame, "Final_Backtest_Forecast_MWH") - _as_num(frame, "Peak_Risk_Adjusted_Forecast_MWH"),
-            "PeakMonthCorrection": _as_num(frame, "Long_Horizon_Peak_Month_Correction_MWH", 0.0).fillna(0.0),
-            "HotMonthCorrection": _as_num(frame, "Long_Horizon_Hot_Month_Correction_MWH", 0.0).fillna(0.0),
-            "WeatherHedge": _as_num(frame, "Weather_Robustness_Hedge_MWH", 0.0).fillna(0.0),
-            "WeatherWarmerDelta": _as_num(frame, "Weather_Robustness_Warmer_Delta_MWH", 0.0).fillna(0.0),
+            "SelectedMinusRaw": _as_num(frame, "Final_Backtest_Forecast_MWH")
+            - _as_num(frame, "Raw_Forecast_MWH"),
+            "SelectedMinusRecent": _as_num(frame, "Final_Backtest_Forecast_MWH")
+            - _as_num(frame, "Recent_Corrected_Forecast_MWH"),
+            "SelectedMinusPeak": _as_num(frame, "Final_Backtest_Forecast_MWH")
+            - _as_num(frame, "Peak_Risk_Adjusted_Forecast_MWH"),
+            "PeakMonthCorrection": _as_num(
+                frame, "Long_Horizon_Peak_Month_Correction_MWH", 0.0
+            ).fillna(0.0),
+            "HotMonthCorrection": _as_num(
+                frame, "Long_Horizon_Hot_Month_Correction_MWH", 0.0
+            ).fillna(0.0),
+            "WeatherHedge": _as_num(frame, "Weather_Robustness_Hedge_MWH", 0.0).fillna(
+                0.0
+            ),
+            "WeatherWarmerDelta": _as_num(
+                frame, "Weather_Robustness_Warmer_Delta_MWH", 0.0
+            ).fillna(0.0),
             "Hour": hour,
             "HourSin": np.sin(2.0 * np.pi * hour / 24.0),
             "HourCos": np.cos(2.0 * np.pi * hour / 24.0),
@@ -107,7 +121,7 @@ def _precompute_masks(replay: pd.DataFrame) -> dict[str, pd.Series]:
         cloud = cloud / 100.0
     loss = _as_num(replay, "BTM_Solar_Loss_From_ClearSky_MW")
     season = replay.get("Season", pd.Series("", index=replay.index)).astype(str)
-    
+
     return {
         "overall": pd.Series(True, index=replay.index),
         "day1": day.eq(1),
@@ -115,12 +129,16 @@ def _precompute_masks(replay: pd.DataFrame) -> dict[str, pd.Series]:
         "days4to7": day.between(4, 7),
         "hot_peak": hour.between(16, 20) & temp.ge(90.0),
         "cloud_solar_midday": hour.between(10, 16) & (cloud.ge(0.60) | loss.ge(1.25)),
-        "shoulder_heat": season.isin(["Spring", "Fall"]) & hour.between(12, 22) & temp.between(75.0, 93.0),
+        "shoulder_heat": season.isin(["Spring", "Fall"])
+        & hour.between(12, 22)
+        & temp.between(75.0, 93.0),
         "peak_window_14_18": hour.between(14, 18),
     }
 
 
-def _metrics(frame: pd.DataFrame, forecast: pd.Series, prefix: str, masks: dict[str, pd.Series]) -> dict[str, float]:
+def _metrics(
+    frame: pd.DataFrame, forecast: pd.Series, prefix: str, masks: dict[str, pd.Series]
+) -> dict[str, float]:
     """Compute metrics using precomputed masks."""
     actual = _as_num(frame, "Actual_MWH")
     out: dict[str, float] = {}
@@ -146,7 +164,9 @@ def _metrics(frame: pd.DataFrame, forecast: pd.Series, prefix: str, masks: dict[
     return out
 
 
-def _event_mask(replay: pd.DataFrame, scope: str, min_day: int, exclude_holidays: bool) -> pd.Series:
+def _event_mask(
+    replay: pd.DataFrame, scope: str, min_day: int, exclude_holidays: bool
+) -> pd.Series:
     hour = _as_num(replay, "Hour")
     temp = _as_num(replay, "Temperature_DailyMax")
     day = _as_num(replay, "Forecast_Day")
@@ -178,26 +198,30 @@ def _evaluate_model_guard(
 ) -> pd.Series:
     out = pd.Series(0.0, index=replay.index, dtype=float)
     eligible = _event_mask(replay, scope=scope, min_day=min_day, exclude_holidays=True)
-    replay_origin = pd.to_datetime(replay["Replay_Origin_DT"], errors="coerce", utc=True)
+    replay_origin = pd.to_datetime(
+        replay["Replay_Origin_DT"], errors="coerce", utc=True
+    )
     origins = sorted(replay_origin[eligible].dropna().unique())
 
     for origin in origins:
         train_mask = replay_origin.lt(origin) & eligible
         test_mask = replay_origin.eq(origin) & eligible
-        
+
         if int(train_mask.sum()) < 80 or int(test_mask.sum()) == 0:
             continue
-        
+
         train = replay[train_mask]
         test = replay[test_mask]
-        
-        target = _as_num(train, "Actual_MWH") - _as_num(train, "Final_Backtest_Forecast_MWH")
+
+        target = _as_num(train, "Actual_MWH") - _as_num(
+            train, "Final_Backtest_Forecast_MWH"
+        )
         x_train = _feature_frame(train)
-        
+
         valid = target.notna() & x_train["Selected"].notna()
         if int(valid.sum()) < 80:
             continue
-        
+
         fill = x_train.median(numeric_only=True).fillna(0.0)
         model = HistGradientBoostingRegressor(
             loss=loss,
@@ -210,9 +234,11 @@ def _evaluate_model_guard(
         )
         model.fit(x_train.loc[valid].fillna(fill).fillna(0.0), target.loc[valid])
         x_test = _feature_frame(test)
-        pred = pd.Series(model.predict(x_test.fillna(fill).fillna(0.0)), index=test.index)
+        pred = pd.Series(
+            model.predict(x_test.fillna(fill).fillna(0.0)), index=test.index
+        )
         out.loc[test.index] = (pred * float(blend)).clip(-float(cap), float(cap))
-    
+
     return out
 
 
@@ -231,15 +257,24 @@ def _evaluate_scenario_midpoint_guard(
     base = _as_num(replay, "Final_Backtest_Forecast_MWH")
     midpoint_delta = ((warmer + cooler) / 2.0 - base).fillna(0.0)
     eligible = _event_mask(replay, scope=scope, min_day=min_day, exclude_holidays=True)
-    correction = (midpoint_delta * float(blend)).clip(-float(cap), float(cap)).where(eligible, 0.0)
+    correction = (
+        (midpoint_delta * float(blend))
+        .clip(-float(cap), float(cap))
+        .where(eligible, 0.0)
+    )
     if upper_blend > 0:
         hour = _as_num(replay, "Hour")
         temp = _as_num(replay, "Temperature_DailyMax")
         upper_delta = (warmer - base).clip(lower=0.0).fillna(0.0)
-        upper_mask = eligible & hour.between(16, 20) & temp.ge(90.0) & base.le(float(low_forecast_threshold))
-        correction = correction + (
-            upper_delta * float(upper_blend)
-        ).clip(0.0, float(upper_cap)).where(upper_mask, 0.0)
+        upper_mask = (
+            eligible
+            & hour.between(16, 20)
+            & temp.ge(90.0)
+            & base.le(float(low_forecast_threshold))
+        )
+        correction = correction + (upper_delta * float(upper_blend)).clip(
+            0.0, float(upper_cap)
+        ).where(upper_mask, 0.0)
     return correction
 
 
@@ -260,7 +295,7 @@ def _evaluate_model_guard_params(
     """Evaluate a single model configuration with all blend/cap combinations."""
     raw_correction = None
     rows: list[dict[str, Any]] = []
-    
+
     for blend in blends:
         for cap in caps:
             if raw_correction is None:
@@ -291,35 +326,50 @@ def _evaluate_model_guard_params(
                 "max_leaf_nodes": max_leaf_nodes,
                 "l2_regularization": l2,
                 "correction_rows": int(nonzero.sum()),
-                "mean_nonzero_correction_mwh": float(correction.loc[nonzero].mean()) if nonzero.any() else 0.0,
+                "mean_nonzero_correction_mwh": (
+                    float(correction.loc[nonzero].mean()) if nonzero.any() else 0.0
+                ),
             }
             row.update(_metrics(replay, candidate_forecast, "metric", masks))
             rows.append(row)
-    
+
     return rows
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate a guarded peak-window residual model against saved replay origins.")
+    parser = argparse.ArgumentParser(
+        description="Evaluate a guarded peak-window residual model against saved replay origins."
+    )
     parser.add_argument("--replay-path", default=None)
     parser.add_argument("--label", default=None)
-    parser.add_argument("--n-jobs", type=int, default=4, help="Number of parallel jobs for model training")
+    parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=4,
+        help="Number of parallel jobs for model training",
+    )
     args = parser.parse_args()
 
     output_dir = Path("forecast_outputs")
-    replay_path = Path(args.replay_path) if args.replay_path else _latest_replay(output_dir)
-    label = args.label or replay_path.stem.removeprefix("rolling_origin_replay_results_")
+    replay_path = (
+        Path(args.replay_path) if args.replay_path else _latest_replay(output_dir)
+    )
+    label = args.label or replay_path.stem.removeprefix(
+        "rolling_origin_replay_results_"
+    )
     _load_config()
-    
+
     # Read CSV with column selection for performance
     replay = pd.read_csv(replay_path, low_memory=False)
-    replay["Replay_Origin_DT"] = pd.to_datetime(replay["Replay_Origin_DT"], errors="coerce", utc=True)
+    replay["Replay_Origin_DT"] = pd.to_datetime(
+        replay["Replay_Origin_DT"], errors="coerce", utc=True
+    )
 
     base_forecast = _as_num(replay, "Final_Backtest_Forecast_MWH")
-    
+
     # Precompute masks once
     masks = _precompute_masks(replay)
-    
+
     rows: list[dict[str, Any]] = []
     base = {
         "candidate": "current_saved_replay",
@@ -340,24 +390,45 @@ def main() -> None:
         ("squared_error", 80, 24, 4, 10.0),
         ("squared_error", 120, 16, 6, 5.0),
     ]
-    
+
     blends = [0.05, 0.10, 0.15, 0.25, 0.35, 0.50]
     caps = [1.0, 2.0, 3.0, 4.0, 5.0]
-    
+
     # Parallelize model evaluation across loss/scope/min_day combinations
     model_tasks = []
     for loss, max_iter, min_samples_leaf, max_leaf_nodes, l2 in model_shapes:
         for scope in ["peak_hot", "hot_peak", "peak_window"]:
             for min_day in [1, 4, 8]:
-                model_tasks.append((loss, max_iter, min_samples_leaf, max_leaf_nodes, l2, scope, min_day))
-    
+                model_tasks.append(
+                    (
+                        loss,
+                        max_iter,
+                        min_samples_leaf,
+                        max_leaf_nodes,
+                        l2,
+                        scope,
+                        min_day,
+                    )
+                )
+
     model_results = Parallel(n_jobs=args.n_jobs, verbose=1)(
         delayed(_evaluate_model_guard_params)(
-            replay, base_forecast, loss, max_iter, min_samples_leaf, max_leaf_nodes, l2, scope, min_day, blends, caps, masks
+            replay,
+            base_forecast,
+            loss,
+            max_iter,
+            min_samples_leaf,
+            max_leaf_nodes,
+            l2,
+            scope,
+            min_day,
+            blends,
+            caps,
+            masks,
         )
         for loss, max_iter, min_samples_leaf, max_leaf_nodes, l2, scope, min_day in model_tasks
     )
-    
+
     for result_list in model_results:
         rows.extend(result_list)
 
@@ -395,17 +466,34 @@ def main() -> None:
                             "upper_cap_mwh": upper_cap,
                             "low_forecast_threshold_mwh": low_forecast_threshold,
                             "correction_rows": int(nonzero.sum()),
-                            "mean_nonzero_correction_mwh": float(correction.loc[nonzero].mean()) if nonzero.any() else 0.0,
+                            "mean_nonzero_correction_mwh": (
+                                float(correction.loc[nonzero].mean())
+                                if nonzero.any()
+                                else 0.0
+                            ),
                         }
-                        row.update(_metrics(replay, candidate_forecast, "metric", masks))
+                        row.update(
+                            _metrics(replay, candidate_forecast, "metric", masks)
+                        )
                         rows.append(row)
 
     detail = pd.DataFrame(rows)
-    detail["hot_peak_gate_excess_mwh"] = (detail["metric_hot_peak_mae_mwh"] - 6.0).clip(lower=0.0)
-    detail["peak_window_gate_excess_mwh"] = (detail["metric_peak_window_14_18_mae_mwh"] - 5.5).clip(lower=0.0)
-    detail["combined_gate_excess_mwh"] = detail["hot_peak_gate_excess_mwh"] + detail["peak_window_gate_excess_mwh"]
+    detail["hot_peak_gate_excess_mwh"] = (detail["metric_hot_peak_mae_mwh"] - 6.0).clip(
+        lower=0.0
+    )
+    detail["peak_window_gate_excess_mwh"] = (
+        detail["metric_peak_window_14_18_mae_mwh"] - 5.5
+    ).clip(lower=0.0)
+    detail["combined_gate_excess_mwh"] = (
+        detail["hot_peak_gate_excess_mwh"] + detail["peak_window_gate_excess_mwh"]
+    )
     detail.sort_values(
-        ["combined_gate_excess_mwh", "metric_hot_peak_mae_mwh", "metric_peak_window_14_18_mae_mwh", "metric_overall_mae_mwh"],
+        [
+            "combined_gate_excess_mwh",
+            "metric_hot_peak_mae_mwh",
+            "metric_peak_window_14_18_mae_mwh",
+            "metric_overall_mae_mwh",
+        ],
         inplace=True,
     )
     out_path = output_dir / f"peak_window_residual_guard_evaluation_{label}.csv"
@@ -414,8 +502,20 @@ def main() -> None:
 
     current = detail[detail["candidate"].eq("current_saved_replay")].iloc[0].to_dict()
     best_combined = detail.iloc[0].to_dict()
-    best_peak = detail.sort_values(["metric_peak_window_14_18_mae_mwh", "metric_hot_peak_mae_mwh"]).iloc[0].to_dict()
-    best_hot = detail.sort_values(["metric_hot_peak_mae_mwh", "metric_peak_window_14_18_mae_mwh"]).iloc[0].to_dict()
+    best_peak = (
+        detail.sort_values(
+            ["metric_peak_window_14_18_mae_mwh", "metric_hot_peak_mae_mwh"]
+        )
+        .iloc[0]
+        .to_dict()
+    )
+    best_hot = (
+        detail.sort_values(
+            ["metric_hot_peak_mae_mwh", "metric_peak_window_14_18_mae_mwh"]
+        )
+        .iloc[0]
+        .to_dict()
+    )
     summary = {
         "replay_path": str(replay_path),
         "detail_path": str(out_path),
@@ -429,7 +529,9 @@ def main() -> None:
             else "review_candidate_before_enabling"
         ),
     }
-    summary_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+    summary_path.write_text(
+        json.dumps(summary, indent=2, default=str), encoding="utf-8"
+    )
     print(f"Wrote {out_path}")
     print(f"Wrote {summary_path}")
     print(detail.head(10).to_string(index=False))

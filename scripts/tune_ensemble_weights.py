@@ -14,7 +14,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from forecasting.model.ensemble import blend_predictions
 
-
 COMPONENT_COLUMNS = {
     "xgb": "XGB_Pred_MWH",
     "lgb": "LGB_Pred_MWH",
@@ -33,11 +32,13 @@ def _metrics(actual: np.ndarray, pred: np.ndarray) -> dict[str, float]:
     return {
         "N": int(mask.sum()),
         "MAE_MWH": float(np.mean(np.abs(residual))),
-        "RMSE_MWH": float(np.sqrt(np.mean(residual ** 2))),
+        "RMSE_MWH": float(np.sqrt(np.mean(residual**2))),
         "Bias_MWH": float(np.mean(residual)),
         "Underforecast_Rate_PCT": float(np.mean(residual > 0.0) * 100.0),
         "P90_AbsError_MWH": float(np.nanquantile(np.abs(residual), 0.90)),
-        "Underforecast_At_Actual_Peak_MWH": float(actual_valid[peak_idx] - pred_valid[peak_idx]),
+        "Underforecast_At_Actual_Peak_MWH": float(
+            actual_valid[peak_idx] - pred_valid[peak_idx]
+        ),
     }
 
 
@@ -49,11 +50,13 @@ def _weight_grid(step: float) -> list[dict[str, float]]:
             catboost_weight = 1.0 - float(xgb_weight) - float(lgb_weight)
             if catboost_weight < -1e-9:
                 continue
-            rows.append({
-                "xgb": round(float(xgb_weight), 10),
-                "lgb": round(float(lgb_weight), 10),
-                "catboost": round(float(catboost_weight), 10),
-            })
+            rows.append(
+                {
+                    "xgb": round(float(xgb_weight), 10),
+                    "lgb": round(float(lgb_weight), 10),
+                    "catboost": round(float(catboost_weight), 10),
+                }
+            )
     return rows
 
 
@@ -64,7 +67,9 @@ def tune_weights(
     max_peak_under_degradation: float,
 ) -> tuple[pd.DataFrame, dict]:
     backtest = pd.read_csv(backtest_path, low_memory=False)
-    actual = pd.to_numeric(backtest["Actual_MWH"], errors="coerce").to_numpy(dtype=float)
+    actual = pd.to_numeric(backtest["Actual_MWH"], errors="coerce").to_numpy(
+        dtype=float
+    )
     components = {
         name: pd.to_numeric(backtest[column], errors="coerce").to_numpy(dtype=float)
         for name, column in COMPONENT_COLUMNS.items()
@@ -72,7 +77,9 @@ def tune_weights(
     }
     missing = sorted(set(COMPONENT_COLUMNS) - set(components))
     if missing:
-        raise SystemExit(f"Missing component columns in {backtest_path}: {', '.join(missing)}")
+        raise SystemExit(
+            f"Missing component columns in {backtest_path}: {', '.join(missing)}"
+        )
 
     baseline_weights = {"xgb": 0.50, "lgb": 0.30, "catboost": 0.0}
     baseline_pred = blend_predictions(
@@ -82,7 +89,9 @@ def tune_weights(
         catboost_pred=components["catboost"],
     )
     baseline = _metrics(actual, baseline_pred)
-    max_peak_under = baseline["Underforecast_At_Actual_Peak_MWH"] + float(max_peak_under_degradation)
+    max_peak_under = baseline["Underforecast_At_Actual_Peak_MWH"] + float(
+        max_peak_under_degradation
+    )
 
     rows = []
     for weights in _weight_grid(step):
@@ -97,8 +106,12 @@ def tune_weights(
             continue
         rows.append({**weights, **metrics})
 
-    grid = pd.DataFrame(rows).sort_values(["MAE_MWH", "RMSE_MWH"]).reset_index(drop=True)
-    constrained = grid[grid["Underforecast_At_Actual_Peak_MWH"] <= max_peak_under].copy()
+    grid = (
+        pd.DataFrame(rows).sort_values(["MAE_MWH", "RMSE_MWH"]).reset_index(drop=True)
+    )
+    constrained = grid[
+        grid["Underforecast_At_Actual_Peak_MWH"] <= max_peak_under
+    ].copy()
     recommendation_row = (constrained if not constrained.empty else grid).iloc[0]
     recommendation = {
         "source": str(backtest_path),
@@ -136,8 +149,12 @@ def tune_weights(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Grid-tune XGB/LGB/CatBoost ensemble weights from backtest diagnostics.")
-    parser.add_argument("--backtest", type=Path, default=Path("forecast_outputs/backtest_enriched.csv"))
+    parser = argparse.ArgumentParser(
+        description="Grid-tune XGB/LGB/CatBoost ensemble weights from backtest diagnostics."
+    )
+    parser.add_argument(
+        "--backtest", type=Path, default=Path("forecast_outputs/backtest_enriched.csv")
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("forecast_outputs"))
     parser.add_argument("--step", type=float, default=0.05)
     parser.add_argument(

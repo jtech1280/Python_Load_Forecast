@@ -9,7 +9,6 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-
 FOCUSED_REQUIRED = {
     "Actual_MWH",
     "Pre_Focused_Guard_Forecast_MWH",
@@ -35,7 +34,9 @@ def _latest_replay_path(output_dir: Path) -> Path:
     current = output_dir / "rolling_origin_replay_results.csv"
     if current.exists():
         return current
-    raise FileNotFoundError(f"No rolling-origin replay results CSV found in {output_dir}")
+    raise FileNotFoundError(
+        f"No rolling-origin replay results CSV found in {output_dir}"
+    )
 
 
 def _as_num(values) -> pd.Series:
@@ -81,10 +82,12 @@ def _metric_delta_row(
             "Delta_Bias_MWH": after_m["Bias_MWH"] - before_m["Bias_MWH"],
             "Before_P90_AbsError_MWH": before_m["P90_AbsError_MWH"],
             "After_P90_AbsError_MWH": after_m["P90_AbsError_MWH"],
-            "Delta_P90_AbsError_MWH": after_m["P90_AbsError_MWH"] - before_m["P90_AbsError_MWH"],
+            "Delta_P90_AbsError_MWH": after_m["P90_AbsError_MWH"]
+            - before_m["P90_AbsError_MWH"],
             "Before_P99_AbsError_MWH": before_m["P99_AbsError_MWH"],
             "After_P99_AbsError_MWH": after_m["P99_AbsError_MWH"],
-            "Delta_P99_AbsError_MWH": after_m["P99_AbsError_MWH"] - before_m["P99_AbsError_MWH"],
+            "Delta_P99_AbsError_MWH": after_m["P99_AbsError_MWH"]
+            - before_m["P99_AbsError_MWH"],
         }
     )
     return row
@@ -125,7 +128,11 @@ def focused_guard_source_audit(df: pd.DataFrame) -> pd.DataFrame:
                 },
             )
         )
-    return pd.DataFrame(rows).sort_values(["Delta_MAE_MWH", "N"], ascending=[False, False]).reset_index(drop=True)
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["Delta_MAE_MWH", "N"], ascending=[False, False])
+        .reset_index(drop=True)
+    )
 
 
 def focused_guard_rule_audit(df: pd.DataFrame) -> pd.DataFrame:
@@ -136,11 +143,22 @@ def focused_guard_rule_audit(df: pd.DataFrame) -> pd.DataFrame:
     if not active.any():
         return pd.DataFrame()
 
-    sources = df.loc[active, "Focused_Scorecard_Guard_Source"].fillna("none").astype(str)
-    rule_names = sorted({part for source in sources for part in source.split("+") if part and part != "none"})
+    sources = (
+        df.loc[active, "Focused_Scorecard_Guard_Source"].fillna("none").astype(str)
+    )
+    rule_names = sorted(
+        {
+            part
+            for source in sources
+            for part in source.split("+")
+            if part and part != "none"
+        }
+    )
     rows = []
     for rule_name in rule_names:
-        mask = active & df["Focused_Scorecard_Guard_Source"].fillna("").astype(str).str.split("+").map(lambda parts: rule_name in parts)
+        mask = active & df["Focused_Scorecard_Guard_Source"].fillna("").astype(
+            str
+        ).str.split("+").map(lambda parts: rule_name in parts)
         idx = df.index[mask]
         if len(idx) == 0:
             continue
@@ -159,7 +177,11 @@ def focused_guard_rule_audit(df: pd.DataFrame) -> pd.DataFrame:
                 },
             )
         )
-    return pd.DataFrame(rows).sort_values(["Delta_MAE_MWH", "N"], ascending=[False, False]).reset_index(drop=True)
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["Delta_MAE_MWH", "N"], ascending=[False, False])
+        .reset_index(drop=True)
+    )
 
 
 def _long_horizon_group_rows(
@@ -178,7 +200,11 @@ def _long_horizon_group_rows(
         with_correction = _as_num(df["Final_Backtest_Forecast_MWH"])
     without_correction = with_correction - correction
     rows = []
-    grouped = df.loc[active].groupby(group_cols, dropna=False) if group_cols else [("all", df.loc[active])]
+    grouped = (
+        df.loc[active].groupby(group_cols, dropna=False)
+        if group_cols
+        else [("all", df.loc[active])]
+    )
     for key, group in grouped:
         idx = group.index
         corr = correction.loc[idx]
@@ -205,8 +231,12 @@ def _long_horizon_group_rows(
 def long_horizon_audit(df: pd.DataFrame) -> pd.DataFrame:
     if "Actual_MWH" not in df.columns:
         return pd.DataFrame()
-    peak = _as_num(df.get("Long_Horizon_Peak_Month_Correction_MWH", pd.Series(0.0, index=df.index))).fillna(0.0)
-    hot = _as_num(df.get("Long_Horizon_Hot_Month_Correction_MWH", pd.Series(0.0, index=df.index))).fillna(0.0)
+    peak = _as_num(
+        df.get("Long_Horizon_Peak_Month_Correction_MWH", pd.Series(0.0, index=df.index))
+    ).fillna(0.0)
+    hot = _as_num(
+        df.get("Long_Horizon_Hot_Month_Correction_MWH", pd.Series(0.0, index=df.index))
+    ).fillna(0.0)
     groups = [
         [],
         [col for col in ["Month"] if col in df.columns],
@@ -221,10 +251,21 @@ def long_horizon_audit(df: pd.DataFrame) -> pd.DataFrame:
         ("combined_peak_hot", peak + hot),
     ]:
         for group_cols in groups:
-            rows.extend(_long_horizon_group_rows(df, component=component, correction=correction, group_cols=group_cols))
+            rows.extend(
+                _long_horizon_group_rows(
+                    df,
+                    component=component,
+                    correction=correction,
+                    group_cols=group_cols,
+                )
+            )
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows).sort_values(["Delta_MAE_MWH", "N"], ascending=[False, False]).reset_index(drop=True)
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["Delta_MAE_MWH", "N"], ascending=[False, False])
+        .reset_index(drop=True)
+    )
 
 
 def stage_reason_audit(df: pd.DataFrame) -> pd.DataFrame:
@@ -241,10 +282,16 @@ def stage_reason_audit(df: pd.DataFrame) -> pd.DataFrame:
                 **metrics,
             }
         )
-    return pd.DataFrame(rows).sort_values(["MAE_MWH", "N"], ascending=[False, False]).reset_index(drop=True)
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["MAE_MWH", "N"], ascending=[False, False])
+        .reset_index(drop=True)
+    )
 
 
-def correction_activity_audit(df: pd.DataFrame, correction_cols: Iterable[str]) -> pd.DataFrame:
+def correction_activity_audit(
+    df: pd.DataFrame, correction_cols: Iterable[str]
+) -> pd.DataFrame:
     if not {"Actual_MWH", "Final_Backtest_Forecast_MWH"}.issubset(df.columns):
         return pd.DataFrame()
     rows = []
@@ -255,7 +302,9 @@ def correction_activity_audit(df: pd.DataFrame, correction_cols: Iterable[str]) 
         active = values.abs().gt(1e-9)
         if not active.any():
             continue
-        metrics = _metrics(df.loc[active, "Actual_MWH"], df.loc[active, "Final_Backtest_Forecast_MWH"])
+        metrics = _metrics(
+            df.loc[active, "Actual_MWH"], df.loc[active, "Final_Backtest_Forecast_MWH"]
+        )
         rows.append(
             {
                 "Audit": "correction_activity",
@@ -267,7 +316,11 @@ def correction_activity_audit(df: pd.DataFrame, correction_cols: Iterable[str]) 
                 **metrics,
             }
         )
-    return pd.DataFrame(rows).sort_values(["MAE_MWH", "ActiveRows"], ascending=[False, False]).reset_index(drop=True)
+    return (
+        pd.DataFrame(rows)
+        .sort_values(["MAE_MWH", "ActiveRows"], ascending=[False, False])
+        .reset_index(drop=True)
+    )
 
 
 def _read_replay(path: Path) -> pd.DataFrame:
@@ -290,16 +343,32 @@ def _save(df: pd.DataFrame, path: Path) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Audit replay correction and guard impacts from saved rolling-origin replay results.")
-    parser.add_argument("--replay-path", default=None, help="Explicit rolling_origin_replay_results CSV path.")
-    parser.add_argument("--output-dir", default="forecast_outputs/replay_runs", help="Replay output directory.")
-    parser.add_argument("--report-dir", default=None, help="Directory for audit CSVs. Defaults to output-dir.")
+    parser = argparse.ArgumentParser(
+        description="Audit replay correction and guard impacts from saved rolling-origin replay results."
+    )
+    parser.add_argument(
+        "--replay-path",
+        default=None,
+        help="Explicit rolling_origin_replay_results CSV path.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="forecast_outputs/replay_runs",
+        help="Replay output directory.",
+    )
+    parser.add_argument(
+        "--report-dir",
+        default=None,
+        help="Directory for audit CSVs. Defaults to output-dir.",
+    )
     parser.add_argument("--top-n", type=int, default=15)
     parser.add_argument("--no-save", action="store_true")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
-    replay_path = Path(args.replay_path) if args.replay_path else _latest_replay_path(output_dir)
+    replay_path = (
+        Path(args.replay_path) if args.replay_path else _latest_replay_path(output_dir)
+    )
     report_dir = Path(args.report_dir) if args.report_dir else output_dir
     label = _label_from_path(replay_path)
     replay = _read_replay(replay_path)
@@ -335,12 +404,18 @@ def main() -> int:
             continue
         print(f"\n{name}: top harmful by Delta_MAE_MWH or MAE_MWH")
         sort_col = "Delta_MAE_MWH" if "Delta_MAE_MWH" in df.columns else "MAE_MWH"
-        print(df.sort_values(sort_col, ascending=False).head(args.top_n).to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+        print(
+            df.sort_values(sort_col, ascending=False)
+            .head(args.top_n)
+            .to_string(index=False, float_format=lambda x: f"{x:.4f}")
+        )
 
     if not args.no_save:
         for name, df in reports.items():
             _save(df, report_dir / f"correction_audit_{name}_{label}.csv")
-        (report_dir / f"correction_audit_summary_{label}.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        (report_dir / f"correction_audit_summary_{label}.json").write_text(
+            json.dumps(summary, indent=2), encoding="utf-8"
+        )
         print(f"\nSaved audit reports to: {report_dir}")
 
     return 0

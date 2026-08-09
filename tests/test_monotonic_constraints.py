@@ -24,7 +24,9 @@ def _synthetic_frame(n_days: int = 40) -> pd.DataFrame:
     rng = np.random.default_rng(7)
     dt = pd.date_range("2026-06-01", periods=24 * n_days, freq="h")
     hour = dt.hour.values.astype(float)
-    temperature = 70 + 25 * np.sin((hour - 6) / 24 * 2 * np.pi) + rng.normal(0, 2, len(dt))
+    temperature = (
+        70 + 25 * np.sin((hour - 6) / 24 * 2 * np.pi) + rng.normal(0, 2, len(dt))
+    )
     temperature = np.clip(temperature, 40, 115)
     cdd = np.clip(temperature - 65, 0, None)
 
@@ -53,7 +55,10 @@ def _synthetic_frame(n_days: int = 40) -> pd.DataFrame:
 
 class MonotoneVectorTests(unittest.TestCase):
     def test_disabled_returns_none(self):
-        vector = build_monotone_vector(["Temperature", "MWH_Lag1"], {"model": {"monotonic_constraints": {"enabled": False}}})
+        vector = build_monotone_vector(
+            ["Temperature", "MWH_Lag1"],
+            {"model": {"monotonic_constraints": {"enabled": False}}},
+        )
         self.assertIsNone(vector)
 
     def test_default_marks_known_heat_features_increasing(self):
@@ -127,7 +132,12 @@ class TreeTrainingMonotonicityTests(unittest.TestCase):
     def test_xgb_training_info_logs_real_hyperparameters(self):
         config = {
             "model": {
-                "early_stopping": {"enabled": True, "validation_days": 5, "min_train_rows": 50, "rounds": 5},
+                "early_stopping": {
+                    "enabled": True,
+                    "validation_days": 5,
+                    "min_train_rows": 50,
+                    "rounds": 5,
+                },
                 "monotonic_constraints": {"enabled": False},
                 "xgb": {"n_estimators": 40, "max_depth": 3, "learning_rate": 0.1},
             }
@@ -155,7 +165,12 @@ class TreeTrainingMonotonicityTests(unittest.TestCase):
     def test_lgb_training_info_logs_real_hyperparameters(self):
         config = {
             "model": {
-                "early_stopping": {"enabled": True, "validation_days": 5, "min_train_rows": 50, "rounds": 5},
+                "early_stopping": {
+                    "enabled": True,
+                    "validation_days": 5,
+                    "min_train_rows": 50,
+                    "rounds": 5,
+                },
                 "monotonic_constraints": {"enabled": False},
                 "lgb": {"n_estimators": 40, "num_leaves": 20, "learning_rate": 0.1},
             }
@@ -170,7 +185,12 @@ class TreeTrainingMonotonicityTests(unittest.TestCase):
         config = {
             "model": {
                 "monotonic_constraints": {"enabled": True},
-                "catboost": {"enabled": True, "iterations": 60, "depth": 4, "task_type": "CPU"},
+                "catboost": {
+                    "enabled": True,
+                    "iterations": 60,
+                    "depth": 4,
+                    "task_type": "CPU",
+                },
             },
             "hardware": {"use_gpu": False},
         }

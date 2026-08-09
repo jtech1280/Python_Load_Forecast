@@ -54,15 +54,23 @@ class HotRampStrongCapTests(unittest.TestCase):
         }
         artifact = {"metadata": {"global_peak_residual_mwh": 0.0}, "lookups": {}}
         out = apply_hot_ramp_peak_capture(
-            df, artifact, {"hot_ramp_peak_capture": cfg}, forecast_col="Raw_Forecast_MWH", evaluation_mode="shadow"
+            df,
+            artifact,
+            {"hot_ramp_peak_capture": cfg},
+            forecast_col="Raw_Forecast_MWH",
+            evaluation_mode="shadow",
         )
-        peak_correction = out.loc[out["Raw_Forecast_MWH"].idxmax(), "Hot_Ramp_Peak_Correction_MWH"]
+        peak_correction = out.loc[
+            out["Raw_Forecast_MWH"].idxmax(), "Hot_Ramp_Peak_Correction_MWH"
+        ]
         self.assertAlmostEqual(float(peak_correction), 12.0, places=6)
         self.assertTrue((out["Hot_Ramp_Peak_Correction_MWH"] <= 12.0 + 1e-9).all())
 
 
 class HeatPersistenceNoAnchorGuardTests(unittest.TestCase):
-    def _no_anchor_frame_and_config(self, floor_applies_without_positive_anchor: bool) -> tuple[pd.DataFrame, dict]:
+    def _no_anchor_frame_and_config(
+        self, floor_applies_without_positive_anchor: bool
+    ) -> tuple[pd.DataFrame, dict]:
         dt = pd.date_range("2026-07-15 16:00", periods=5, freq="h")
         df = pd.DataFrame(
             {
@@ -100,23 +108,42 @@ class HeatPersistenceNoAnchorGuardTests(unittest.TestCase):
         lag24, recent-anchor, or warmer-scenario data) and the flag set False, the row must
         now be skipped with zero correction rather than silently floored.
         """
-        df, cfg = self._no_anchor_frame_and_config(floor_applies_without_positive_anchor=False)
+        df, cfg = self._no_anchor_frame_and_config(
+            floor_applies_without_positive_anchor=False
+        )
         artifact = {"metadata": {"global_peak_residual_mwh": 0.0}, "lookups": {}}
         out = apply_heat_persistence_peak_capture(
-            df, artifact, {"heat_persistence_peak_capture": cfg}, forecast_col="Raw_Forecast_MWH", evaluation_mode="shadow"
+            df,
+            artifact,
+            {"heat_persistence_peak_capture": cfg},
+            forecast_col="Raw_Forecast_MWH",
+            evaluation_mode="shadow",
         )
         self.assertTrue((out["Heat_Persistence_Peak_Correction_MWH"] == 0.0).all())
-        self.assertTrue((out["Heat_Persistence_Peak_Source"] == "heat_persistence_peak_no_anchor").all())
+        self.assertTrue(
+            (
+                out["Heat_Persistence_Peak_Source"] == "heat_persistence_peak_no_anchor"
+            ).all()
+        )
 
     def test_no_anchor_row_still_floored_when_flag_allows_it(self):
         """With floor_applies_without_positive_anchor left True (current production config),
-        behavior is unchanged: a no-anchor row still gets floored, matching pre-fix behavior."""
-        df, cfg = self._no_anchor_frame_and_config(floor_applies_without_positive_anchor=True)
+        behavior is unchanged: a no-anchor row still gets floored, matching pre-fix behavior.
+        """
+        df, cfg = self._no_anchor_frame_and_config(
+            floor_applies_without_positive_anchor=True
+        )
         artifact = {"metadata": {"global_peak_residual_mwh": 0.0}, "lookups": {}}
         out = apply_heat_persistence_peak_capture(
-            df, artifact, {"heat_persistence_peak_capture": cfg}, forecast_col="Raw_Forecast_MWH", evaluation_mode="shadow"
+            df,
+            artifact,
+            {"heat_persistence_peak_capture": cfg},
+            forecast_col="Raw_Forecast_MWH",
+            evaluation_mode="shadow",
         )
-        peak_correction = out.loc[out["Raw_Forecast_MWH"].idxmax(), "Heat_Persistence_Peak_Correction_MWH"]
+        peak_correction = out.loc[
+            out["Raw_Forecast_MWH"].idxmax(), "Heat_Persistence_Peak_Correction_MWH"
+        ]
         self.assertAlmostEqual(float(peak_correction), 3.0, places=6)
 
 

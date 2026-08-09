@@ -102,9 +102,13 @@ def apply_runtime_thread_settings(config: dict | None = None) -> dict[str, Any]:
     return info
 
 
-def write_runtime_performance_info(config: dict | None, info: dict[str, Any] | None = None) -> None:
+def write_runtime_performance_info(
+    config: dict | None, info: dict[str, Any] | None = None
+) -> None:
     try:
-        out_dir = Path(_cfg(config, "project", "output_dir", default="forecast_outputs"))
+        out_dir = Path(
+            _cfg(config, "project", "output_dir", default="forecast_outputs")
+        )
         out_dir.mkdir(parents=True, exist_ok=True)
         payload = info or apply_runtime_thread_settings(config)
         (out_dir / "runtime_performance.json").write_text(
@@ -121,7 +125,10 @@ def xgb_gpu_requested(config: dict | None = None) -> bool:
     explicit = hw.get("use_gpu", None)
     if explicit is not None:
         return _as_bool(explicit, default=False)
-    return str(p.get("device", "")).lower() in {"cuda", "gpu"} or str(p.get("tree_method", "")).lower() == "gpu_hist"
+    return (
+        str(p.get("device", "")).lower() in {"cuda", "gpu"}
+        or str(p.get("tree_method", "")).lower() == "gpu_hist"
+    )
 
 
 def lgb_gpu_requested(config: dict | None = None) -> bool:

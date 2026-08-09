@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dash import html, dcc, dash_table
 
-
 BRAND_BLUE = "#0057B8"
 INK = "#18212F"
 FONT_FAMILY = "'Aptos', 'Segoe UI', sans-serif"
@@ -55,25 +54,44 @@ def _series_selector(series_options=None, series_default=None):
     children = []
     for grp in group_order:
         if grp:
-            children.append(html.Div(
-                grp,
-                style={"fontSize": "10px", "fontWeight": "700", "color": "#8893A5",
-                       "textTransform": "uppercase", "letterSpacing": "0.04em",
-                       "margin": "8px 0 1px 0"},
-            ))
-        children.append(dcc.Checklist(
-            id={"type": "series-group", "group": grp or "_"},
-            options=[{"label": o["label"], "value": o["value"]} for o in grouped[grp]],
-            value=[o["value"] for o in grouped[grp] if o["value"] in series_default],
-            labelStyle={"display": "block", "fontSize": "12px", "margin": "2px 0", "cursor": "pointer"},
-            inputStyle={"marginRight": "6px"},
-        ))
+            children.append(
+                html.Div(
+                    grp,
+                    style={
+                        "fontSize": "10px",
+                        "fontWeight": "700",
+                        "color": "#8893A5",
+                        "textTransform": "uppercase",
+                        "letterSpacing": "0.04em",
+                        "margin": "8px 0 1px 0",
+                    },
+                )
+            )
+        children.append(
+            dcc.Checklist(
+                id={"type": "series-group", "group": grp or "_"},
+                options=[
+                    {"label": o["label"], "value": o["value"]} for o in grouped[grp]
+                ],
+                value=[
+                    o["value"] for o in grouped[grp] if o["value"] in series_default
+                ],
+                labelStyle={
+                    "display": "block",
+                    "fontSize": "12px",
+                    "margin": "2px 0",
+                    "cursor": "pointer",
+                },
+                inputStyle={"marginRight": "6px"},
+            )
+        )
     return children
 
 
-
 def _sidebar_label(text: str):
-    return html.Div(text, style={"fontSize": "12px", "margin": "6px 0 4px 0", "color": "#333"})
+    return html.Div(
+        text, style={"fontSize": "12px", "margin": "6px 0 4px 0", "color": "#333"}
+    )
 
 
 def _small_button(text: str, btn_id: str):
@@ -109,8 +127,14 @@ def _tab_button(text: str, btn_id: str):
     )
 
 
-def make_layout(min_date=None, max_date=None, default_start_date=None, available_days=None,
-                series_options=None, series_default=None):
+def make_layout(
+    min_date=None,
+    max_date=None,
+    default_start_date=None,
+    available_days=None,
+    series_options=None,
+    series_default=None,
+):
     # Use dcc.Store for the right-side view mode (mirrors v11.6 tab experience).
     return html.Div(
         style={
@@ -125,7 +149,9 @@ def make_layout(min_date=None, max_date=None, default_start_date=None, available
         },
         children=[
             dcc.Store(id="display-mode", data="dual"),
-            dcc.Store(id="available-days", data=[str(d) for d in (available_days or [])]),
+            dcc.Store(
+                id="available-days", data=[str(d) for d in (available_days or [])]
+            ),
             dcc.Store(id="custom-columns-store", data=None),
             dcc.Download(id="download-spreadsheet"),
             # LEFT CONTROL PANEL
@@ -143,22 +169,43 @@ def make_layout(min_date=None, max_date=None, default_start_date=None, available
                     html.Div(
                         style={"padding": "8px 6px"},
                         children=[
-                            html.Div("View", style={"fontSize": "11px", "fontWeight": "700", "color": "#6B7280", "marginBottom": "2px"}),
+                            html.Div(
+                                "View",
+                                style={
+                                    "fontSize": "11px",
+                                    "fontWeight": "700",
+                                    "color": "#6B7280",
+                                    "marginBottom": "2px",
+                                },
+                            ),
                             dcc.RadioItems(
                                 id="model-type",
                                 options=[
                                     {"label": "Baseline Forecast", "value": "baseline"},
                                     {"label": "Comparable Days", "value": "comparable"},
-                                    {"label": "Temperature Sensitivity", "value": "temp_sens"},
+                                    {
+                                        "label": "Temperature Sensitivity",
+                                        "value": "temp_sens",
+                                    },
                                 ],
                                 value="baseline",
-                                labelStyle={"display": "block", "fontSize": "12px", "margin": "4px 0"},
+                                labelStyle={
+                                    "display": "block",
+                                    "fontSize": "12px",
+                                    "margin": "4px 0",
+                                },
                                 inputStyle={"marginRight": "5px"},
                                 style={"marginTop": "8px"},
                             ),
                             html.Div(
                                 "Series to plot",
-                                style={"fontSize": "11px", "fontWeight": "700", "color": "#6B7280", "marginTop": "10px", "marginBottom": "2px"},
+                                style={
+                                    "fontSize": "11px",
+                                    "fontWeight": "700",
+                                    "color": "#6B7280",
+                                    "marginTop": "10px",
+                                    "marginBottom": "2px",
+                                },
                             ),
                             html.Div(
                                 _series_selector(series_options, series_default),
@@ -174,7 +221,12 @@ def make_layout(min_date=None, max_date=None, default_start_date=None, available
                             ),
                             html.Div(
                                 "Overlay any component model (XGB / LGB / CatBoost / Prophet), correction stage, weather scenario, or the published output. Multi-select; applies in Baseline view.",
-                                style={"fontSize": "10px", "color": "#6B7280", "marginTop": "4px", "lineHeight": "1.35"},
+                                style={
+                                    "fontSize": "10px",
+                                    "color": "#6B7280",
+                                    "marginTop": "4px",
+                                    "lineHeight": "1.35",
+                                },
                             ),
                             html.Button(
                                 "Refresh",
@@ -213,7 +265,10 @@ def make_layout(min_date=None, max_date=None, default_start_date=None, available
                             _sidebar_label("Days to Display (Horizon)"),
                             dcc.Dropdown(
                                 id="horizon-days",
-                                options=[{"label": str(v), "value": v} for v in [1, 2, 3, 7, 10, 14, 16]],
+                                options=[
+                                    {"label": str(v), "value": v}
+                                    for v in [1, 2, 3, 7, 10, 14, 16]
+                                ],
                                 value=16,
                                 clearable=False,
                                 searchable=False,
@@ -237,13 +292,23 @@ def make_layout(min_date=None, max_date=None, default_start_date=None, available
                             dcc.RadioItems(
                                 id="spreadsheet-mode",
                                 options=[
-                                    {"label": "Load Only Display", "value": "load_only"},
+                                    {
+                                        "label": "Load Only Display",
+                                        "value": "load_only",
+                                    },
                                     {"label": "No Weather", "value": "no_weather"},
-                                    {"label": "Temperature Only", "value": "temperature_only"},
+                                    {
+                                        "label": "Temperature Only",
+                                        "value": "temperature_only",
+                                    },
                                     {"label": "Full Weather", "value": "full_weather"},
                                 ],
                                 value="full_weather",
-                                labelStyle={"display": "block", "fontSize": "12px", "margin": "4px 0"},
+                                labelStyle={
+                                    "display": "block",
+                                    "fontSize": "12px",
+                                    "margin": "4px 0",
+                                },
                                 inputStyle={"marginRight": "5px"},
                             ),
                             html.Button(
@@ -285,11 +350,18 @@ def make_layout(min_date=None, max_date=None, default_start_date=None, available
                             dcc.Checklist(
                                 id="graph-options",
                                 options=[
-                                    {"label": "Highlight Max Values", "value": "highlight_max"},
+                                    {
+                                        "label": "Highlight Max Values",
+                                        "value": "highlight_max",
+                                    },
                                     {"label": "Show Weather", "value": "show_weather"},
                                 ],
                                 value=["highlight_max", "show_weather"],
-                                labelStyle={"display": "block", "fontSize": "12px", "margin": "4px 0"},
+                                labelStyle={
+                                    "display": "block",
+                                    "fontSize": "12px",
+                                    "margin": "4px 0",
+                                },
                                 inputStyle={"marginRight": "5px"},
                             ),
                             _sidebar_label("Weather Variable to Plot"),
@@ -297,13 +369,19 @@ def make_layout(min_date=None, max_date=None, default_start_date=None, available
                                 id="weather-variable",
                                 options=[
                                     {"label": "tempf", "value": "Temperature"},
-                                    {"label": "daily max", "value": "Temperature_DailyMax"},
+                                    {
+                                        "label": "daily max",
+                                        "value": "Temperature_DailyMax",
+                                    },
                                     {"label": "humid", "value": "Humidity_Norm"},
                                     {"label": "cloud", "value": "CloudCover_Norm"},
                                     {"label": "wind", "value": "WindSpeed_Mph"},
                                     {"label": "rain", "value": "PrecipIn"},
                                     {"label": "solar", "value": "Solar_Irradiance"},
-                                    {"label": "btm solar", "value": "BTM_Solar_Proxy_MW"},
+                                    {
+                                        "label": "btm solar",
+                                        "value": "BTM_Solar_Proxy_MW",
+                                    },
                                 ],
                                 value="Temperature",
                                 clearable=False,
@@ -324,7 +402,11 @@ def make_layout(min_date=None, max_date=None, default_start_date=None, available
                                 value=[f"plus_{v}" for v in range(7, 0, -1)]
                                 + ["baseline"]
                                 + [f"minus_{v}" for v in range(1, 8)],
-                                labelStyle={"display": "block", "fontSize": "12px", "margin": "3px 0"},
+                                labelStyle={
+                                    "display": "block",
+                                    "fontSize": "12px",
+                                    "margin": "3px 0",
+                                },
                                 inputStyle={"marginRight": "5px"},
                             ),
                         ],
@@ -336,11 +418,21 @@ def make_layout(min_date=None, max_date=None, default_start_date=None, available
                             dcc.Checklist(
                                 id="historical-options",
                                 options=[
-                                    {"label": "Show Historic Load Fit", "value": "historic_load"},
-                                    {"label": "Show Historic Weather", "value": "historic_weather"},
+                                    {
+                                        "label": "Show Historic Load Fit",
+                                        "value": "historic_load",
+                                    },
+                                    {
+                                        "label": "Show Historic Weather",
+                                        "value": "historic_weather",
+                                    },
                                 ],
                                 value=["historic_load"],
-                                labelStyle={"display": "block", "fontSize": "12px", "margin": "4px 0"},
+                                labelStyle={
+                                    "display": "block",
+                                    "fontSize": "12px",
+                                    "margin": "4px 0",
+                                },
                                 inputStyle={"marginRight": "5px"},
                             )
                         ],
@@ -397,7 +489,11 @@ def make_layout(min_date=None, max_date=None, default_start_date=None, available
                                         id="graph-pane",
                                         style={"minWidth": 0},
                                         children=[
-                                            dcc.Graph(id="main-graph", config={"displayModeBar": True}, style={"height": "calc(100vh - 170px)"}),
+                                            dcc.Graph(
+                                                id="main-graph",
+                                                config={"displayModeBar": True},
+                                                style={"height": "calc(100vh - 170px)"},
+                                            ),
                                         ],
                                     ),
                                     html.Div(
@@ -406,7 +502,11 @@ def make_layout(min_date=None, max_date=None, default_start_date=None, available
                                         children=[
                                             html.Div(
                                                 "Operator Forecast Table",
-                                                style={"margin": "0 0 8px 0", "color": BRAND_BLUE, "fontWeight": "700"},
+                                                style={
+                                                    "margin": "0 0 8px 0",
+                                                    "color": BRAND_BLUE,
+                                                    "fontWeight": "700",
+                                                },
                                             ),
                                             make_table(),
                                         ],
@@ -418,9 +518,21 @@ def make_layout(min_date=None, max_date=None, default_start_date=None, available
                                 id="stats-container",
                                 style={"display": "none", "height": "100%"},
                                 children=[
-                                    dcc.Graph(id="stats-graph", config={"displayModeBar": True}, style={"height": "calc(100vh - 170px)"}),
-                                    dcc.Graph(id="stats-detail-graph", config={"displayModeBar": True}, style={"height": "320px"}),
-                                    dcc.Graph(id="stats-marginal-graph", config={"displayModeBar": True}, style={"height": "340px", "marginTop": "20px"}),
+                                    dcc.Graph(
+                                        id="stats-graph",
+                                        config={"displayModeBar": True},
+                                        style={"height": "calc(100vh - 170px)"},
+                                    ),
+                                    dcc.Graph(
+                                        id="stats-detail-graph",
+                                        config={"displayModeBar": True},
+                                        style={"height": "320px"},
+                                    ),
+                                    dcc.Graph(
+                                        id="stats-marginal-graph",
+                                        config={"displayModeBar": True},
+                                        style={"height": "340px", "marginTop": "20px"},
+                                    ),
                                 ],
                             ),
                             # Sensitivity / comparable view (graph-only).
@@ -428,7 +540,11 @@ def make_layout(min_date=None, max_date=None, default_start_date=None, available
                                 id="aux-graph-container",
                                 style={"display": "none", "height": "100%"},
                                 children=[
-                                    dcc.Graph(id="aux-graph", config={"displayModeBar": True}, style={"height": "calc(100vh - 170px)"}),
+                                    dcc.Graph(
+                                        id="aux-graph",
+                                        config={"displayModeBar": True},
+                                        style={"height": "calc(100vh - 170px)"},
+                                    ),
                                 ],
                             ),
                         ],
@@ -452,16 +568,64 @@ def make_table():
         sort_action="native",
         filter_action="native",
         fixed_rows={"headers": True},
-        style_table={"height": "calc(100vh - 185px)", "overflowY": "auto", "overflowX": "auto", "border": "1px solid #B7D7F5"},
-        style_header={"backgroundColor": BRAND_BLUE, "color": "white", "fontWeight": "bold", "fontSize": "12px"},
-        style_cell={"fontFamily": FONT_FAMILY, "fontSize": "12px", "padding": "6px", "textAlign": "right", "whiteSpace": "normal"},
-        style_cell_conditional=[{"if": {"column_id": "DT"}, "textAlign": "left", "minWidth": "130px"}],
+        style_table={
+            "height": "calc(100vh - 185px)",
+            "overflowY": "auto",
+            "overflowX": "auto",
+            "border": "1px solid #B7D7F5",
+        },
+        style_header={
+            "backgroundColor": BRAND_BLUE,
+            "color": "white",
+            "fontWeight": "bold",
+            "fontSize": "12px",
+        },
+        style_cell={
+            "fontFamily": FONT_FAMILY,
+            "fontSize": "12px",
+            "padding": "6px",
+            "textAlign": "right",
+            "whiteSpace": "normal",
+        },
+        style_cell_conditional=[
+            {"if": {"column_id": "DT"}, "textAlign": "left", "minWidth": "130px"}
+        ],
         style_data_conditional=[
-            {"if": {"column_id": "Forecast"}, "color": BRAND_BLUE, "fontWeight": "bold"},
+            {
+                "if": {"column_id": "Forecast"},
+                "color": BRAND_BLUE,
+                "fontWeight": "bold",
+            },
             {"if": {"column_id": "Actual"}, "color": "#D62728", "fontWeight": "bold"},
-            {"if": {"filter_query": "{Risk Code} != \"NORMAL\"", "column_id": "Risk Code"}, "color": "#D62728", "fontWeight": "bold"},
-            {"if": {"filter_query": "{Scenario Cap} = \"Yes\"", "column_id": "Scenario Cap"}, "color": "#D62728", "fontWeight": "bold"},
-            {"if": {"filter_query": "{Residual Cal} > 0", "column_id": "Residual Cal"}, "color": "#7B2CBF"},
-            {"if": {"filter_query": "{Residual Cal} < 0", "column_id": "Residual Cal"}, "color": "#F2A900"},
+            {
+                "if": {
+                    "filter_query": '{Risk Code} != "NORMAL"',
+                    "column_id": "Risk Code",
+                },
+                "color": "#D62728",
+                "fontWeight": "bold",
+            },
+            {
+                "if": {
+                    "filter_query": '{Scenario Cap} = "Yes"',
+                    "column_id": "Scenario Cap",
+                },
+                "color": "#D62728",
+                "fontWeight": "bold",
+            },
+            {
+                "if": {
+                    "filter_query": "{Residual Cal} > 0",
+                    "column_id": "Residual Cal",
+                },
+                "color": "#7B2CBF",
+            },
+            {
+                "if": {
+                    "filter_query": "{Residual Cal} < 0",
+                    "column_id": "Residual Cal",
+                },
+                "color": "#F2A900",
+            },
         ],
     )

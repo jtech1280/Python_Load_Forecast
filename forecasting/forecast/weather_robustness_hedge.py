@@ -57,7 +57,6 @@ Safety properties
 import numpy as np
 import pandas as pd
 
-
 # Daily-max temperature forecast error (MAE, degrees F) by lead day, from
 # rolling_origin_replay_weather_input_error_by_lead.csv. Used to size the hedge.
 _DEFAULT_MAE_BY_LEAD_F = {
@@ -85,12 +84,24 @@ def _local_datetime_series(values, index: pd.Index | None = None) -> pd.Series:
         # Exported forecast CSVs can contain both -08:00 and -07:00 offsets.
         # The gate is keyed to local operating hour/day, so preserve the local
         # clock instead of converting these rows to UTC.
-        cleaned = raw.astype(str).str.strip().str.replace(r"(?:[+-]\d{2}:?\d{2}|Z)$", "", regex=True)
+        cleaned = (
+            raw.astype(str)
+            .str.strip()
+            .str.replace(r"(?:[+-]\d{2}:?\d{2}|Z)$", "", regex=True)
+        )
         return pd.to_datetime(cleaned, errors="coerce")
 
 
-def _forecast_anchor_mask(df: pd.DataFrame, preferred_col: str | None = None) -> pd.Series:
-    candidates = [preferred_col, "Final_Forecast_MWH", "Forecast", "Raw_Forecast_MWH", "Stage_Selected_Forecast_MWH"]
+def _forecast_anchor_mask(
+    df: pd.DataFrame, preferred_col: str | None = None
+) -> pd.Series:
+    candidates = [
+        preferred_col,
+        "Final_Forecast_MWH",
+        "Forecast",
+        "Raw_Forecast_MWH",
+        "Stage_Selected_Forecast_MWH",
+    ]
     seen: set[str] = set()
     for col in candidates:
         if not col or col in seen or col not in df.columns:
@@ -105,14 +116,21 @@ def _forecast_anchor_mask(df: pd.DataFrame, preferred_col: str | None = None) ->
 def _cfg(config: dict | None) -> dict:
     raw = config or {}
     if "calibration" in raw:
-        return ((raw.get("calibration", {}) or {}).get("weather_robustness_hedge", {}) or {})
+        return (raw.get("calibration", {}) or {}).get(
+            "weather_robustness_hedge", {}
+        ) or {}
     if "weather_robustness_hedge" in raw:
         return raw.get("weather_robustness_hedge", {}) or {}
     return raw
 
 
 def _sigma_by_lead_lookup(cfg: dict) -> tuple[dict[int, float], float, float]:
-    mae_by_lead = {int(k): float(v) for k, v in (cfg.get("dailymax_temp_mae_by_lead_f", _DEFAULT_MAE_BY_LEAD_F) or {}).items()}
+    mae_by_lead = {
+        int(k): float(v)
+        for k, v in (
+            cfg.get("dailymax_temp_mae_by_lead_f", _DEFAULT_MAE_BY_LEAD_F) or {}
+        ).items()
+    }
     if not mae_by_lead:
         mae_by_lead = dict(_DEFAULT_MAE_BY_LEAD_F)
     mae_to_sigma = float(cfg.get("mae_to_sigma_factor", _MAE_TO_SIGMA))
@@ -132,13 +150,19 @@ def _bias_by_lead_lookup(cfg: dict) -> dict[int, float]:
     return {int(k): float(v) for k, v in raw.items()}
 
 
-def _lead_series(df: pd.DataFrame, lead_col: str | None, anchor_col: str | None = None) -> pd.Series:
+def _lead_series(
+    df: pd.DataFrame, lead_col: str | None, anchor_col: str | None = None
+) -> pd.Series:
     """Resolve a lead-days series. Prefer an explicit realism lead column, then
     Forecast_Weather_Lead_Days, then Forecast_Day."""
     candidates = []
     if lead_col:
         candidates.append(lead_col)
-    candidates += ["Forecast_Weather_Lead_Days", "WeatherRealism_Forecast_Weather_Lead_Days", "Forecast_Day"]
+    candidates += [
+        "Forecast_Weather_Lead_Days",
+        "WeatherRealism_Forecast_Weather_Lead_Days",
+        "Forecast_Day",
+    ]
     for col in candidates:
         if col in df.columns:
             s = _as_num(df[col])
@@ -184,7 +208,11 @@ def apply_weather_robustness_hedge(
     if not bool(cfg.get("enabled", True)) or out.empty:
         return out
     # Needs base + both scenario re-predictions; otherwise no-op (e.g. realized-weather path).
-    if base_col not in out.columns or warmer_col not in out.columns or cooler_col not in out.columns:
+    if (
+        base_col not in out.columns
+        or warmer_col not in out.columns
+        or cooler_col not in out.columns
+    ):
         return out
 
     hours = {int(h) for h in cfg.get("hours", [13, 14, 15, 16, 17, 18, 19, 20, 21])}
@@ -201,7 +229,9 @@ def apply_weather_robustness_hedge(
     cap = float(cfg.get("cap_mwh", 16.0))
     ramp_cap = float(cfg.get("ramp_cap_mwh", min(cap, 2.5)))
     warmer_bound_mult = float(cfg.get("max_fraction_of_warmer_delta", 1.25))
-    ramp_warmer_bound_mult = float(cfg.get("ramp_max_fraction_of_warmer_delta", min(warmer_bound_mult, 0.25)))
+    ramp_warmer_bound_mult = float(
+        cfg.get("ramp_max_fraction_of_warmer_delta", min(warmer_bound_mult, 0.25))
+    )
     min_bias_damping = float(cfg.get("min_signed_bias_damping", 0.35))
     exclude_holidays = bool(cfg.get("exclude_holidays", False))
 
@@ -231,37 +261,47 @@ def apply_weather_robustness_hedge(
     if "Hour" in out.columns:
         hour = _as_num(out["Hour"]).fillna(-1).astype(int)
     else:
-        dt = _local_datetime_series(out.get("DT", pd.Series(index=out.index, dtype=object)), out.index)
+        dt = _local_datetime_series(
+            out.get("DT", pd.Series(index=out.index, dtype=object)), out.index
+        )
         hour = dt.dt.hour.fillna(-1).astype(int)
-    fmax = _as_num(out[maxtemp_col]) if maxtemp_col in out.columns else pd.Series(np.nan, index=out.index)
+    fmax = (
+        _as_num(out[maxtemp_col])
+        if maxtemp_col in out.columns
+        else pd.Series(np.nan, index=out.index)
+    )
 
     lead = _lead_series(out, lead_col, anchor_col=base_col)
-    forecast_day = _as_num(out["Forecast_Day"]) if "Forecast_Day" in out.columns else lead
+    forecast_day = (
+        _as_num(out["Forecast_Day"]) if "Forecast_Day" in out.columns else lead
+    )
 
     sigma = lead.map(_sigma)
     signed_bias = lead.map(_signed_bias)
-    sigma2 = sigma ** 2
+    sigma2 = sigma**2
     sigma_norm = (sigma / sigma_ref).clip(lower=0.0)
     # Prior previous-run replay shows the weather feed is often warm-biased at
     # longer leads. If the point weather is already biased warm, a one-sided hot
     # uplift overcorrects; damp the convexity hedge by that signed lead bias.
-    bias_damping = (1.0 - signed_bias.clip(lower=0.0) / sigma.replace(0.0, np.nan)).clip(
-        lower=min_bias_damping,
-        upper=1.0,
-    ).fillna(1.0)
+    bias_damping = (
+        (1.0 - signed_bias.clip(lower=0.0) / sigma.replace(0.0, np.nan))
+        .clip(
+            lower=min_bias_damping,
+            upper=1.0,
+        )
+        .fillna(1.0)
+    )
 
     # Local curvature of the load-temperature response from the +/-deltaF scenarios.
-    warmer_delta = (warmer - base)
-    cooler_delta = (cooler - base)
-    fpp = (warmer_delta + cooler_delta) / (scenario_delta ** 2)
+    warmer_delta = warmer - base
+    cooler_delta = cooler - base
+    fpp = (warmer_delta + cooler_delta) / (scenario_delta**2)
 
     jensen = 0.5 * sigma2 * fpp * jensen_scale * bias_damping
     upper = upper_blend * sigma_norm * warmer_delta.clip(lower=0.0) * bias_damping
 
     peak_gate = (
-        hour.isin(hours)
-        & fmax.ge(min_maxtemp)
-        & forecast_day.between(min_day, max_day)
+        hour.isin(hours) & fmax.ge(min_maxtemp) & forecast_day.between(min_day, max_day)
     )
     ramp_gate = (
         hour.isin(ramp_hours)
@@ -286,9 +326,15 @@ def apply_weather_robustness_hedge(
     hedge = hedge.where(gate, 0.0).fillna(0.0)
 
     out["Weather_Robustness_Hedge_MWH"] = hedge
-    out["Weather_Robustness_Jensen_MWH"] = np.minimum(jensen.clip(lower=0.0), cap_by_row).where(gate, 0.0).fillna(0.0)
-    out["Weather_Robustness_Upper_MWH"] = np.minimum(upper.clip(lower=0.0), cap_by_row).where(gate, 0.0).fillna(0.0)
-    out["Weather_Robustness_Warmer_Delta_MWH"] = warmer_delta.clip(lower=0.0).where(gate, 0.0).fillna(0.0)
+    out["Weather_Robustness_Jensen_MWH"] = (
+        np.minimum(jensen.clip(lower=0.0), cap_by_row).where(gate, 0.0).fillna(0.0)
+    )
+    out["Weather_Robustness_Upper_MWH"] = (
+        np.minimum(upper.clip(lower=0.0), cap_by_row).where(gate, 0.0).fillna(0.0)
+    )
+    out["Weather_Robustness_Warmer_Delta_MWH"] = (
+        warmer_delta.clip(lower=0.0).where(gate, 0.0).fillna(0.0)
+    )
     out["Weather_Robustness_Temp_Sigma_F"] = sigma.where(gate, np.nan)
     out["Weather_Robustness_Temp_Bias_Damping"] = bias_damping.where(gate, np.nan)
     out["Weather_Robustness_Gate"] = gate.astype(int)
@@ -301,7 +347,10 @@ def apply_weather_robustness_hedge(
         default="none",
     )
     out[base_col] = (base + hedge).clip(lower=0.0)
-    if base_col == "Final_Backtest_Forecast_MWH" and "Final_Forecast_MWH" in out.columns:
+    if (
+        base_col == "Final_Backtest_Forecast_MWH"
+        and "Final_Forecast_MWH" in out.columns
+    ):
         out["Final_Forecast_MWH"] = out[base_col]
     for col in also_update_cols:
         if col in out.columns:

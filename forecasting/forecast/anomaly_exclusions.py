@@ -20,7 +20,7 @@ import pandas as pd
 
 
 def _exclusion_events(config: dict | None) -> list[dict]:
-    cfg = ((config or {}).get("anomaly_exclusions", {}) or {})
+    cfg = (config or {}).get("anomaly_exclusions", {}) or {}
     if not bool(cfg.get("enabled", True)):
         return []
     events = cfg.get("events", []) or []
@@ -42,7 +42,9 @@ def _hour_label_bounds(event: dict) -> tuple[int, int]:
     return max(0, lo), min(23, hi)
 
 
-def excluded_interval_mask(df: pd.DataFrame, config: dict | None, dt_col: str = "DT") -> pd.Series:
+def excluded_interval_mask(
+    df: pd.DataFrame, config: dict | None, dt_col: str = "DT"
+) -> pd.Series:
     """Boolean mask (aligned to ``df.index``) of rows inside a configured exclusion window."""
     mask = pd.Series(False, index=df.index if df is not None else None, dtype=bool)
     events = _exclusion_events(config)
@@ -56,7 +58,11 @@ def excluded_interval_mask(df: pd.DataFrame, config: dict | None, dt_col: str = 
         # CSV exports can contain mixed DST offsets. Exclusion windows are configured
         # as local wall-clock dates/hours, so strip the offset rather than converting
         # to UTC and shifting the local hour.
-        cleaned = raw_dt.astype(str).str.strip().str.replace(r"(?:[+-]\d{2}:?\d{2}|Z)$", "", regex=True)
+        cleaned = (
+            raw_dt.astype(str)
+            .str.strip()
+            .str.replace(r"(?:[+-]\d{2}:?\d{2}|Z)$", "", regex=True)
+        )
         dt = pd.to_datetime(cleaned, errors="coerce")
     if getattr(dt.dt, "tz", None) is not None:
         # Exclusion windows are local calendar dates/hours; forecast/replay DT is local tz-aware.
@@ -75,7 +81,9 @@ def excluded_interval_mask(df: pd.DataFrame, config: dict | None, dt_col: str = 
     return mask.fillna(False)
 
 
-def drop_excluded_intervals(df: pd.DataFrame, config: dict | None, dt_col: str = "DT") -> pd.DataFrame:
+def drop_excluded_intervals(
+    df: pd.DataFrame, config: dict | None, dt_col: str = "DT"
+) -> pd.DataFrame:
     """Return ``df`` without the rows that fall inside a configured exclusion window."""
     if df is None or df.empty:
         return df

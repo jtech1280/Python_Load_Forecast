@@ -11,8 +11,13 @@ import numpy as np
 import pandas as pd
 
 from forecasting.features.solar_features import add_solar_features
-from forecasting.backtest.rolling_backtest import PRED_COLS as ROLLING_BACKTEST_PRED_COLS
-from forecasting.backtest.rolling_origin_replay import PRED_COLS as ROLLING_REPLAY_PRED_COLS, _apply_replay_focused_guard
+from forecasting.backtest.rolling_backtest import (
+    PRED_COLS as ROLLING_BACKTEST_PRED_COLS,
+)
+from forecasting.backtest.rolling_origin_replay import (
+    PRED_COLS as ROLLING_REPLAY_PRED_COLS,
+    _apply_replay_focused_guard,
+)
 from forecasting.forecast.focused_scorecard_guard import (
     apply_focused_scorecard_guard,
     build_focused_scorecard_rule_audit,
@@ -37,7 +42,10 @@ from forecasting.diagnostics.forecast_diagnostics import (
     metrics_summary,
     prep_backtest,
 )
-from forecasting.forecast.forecast_pipeline import apply_operational_stage_selector, build_display_df
+from forecasting.forecast.forecast_pipeline import (
+    apply_operational_stage_selector,
+    build_display_df,
+)
 from forecasting.forecast.peak_risk_correction import (
     apply_day1_live_ramp_override,
     apply_hot_ramp_scenario_override,
@@ -50,7 +58,11 @@ from forecasting.forecast.recent_residual_correction import (
     build_recent_residual_profile,
     simulate_recent_residual_correction_backtest,
 )
-from forecasting.forecast.uncertainty_bands import _band_risk_multiplier, _prep, apply_bands
+from forecasting.forecast.uncertainty_bands import (
+    _band_risk_multiplier,
+    _prep,
+    apply_bands,
+)
 from forecasting.forecast.weather_robustness_hedge import apply_weather_robustness_hedge
 from forecasting.forecast.operational_residual_learner import (
     apply_operational_residual_learner,
@@ -74,7 +86,9 @@ from forecasting.data.local_weather_loader import apply_dynamic_temperature_cali
 
 class ForecastControlTests(unittest.TestCase):
     def test_config_targeted_missing_slices_are_bounded_production_rules(self):
-        config_path = Path(__file__).resolve().parents[1] / "forecasting" / "config.yaml"
+        config_path = (
+            Path(__file__).resolve().parents[1] / "forecasting" / "config.yaml"
+        )
         with config_path.open("r", encoding="utf-8") as handle:
             config = yaml.safe_load(handle) or {}
 
@@ -83,7 +97,11 @@ class ForecastControlTests(unittest.TestCase):
             .get("hot_ramp_peak_capture", {})
             .get("targeted_missing_slices", [])
         )
-        enabled = [str(rule.get("name", "")) for rule in rules if bool(rule.get("enabled", True))]
+        enabled = [
+            str(rule.get("name", ""))
+            for rule in rules
+            if bool(rule.get("enabled", True))
+        ]
         expected_enabled = [
             "july_long_98_100_clear_moderate_state_peak_capture",
             "july_long_100_105_clear_high_state_peak_capture",
@@ -102,37 +120,58 @@ class ForecastControlTests(unittest.TestCase):
 
         self.assertTrue(rules)
         self.assertEqual(enabled, expected_enabled)
-        disabled = [str(rule.get("name", "")) for rule in rules if not bool(rule.get("enabled", True))]
+        disabled = [
+            str(rule.get("name", ""))
+            for rule in rules
+            if not bool(rule.get("enabled", True))
+        ]
         self.assertIn("july_long_95_98_clear_positive_state_peak_capture", disabled)
         self.assertIn("june_long_100_105_clear_very_high_state_peak_capture", disabled)
         rule_by_name = {str(rule.get("name", "")): rule for rule in rules}
         july_98_100 = rule_by_name["july_long_98_100_clear_moderate_state_peak_capture"]
         self.assertEqual([int(hour) for hour in july_98_100.get("hours", [])], [17, 18])
-        self.assertGreaterEqual(float(july_98_100.get("min_raw_minus_samehour7_mwh", 0.0)), 20.0)
+        self.assertGreaterEqual(
+            float(july_98_100.get("min_raw_minus_samehour7_mwh", 0.0)), 20.0
+        )
         self.assertLessEqual(
             float(july_98_100.get("max_raw_minus_samehour7_mwh_exclusive", 999.0)),
             25.0,
         )
         july_100_105 = rule_by_name["july_long_100_105_clear_high_state_peak_capture"]
-        self.assertEqual([int(hour) for hour in july_100_105.get("hours", [])], [16, 17])
+        self.assertEqual(
+            [int(hour) for hour in july_100_105.get("hours", [])], [16, 17]
+        )
         self.assertGreaterEqual(float(july_100_105.get("min_forecast_day", 0.0)), 15.0)
         self.assertLessEqual(float(july_100_105.get("max_forecast_day", 999.0)), 16.0)
-        july_95_98_neutral = rule_by_name["july_days4to7_95_98_clear_neutral_state_peak_capture"]
+        july_95_98_neutral = rule_by_name[
+            "july_days4to7_95_98_clear_neutral_state_peak_capture"
+        ]
         self.assertEqual(float(july_95_98_neutral.get("correction_mwh", 0.0)), 7.0)
         july_overcast_he14_15 = rule_by_name[
             "july_days4to7_90_92_overcast_deep_low_state_he14_15_peak_capture"
         ]
-        self.assertEqual([int(hour) for hour in july_overcast_he14_15.get("hours", [])], [14, 15])
+        self.assertEqual(
+            [int(hour) for hour in july_overcast_he14_15.get("hours", [])], [14, 15]
+        )
         self.assertEqual(float(july_overcast_he14_15.get("correction_mwh", 0.0)), 6.0)
         july_95_98_mild_negative = rule_by_name[
             "july_days4to7_95_98_clear_mild_negative_state_peak_capture"
         ]
-        self.assertGreaterEqual(float(july_95_98_mild_negative.get("min_raw_minus_samehour7_mwh", 0.0)), -15.0)
+        self.assertGreaterEqual(
+            float(july_95_98_mild_negative.get("min_raw_minus_samehour7_mwh", 0.0)),
+            -15.0,
+        )
         self.assertLessEqual(
-            float(july_95_98_mild_negative.get("max_raw_minus_samehour7_mwh_exclusive", 999.0)),
+            float(
+                july_95_98_mild_negative.get(
+                    "max_raw_minus_samehour7_mwh_exclusive", 999.0
+                )
+            ),
             -10.0,
         )
-        self.assertLessEqual(float(july_95_98_mild_negative.get("correction_mwh", 0.0)), 4.0)
+        self.assertLessEqual(
+            float(july_95_98_mild_negative.get("correction_mwh", 0.0)), 4.0
+        )
         for rule in rules:
             if not bool(rule.get("enabled", True)):
                 continue
@@ -142,7 +181,9 @@ class ForecastControlTests(unittest.TestCase):
             self.assertTrue(hours.issubset(set(range(14, 21))))
             self.assertIn("min_forecast_day", rule)
             self.assertLessEqual(float(rule.get("max_forecast_day", 999.0)), 16.0)
-            self.assertTrue("min_maxtemp_f" in rule or "max_maxtemp_f_exclusive" in rule)
+            self.assertTrue(
+                "min_maxtemp_f" in rule or "max_maxtemp_f_exclusive" in rule
+            )
             self.assertTrue(
                 "min_raw_minus_samehour7_mwh" in rule
                 or "max_raw_minus_samehour7_mwh_exclusive" in rule
@@ -150,7 +191,9 @@ class ForecastControlTests(unittest.TestCase):
             self.assertLessEqual(float(rule.get("correction_mwh", 0.0)), 14.0)
 
     def test_config_keeps_current_learned_candidates_guarded_for_production(self):
-        config_path = Path(__file__).resolve().parents[1] / "forecasting" / "config.yaml"
+        config_path = (
+            Path(__file__).resolve().parents[1] / "forecasting" / "config.yaml"
+        )
         with config_path.open("r", encoding="utf-8") as handle:
             config = yaml.safe_load(handle) or {}
         cal = config.get("calibration", {})
@@ -158,13 +201,30 @@ class ForecastControlTests(unittest.TestCase):
 
         focused_shape = stage_selector.get("focused_shape_residual_learner", {})
         self.assertFalse(focused_shape.get("shadow_mode", True))
-        self.assertTrue(focused_shape.get("apply_correction_to_reference_forecast", False))
+        self.assertTrue(
+            focused_shape.get("apply_correction_to_reference_forecast", False)
+        )
         focused_shape_guard = focused_shape.get("promotion_delta_guard", {})
         self.assertTrue(focused_shape_guard.get("enabled", False))
-        self.assertLessEqual(float(focused_shape_guard.get("risk_slice_max_abs_delta_vs_reference_mwh", 999.0)), 5.0)
-        self.assertFalse((focused_shape.get("scope", {}) or {}).get("use_focused_guard_rule_union", True))
-        self.assertTrue(stage_selector.get("daily_peak_shadow_model", {}).get("shadow_mode", False))
-        self.assertTrue(cal.get("heat_persistence_peak_capture", {}).get("shadow_mode", False))
+        self.assertLessEqual(
+            float(
+                focused_shape_guard.get(
+                    "risk_slice_max_abs_delta_vs_reference_mwh", 999.0
+                )
+            ),
+            5.0,
+        )
+        self.assertFalse(
+            (focused_shape.get("scope", {}) or {}).get(
+                "use_focused_guard_rule_union", True
+            )
+        )
+        self.assertTrue(
+            stage_selector.get("daily_peak_shadow_model", {}).get("shadow_mode", False)
+        )
+        self.assertTrue(
+            cal.get("heat_persistence_peak_capture", {}).get("shadow_mode", False)
+        )
 
         orl = cal.get("operational_residual_learner", {})
         self.assertEqual(orl.get("production_scope"), "capped_full_shadow")
@@ -180,7 +240,9 @@ class ForecastControlTests(unittest.TestCase):
         self.assertGreaterEqual(int(timing_selector.get("consensus_required", 0)), 2)
         self.assertTrue(timing_selector.get("block_on_strong_hot_ramp", False))
 
-    def test_daily_peak_shadow_model_keeps_final_forecast_and_improves_peak_candidate(self):
+    def test_daily_peak_shadow_model_keeps_final_forecast_and_improves_peak_candidate(
+        self,
+    ):
         rows = []
         for day in range(10):
             date = pd.Timestamp("2026-07-01") + pd.Timedelta(days=day)
@@ -251,7 +313,11 @@ class ForecastControlTests(unittest.TestCase):
             forecast_col="Final_Backtest_Forecast_MWH",
         )
         self.assertIsNotNone(artifact)
-        future = df.iloc[72:].rename(columns={"Final_Backtest_Forecast_MWH": "Final_Forecast_MWH"}).copy()
+        future = (
+            df.iloc[72:]
+            .rename(columns={"Final_Backtest_Forecast_MWH": "Final_Forecast_MWH"})
+            .copy()
+        )
         future = future.loc[:, ~future.columns.duplicated()].copy()
         original_final = future["Final_Forecast_MWH"].copy()
 
@@ -343,9 +409,14 @@ class ForecastControlTests(unittest.TestCase):
         for gated_out in [day_1, day_6, day_8]:
             self.assertEqual(gated_out["Daily_Peak_Correction_Applied_Flag"].sum(), 0)
             self.assertTrue((gated_out["Daily_Peak_Correction_MWH"] == 0.0).all())
-            self.assertEqual(gated_out["Daily_Peak_Source"].unique().tolist(), ["horizon_out_of_scope"])
+            self.assertEqual(
+                gated_out["Daily_Peak_Source"].unique().tolist(),
+                ["horizon_out_of_scope"],
+            )
 
-    def test_daily_peak_shadow_window_scorecard_summarizes_configured_forecast_days(self):
+    def test_daily_peak_shadow_window_scorecard_summarizes_configured_forecast_days(
+        self,
+    ):
         rows = []
         for date, forecast_day in [
             (pd.Timestamp("2026-07-01"), 1),
@@ -365,7 +436,9 @@ class ForecastControlTests(unittest.TestCase):
                         "Raw_Forecast_MWH": base,
                         "Final_Backtest_Forecast_MWH": base,
                         "Daily_Peak_Shadow_Adjusted_Forecast_MWH": shadow,
-                        "Daily_Peak_Correction_Applied_Flag": int(forecast_day == 3 and hour == 18),
+                        "Daily_Peak_Correction_Applied_Flag": int(
+                            forecast_day == 3 and hour == 18
+                        ),
                     }
                 )
         config = {
@@ -380,9 +453,13 @@ class ForecastControlTests(unittest.TestCase):
             }
         }
 
-        scorecard = build_daily_peak_shadow_window_scorecard(pd.DataFrame(rows), config=config)
+        scorecard = build_daily_peak_shadow_window_scorecard(
+            pd.DataFrame(rows), config=config
+        )
 
-        configured = scorecard[scorecard["Slice"].eq("configured_window_days_2_to_5")].iloc[0]
+        configured = scorecard[
+            scorecard["Slice"].eq("configured_window_days_2_to_5")
+        ].iloc[0]
         day_1 = scorecard[scorecard["Slice"].eq("forecast_day_1")].iloc[0]
         day_3 = scorecard[scorecard["Slice"].eq("forecast_day_3")].iloc[0]
         day_6 = scorecard[scorecard["Slice"].eq("forecast_day_6")].iloc[0]
@@ -436,16 +513,24 @@ class ForecastControlTests(unittest.TestCase):
         self.assertEqual(extreme["N"], 7)
 
         extreme_metrics = build_extreme_heat_peak_metrics_by_stage(df)
-        final_extreme = extreme_metrics[extreme_metrics["Stage"].eq("final_corrected_production")]
+        final_extreme = extreme_metrics[
+            extreme_metrics["Stage"].eq("final_corrected_production")
+        ]
         self.assertEqual(set(final_extreme["Forecast_Day"].astype(int)), {1})
-        self.assertTrue({17, 18, 19, 20}.issubset(set(final_extreme["Hour"].astype(int))))
+        self.assertTrue(
+            {17, 18, 19, 20}.issubset(set(final_extreme["Hour"].astype(int)))
+        )
 
         he18_20 = build_daily_peak_window_miss_by_stage(df)
         final_peaks = he18_20[he18_20["Stage"].eq("final_corrected_production")]
-        self.assertEqual(set(final_peaks["PeakWindowName"]), {"HE18to20_CodeHours17to19"})
+        self.assertEqual(
+            set(final_peaks["PeakWindowName"]), {"HE18to20_CodeHours17to19"}
+        )
         self.assertEqual(set(final_peaks["Actual_Peak_Hour"].astype(int)), {19})
 
-    def test_future_peak_muting_audit_flags_hotter_day_lower_peak_and_scenario_gap(self):
+    def test_future_peak_muting_audit_flags_hotter_day_lower_peak_and_scenario_gap(
+        self,
+    ):
         rows = []
         for date, daily_max, peak_value, hot_stress_peak in [
             (pd.Timestamp("2026-08-07"), 108.0, 346.0, 356.0),
@@ -530,7 +615,9 @@ class ForecastControlTests(unittest.TestCase):
         self.assertEqual(target["Final_Backtest_Forecast_MWH"], 300.0)
         self.assertEqual(target["Heat_Analog_Count_SameHour_PreOrigin"], 2)
         self.assertEqual(target["Heat_Analog_Source"], "same_month_multi_summer")
-        self.assertAlmostEqual(target["Heat_Analog_Actual_Mean_SameHour_PreOrigin_MWH"], 340.0)
+        self.assertAlmostEqual(
+            target["Heat_Analog_Actual_Mean_SameHour_PreOrigin_MWH"], 340.0
+        )
         self.assertAlmostEqual(target["Heat_Analog_Shadow_Correction_MWH"], 20.0)
         self.assertAlmostEqual(target["Heat_Analog_Shadow_Forecast_MWH"], 320.0)
 
@@ -624,8 +711,13 @@ class ForecastControlTests(unittest.TestCase):
         self.assertGreaterEqual(peak["Hot_Ramp_Peak_Correction_MWH"], 4.0)
         self.assertLessEqual(peak["Hot_Ramp_Peak_Correction_MWH"], 10.0)
         self.assertEqual(peak["Final_Forecast_MWH"], 110.0)
-        self.assertGreater(peak["Hot_Ramp_Peak_Shadow_Forecast_MWH"], peak["Final_Forecast_MWH"])
-        self.assertEqual(out["Hot_Ramp_Peak_Correction_MWH"].idxmax(), out.loc[out["Hour"].eq(18)].index[0])
+        self.assertGreater(
+            peak["Hot_Ramp_Peak_Shadow_Forecast_MWH"], peak["Final_Forecast_MWH"]
+        )
+        self.assertEqual(
+            out["Hot_Ramp_Peak_Correction_MWH"].idxmax(),
+            out.loc[out["Hour"].eq(18)].index[0],
+        )
 
     def test_hot_ramp_peak_capture_cooling_guard_blocks_shadow_lift(self):
         train = pd.DataFrame(
@@ -685,10 +777,15 @@ class ForecastControlTests(unittest.TestCase):
             }
         )
 
-        out = apply_hot_ramp_peak_capture(future, artifact, config, forecast_col="Final_Forecast_MWH")
+        out = apply_hot_ramp_peak_capture(
+            future, artifact, config, forecast_col="Final_Forecast_MWH"
+        )
 
         self.assertEqual(out["Hot_Ramp_Peak_Correction_Applied_Flag"].sum(), 0)
-        self.assertEqual(out["Hot_Ramp_Peak_Source"].iloc[0], "hot_ramp_peak_cooling_underway_blocked")
+        self.assertEqual(
+            out["Hot_Ramp_Peak_Source"].iloc[0],
+            "hot_ramp_peak_cooling_underway_blocked",
+        )
         self.assertEqual(out["Final_Forecast_MWH"].iloc[0], 110.0)
 
     def test_hot_ramp_peak_capture_blocks_negative_learned_residual(self):
@@ -746,10 +843,15 @@ class ForecastControlTests(unittest.TestCase):
             }
         )
 
-        out = apply_hot_ramp_peak_capture(future, artifact, config, forecast_col="Final_Forecast_MWH")
+        out = apply_hot_ramp_peak_capture(
+            future, artifact, config, forecast_col="Final_Forecast_MWH"
+        )
 
         self.assertEqual(out["Hot_Ramp_Peak_Correction_Applied_Flag"].sum(), 0)
-        self.assertEqual(out["Hot_Ramp_Peak_Source"].iloc[0], "hot_ramp_peak_negative_learned_residual")
+        self.assertEqual(
+            out["Hot_Ramp_Peak_Source"].iloc[0],
+            "hot_ramp_peak_negative_learned_residual",
+        )
         self.assertEqual(out["Hot_Ramp_Peak_Shadow_Forecast_MWH"].iloc[0], 100.0)
 
     def test_hot_ramp_peak_capture_requires_anchor_support_for_strong_floor(self):
@@ -810,10 +912,15 @@ class ForecastControlTests(unittest.TestCase):
             }
         )
 
-        out = apply_hot_ramp_peak_capture(future, artifact, config, forecast_col="Final_Forecast_MWH")
+        out = apply_hot_ramp_peak_capture(
+            future, artifact, config, forecast_col="Final_Forecast_MWH"
+        )
 
         self.assertEqual(out["Hot_Ramp_Peak_Correction_Applied_Flag"].sum(), 0)
-        self.assertEqual(out["Hot_Ramp_Peak_Source"].iloc[0], "hot_ramp_peak_insufficient_anchor_support")
+        self.assertEqual(
+            out["Hot_Ramp_Peak_Source"].iloc[0],
+            "hot_ramp_peak_insufficient_anchor_support",
+        )
         self.assertEqual(out["Hot_Ramp_Peak_Shadow_Forecast_MWH"].iloc[0], 100.0)
 
     def test_hot_ramp_peak_capture_anchorless_shadow_fallback_uses_strong_floor(self):
@@ -853,7 +960,9 @@ class ForecastControlTests(unittest.TestCase):
             }
         }
 
-        out = apply_hot_ramp_peak_capture(pd.DataFrame(future), None, config, forecast_col="Final_Forecast_MWH")
+        out = apply_hot_ramp_peak_capture(
+            pd.DataFrame(future), None, config, forecast_col="Final_Forecast_MWH"
+        )
 
         peak = out.loc[out["Hour"].eq(18)].iloc[0]
         self.assertEqual(peak["Hot_Ramp_Peak_Source"], "hot_ramp_peak_shadow")
@@ -878,9 +987,13 @@ class ForecastControlTests(unittest.TestCase):
             forecast_col="Final_Forecast_MWH",
         )
         self.assertEqual(blocked["Hot_Ramp_Peak_Correction_Applied_Flag"].sum(), 0)
-        self.assertEqual(blocked["Hot_Ramp_Peak_Source"].iloc[0], "insufficient_history")
+        self.assertEqual(
+            blocked["Hot_Ramp_Peak_Source"].iloc[0], "insufficient_history"
+        )
 
-    def test_hot_ramp_peak_capture_timing_selector_uses_xgb_consensus_when_confident(self):
+    def test_hot_ramp_peak_capture_timing_selector_uses_xgb_consensus_when_confident(
+        self,
+    ):
         shape = {16: 300.0, 17: 312.0, 18: 316.0, 19: 311.0, 20: 304.0}
         future = pd.DataFrame(
             [
@@ -891,8 +1004,20 @@ class ForecastControlTests(unittest.TestCase):
                     "Forecast_Day": 2,
                     "Final_Forecast_MWH": base,
                     "Stage_Selected_Forecast_MWH": base,
-                    "Raw_Forecast_MWH": {16: 303.0, 17: 330.0, 18: 322.0, 19: 314.0, 20: 304.0}[hour],
-                    "XGB_Pred_MWH": {16: 302.0, 17: 331.0, 18: 321.0, 19: 314.0, 20: 304.0}[hour],
+                    "Raw_Forecast_MWH": {
+                        16: 303.0,
+                        17: 330.0,
+                        18: 322.0,
+                        19: 314.0,
+                        20: 304.0,
+                    }[hour],
+                    "XGB_Pred_MWH": {
+                        16: 302.0,
+                        17: 331.0,
+                        18: 321.0,
+                        19: 314.0,
+                        20: 304.0,
+                    }[hour],
                     "Temperature": 102.0,
                     "Temperature_DailyMax": 102.0,
                     "DailyMaxTemp_Ramp_1Day": 2.5,
@@ -960,12 +1085,19 @@ class ForecastControlTests(unittest.TestCase):
         self.assertEqual(selected["Hot_Ramp_Peak_Base_PeakHour"], 18.0)
         self.assertEqual(selected["Hot_Ramp_Peak_Predicted_PeakHour"], 17.0)
         self.assertEqual(selected["Hot_Ramp_Peak_Timing_Selected_PeakHour"], 17.0)
-        self.assertEqual(selected["Hot_Ramp_Peak_Timing_Source"], "xgb_component_consensus")
+        self.assertEqual(
+            selected["Hot_Ramp_Peak_Timing_Source"], "xgb_component_consensus"
+        )
         self.assertEqual(selected["Hot_Ramp_Peak_Timing_Override_Flag"], 1)
         self.assertEqual(selected["Hot_Ramp_Peak_Timing_Block_Source"], "")
         self.assertGreaterEqual(selected["Hot_Ramp_Peak_Timing_Confidence_MWH"], 1.0)
-        self.assertEqual(out["Hot_Ramp_Peak_Correction_MWH"].idxmax(), out.loc[out["Hour"].eq(17)].index[0])
-        self.assertEqual(out["Final_Forecast_MWH"].idxmax(), out.loc[out["Hour"].eq(17)].index[0])
+        self.assertEqual(
+            out["Hot_Ramp_Peak_Correction_MWH"].idxmax(),
+            out.loc[out["Hour"].eq(17)].index[0],
+        )
+        self.assertEqual(
+            out["Final_Forecast_MWH"].idxmax(), out.loc[out["Hour"].eq(17)].index[0]
+        )
 
     def test_hot_ramp_peak_capture_timing_selector_blocks_strong_hot_ramp_timing(self):
         shape = {16: 300.0, 17: 312.0, 18: 316.0, 19: 311.0, 20: 304.0}
@@ -977,8 +1109,20 @@ class ForecastControlTests(unittest.TestCase):
                     "Month": 7,
                     "Forecast_Day": 2,
                     "Final_Forecast_MWH": base,
-                    "Raw_Forecast_MWH": {16: 303.0, 17: 330.0, 18: 322.0, 19: 314.0, 20: 304.0}[hour],
-                    "XGB_Pred_MWH": {16: 302.0, 17: 331.0, 18: 321.0, 19: 314.0, 20: 304.0}[hour],
+                    "Raw_Forecast_MWH": {
+                        16: 303.0,
+                        17: 330.0,
+                        18: 322.0,
+                        19: 314.0,
+                        20: 304.0,
+                    }[hour],
+                    "XGB_Pred_MWH": {
+                        16: 302.0,
+                        17: 331.0,
+                        18: 321.0,
+                        19: 314.0,
+                        20: 304.0,
+                    }[hour],
                     "Temperature": 103.0,
                     "Temperature_DailyMax": 103.0,
                     "DailyMaxTemp_Ramp_1Day": 3.5,
@@ -1031,16 +1175,25 @@ class ForecastControlTests(unittest.TestCase):
             },
         }
 
-        out = apply_hot_ramp_peak_capture(future, artifact, config, forecast_col="Final_Forecast_MWH")
+        out = apply_hot_ramp_peak_capture(
+            future, artifact, config, forecast_col="Final_Forecast_MWH"
+        )
 
         peak = out.loc[out["Hour"].eq(18)].iloc[0]
         self.assertEqual(peak["Hot_Ramp_Peak_Base_PeakHour"], 18.0)
         self.assertEqual(peak["Hot_Ramp_Peak_Predicted_PeakHour"], 18.0)
         self.assertEqual(peak["Hot_Ramp_Peak_Timing_Selected_PeakHour"], 18.0)
-        self.assertEqual(peak["Hot_Ramp_Peak_Timing_Source"], "base_strong_hot_ramp_fallback")
+        self.assertEqual(
+            peak["Hot_Ramp_Peak_Timing_Source"], "base_strong_hot_ramp_fallback"
+        )
         self.assertEqual(peak["Hot_Ramp_Peak_Timing_Override_Flag"], 0)
-        self.assertEqual(peak["Hot_Ramp_Peak_Timing_Block_Source"], "strong_hot_ramp_timing_blocked")
-        self.assertEqual(out["Hot_Ramp_Peak_Correction_MWH"].idxmax(), out.loc[out["Hour"].eq(18)].index[0])
+        self.assertEqual(
+            peak["Hot_Ramp_Peak_Timing_Block_Source"], "strong_hot_ramp_timing_blocked"
+        )
+        self.assertEqual(
+            out["Hot_Ramp_Peak_Correction_MWH"].idxmax(),
+            out.loc[out["Hour"].eq(18)].index[0],
+        )
 
     def test_hot_ramp_peak_capture_targeted_slice_can_run_without_artifact(self):
         config = {
@@ -1172,7 +1325,9 @@ class ForecastControlTests(unittest.TestCase):
             ]
         )
 
-        out = apply_hot_ramp_peak_capture(future, None, config, forecast_col="Final_Forecast_MWH")
+        out = apply_hot_ramp_peak_capture(
+            future, None, config, forecast_col="Final_Forecast_MWH"
+        )
 
         row = out.iloc[0]
         self.assertEqual(row["Hot_Ramp_Peak_Source"], "unit_targeted_guarded_slice")
@@ -1264,7 +1419,9 @@ class ForecastControlTests(unittest.TestCase):
 
         matched = out.iloc[0]
         adjacent = out.iloc[1]
-        self.assertEqual(matched["Hot_Ramp_Peak_Source"], "unit_targeted_july_long_98_100_clear")
+        self.assertEqual(
+            matched["Hot_Ramp_Peak_Source"], "unit_targeted_july_long_98_100_clear"
+        )
         self.assertEqual(matched["Hot_Ramp_Peak_Correction_Applied_Flag"], 1)
         self.assertAlmostEqual(matched["Hot_Ramp_Peak_Correction_MWH"], 6.0)
         self.assertAlmostEqual(matched["Final_Forecast_MWH"], 306.0)
@@ -1310,7 +1467,12 @@ class ForecastControlTests(unittest.TestCase):
 
         scorecard = build_hot_ramp_peak_candidate_scorecard(
             pd.DataFrame(rows),
-            group_cols=["Replay_Horizon_Bucket", "Month", "DailyMaxTempBucket", "CloudCoverBucket"],
+            group_cols=[
+                "Replay_Horizon_Bucket",
+                "Month",
+                "DailyMaxTempBucket",
+                "CloudCoverBucket",
+            ],
             min_count=2,
         )
 
@@ -1321,7 +1483,9 @@ class ForecastControlTests(unittest.TestCase):
         self.assertAlmostEqual(hot_ramp["Final_MAE_MWH"], 8.0)
         self.assertTrue(bool(hot_ramp["Promote_Slice_Candidate"]))
 
-    def test_heat_persistence_peak_capture_shadow_targets_low_ramp_consecutive_heat_peak(self):
+    def test_heat_persistence_peak_capture_shadow_targets_low_ramp_consecutive_heat_peak(
+        self,
+    ):
         rows = []
         shape = {16: 332.0, 17: 340.0, 18: 335.0, 19: 325.0, 20: 305.0}
         for day in range(5):
@@ -1408,14 +1572,19 @@ class ForecastControlTests(unittest.TestCase):
 
         peak = out.loc[out["Hour"].eq(17)].iloc[0]
         self.assertIsNotNone(artifact)
-        self.assertEqual(peak["Heat_Persistence_Peak_Source"], "heat_persistence_peak_shadow")
+        self.assertEqual(
+            peak["Heat_Persistence_Peak_Source"], "heat_persistence_peak_shadow"
+        )
         self.assertEqual(peak["Heat_Persistence_Peak_Shadow_Mode"], 1)
         self.assertEqual(peak["Heat_Persistence_Peak_Scope_Flag"], 1)
         self.assertEqual(peak["Heat_Persistence_Peak_Strong_Flag"], 1)
         self.assertAlmostEqual(peak["Heat_Persistence_Peak_Correction_MWH"], 9.0)
         self.assertEqual(peak["Final_Forecast_MWH"], 340.0)
         self.assertAlmostEqual(peak["Heat_Persistence_Peak_Shadow_Forecast_MWH"], 349.0)
-        self.assertEqual(out["Heat_Persistence_Peak_Correction_MWH"].idxmax(), out.loc[out["Hour"].eq(17)].index[0])
+        self.assertEqual(
+            out["Heat_Persistence_Peak_Correction_MWH"].idxmax(),
+            out.loc[out["Hour"].eq(17)].index[0],
+        )
 
     def test_heat_persistence_peak_capture_anchorless_shadow_fallback_uses_floor(self):
         shape = {16: 332.0, 17: 340.0, 18: 335.0, 19: 325.0, 20: 305.0}
@@ -1467,14 +1636,18 @@ class ForecastControlTests(unittest.TestCase):
         )
 
         peak = out.loc[out["Hour"].eq(17)].iloc[0]
-        self.assertEqual(peak["Heat_Persistence_Peak_Source"], "heat_persistence_peak_shadow")
+        self.assertEqual(
+            peak["Heat_Persistence_Peak_Source"], "heat_persistence_peak_shadow"
+        )
         self.assertEqual(peak["Heat_Persistence_Peak_Scope_Flag"], 1)
         self.assertEqual(peak["Heat_Persistence_Peak_Strong_Flag"], 1)
         self.assertAlmostEqual(peak["Heat_Persistence_Peak_Correction_MWH"], 9.0)
         self.assertEqual(peak["Final_Forecast_MWH"], 340.0)
         self.assertAlmostEqual(peak["Heat_Persistence_Peak_Shadow_Forecast_MWH"], 349.0)
 
-    def test_heat_persistence_peak_candidate_scorecard_uses_consecutive_heat_stratum(self):
+    def test_heat_persistence_peak_candidate_scorecard_uses_consecutive_heat_stratum(
+        self,
+    ):
         rows = []
         for hour, actual, final, shadow, consecutive in [
             (17, 113.0, 100.0, 109.0, 3.0),
@@ -1501,12 +1674,21 @@ class ForecastControlTests(unittest.TestCase):
 
         scorecard = build_heat_persistence_peak_candidate_scorecard(
             pd.DataFrame(rows),
-            group_cols=["Replay_Horizon_Bucket", "Month", "DailyMaxTempBucket", "CloudCoverBucket"],
+            group_cols=[
+                "Replay_Horizon_Bucket",
+                "Month",
+                "DailyMaxTempBucket",
+                "CloudCoverBucket",
+            ],
             min_count=2,
         )
 
-        persistence = scorecard[scorecard["Stage"].eq("heat_persistence_peak_shadow")].iloc[0]
-        self.assertEqual(persistence["Target_Slice"], "heat_persistence_peak_100f_consec3_he16to20")
+        persistence = scorecard[
+            scorecard["Stage"].eq("heat_persistence_peak_shadow")
+        ].iloc[0]
+        self.assertEqual(
+            persistence["Target_Slice"], "heat_persistence_peak_100f_consec3_he16to20"
+        )
         self.assertEqual(persistence["N"], 2)
         self.assertAlmostEqual(persistence["Candidate_MAE_MWH"], 2.5)
         self.assertAlmostEqual(persistence["Final_MAE_MWH"], 11.0)
@@ -1550,7 +1732,11 @@ class ForecastControlTests(unittest.TestCase):
             config,
             forecast_col="Final_Backtest_Forecast_MWH",
         )
-        future = train.tail(2).rename(columns={"Final_Backtest_Forecast_MWH": "Final_Forecast_MWH"}).copy()
+        future = (
+            train.tail(2)
+            .rename(columns={"Final_Backtest_Forecast_MWH": "Final_Forecast_MWH"})
+            .copy()
+        )
         original = future["Final_Forecast_MWH"].copy()
 
         out = apply_operational_residual_learner(
@@ -1565,7 +1751,9 @@ class ForecastControlTests(unittest.TestCase):
         self.assertTrue((out["Auto_Residual_Adjusted_Forecast_MWH"] > original).all())
         self.assertTrue((out["Auto_Residual_Shadow_Mode"] == 1).all())
 
-    def test_operational_residual_learner_hot_peak_gate_requires_low_forecast_signal(self):
+    def test_operational_residual_learner_hot_peak_gate_requires_low_forecast_signal(
+        self,
+    ):
         dt = pd.date_range("2026-07-01", periods=96, freq="h")
         train = pd.DataFrame(
             {
@@ -1644,17 +1832,27 @@ class ForecastControlTests(unittest.TestCase):
         )
 
         self.assertEqual(out.loc[0, "Auto_Residual_Correction_MWH"], 0.0)
-        self.assertEqual(out.loc[0, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked")
+        self.assertEqual(
+            out.loc[0, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked"
+        )
         self.assertGreater(out.loc[1, "Auto_Residual_Correction_MWH"], 0.0)
         self.assertEqual(out.loc[1, "Auto_Residual_Source"], "global+hot_peak")
         self.assertEqual(out.loc[2, "Auto_Residual_Correction_MWH"], 0.0)
-        self.assertEqual(out.loc[2, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked")
+        self.assertEqual(
+            out.loc[2, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked"
+        )
         self.assertEqual(out.loc[3, "Auto_Residual_Correction_MWH"], 0.0)
-        self.assertEqual(out.loc[3, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked")
+        self.assertEqual(
+            out.loc[3, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked"
+        )
         self.assertEqual(out.loc[4, "Auto_Residual_Correction_MWH"], 0.0)
-        self.assertEqual(out.loc[4, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked")
+        self.assertEqual(
+            out.loc[4, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked"
+        )
         self.assertEqual(out.loc[5, "Auto_Residual_Correction_MWH"], 0.0)
-        self.assertEqual(out.loc[5, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked")
+        self.assertEqual(
+            out.loc[5, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked"
+        )
 
     def test_operational_residual_learner_hot_peak_gate_uses_live_ramp_evidence(self):
         dt = pd.date_range("2026-07-01", periods=96, freq="h")
@@ -1752,11 +1950,17 @@ class ForecastControlTests(unittest.TestCase):
         )
 
         self.assertGreater(out.loc[0, "Auto_Residual_Correction_MWH"], 0.0)
-        self.assertEqual(out.loc[0, "Auto_Residual_Source"], "global+hot_peak_live_ramp_gate")
+        self.assertEqual(
+            out.loc[0, "Auto_Residual_Source"], "global+hot_peak_live_ramp_gate"
+        )
         self.assertEqual(out.loc[1, "Auto_Residual_Correction_MWH"], 0.0)
-        self.assertEqual(out.loc[1, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked")
+        self.assertEqual(
+            out.loc[1, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked"
+        )
 
-    def test_operational_residual_learner_structural_hot_peak_shadow_skips_raw_yesterday_gate(self):
+    def test_operational_residual_learner_structural_hot_peak_shadow_skips_raw_yesterday_gate(
+        self,
+    ):
         dt = pd.date_range("2026-07-01", periods=96, freq="h")
         train = pd.DataFrame(
             {
@@ -1856,16 +2060,24 @@ class ForecastControlTests(unittest.TestCase):
         )
 
         self.assertEqual(out.loc[0, "Auto_Residual_Correction_MWH"], 0.0)
-        self.assertEqual(out.loc[0, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked")
-        self.assertGreater(out.loc[0, "Auto_Residual_Structural_HotPeak_Correction_MWH"], 0.0)
-        self.assertLessEqual(out.loc[0, "Auto_Residual_Structural_HotPeak_Correction_MWH"], 5.0)
+        self.assertEqual(
+            out.loc[0, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked"
+        )
+        self.assertGreater(
+            out.loc[0, "Auto_Residual_Structural_HotPeak_Correction_MWH"], 0.0
+        )
+        self.assertLessEqual(
+            out.loc[0, "Auto_Residual_Structural_HotPeak_Correction_MWH"], 5.0
+        )
         self.assertEqual(
             out.loc[0, "Auto_Residual_Structural_HotPeak_Source"],
             "global+hot_peak_structural_residual",
         )
         self.assertEqual(out.loc[0, "Final_Forecast_MWH"], 100.0)
 
-    def test_operational_residual_learner_broad_hot_peak_shadow_uses_looser_gate_only_in_shadow(self):
+    def test_operational_residual_learner_broad_hot_peak_shadow_uses_looser_gate_only_in_shadow(
+        self,
+    ):
         dt = pd.date_range("2026-07-01", periods=96, freq="h")
         train = pd.DataFrame(
             {
@@ -1964,16 +2176,25 @@ class ForecastControlTests(unittest.TestCase):
         )
 
         self.assertEqual(out.loc[0, "Auto_Residual_Correction_MWH"], 0.0)
-        self.assertEqual(out.loc[0, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked")
-        self.assertGreater(out.loc[0, "Auto_Residual_Broad_HotPeak_Shadow_Correction_MWH"], 0.0)
+        self.assertEqual(
+            out.loc[0, "Auto_Residual_Source"], "hot_peak_low_forecast_gate_blocked"
+        )
+        self.assertGreater(
+            out.loc[0, "Auto_Residual_Broad_HotPeak_Shadow_Correction_MWH"], 0.0
+        )
         self.assertEqual(
             out.loc[0, "Auto_Residual_Broad_HotPeak_Shadow_Source"],
             "global+hot_peak_broad_shadow",
         )
-        self.assertGreater(out.loc[0, "Auto_Residual_Broad_HotPeak_Shadow_Adjusted_Forecast_MWH"], 100.0)
+        self.assertGreater(
+            out.loc[0, "Auto_Residual_Broad_HotPeak_Shadow_Adjusted_Forecast_MWH"],
+            100.0,
+        )
         self.assertEqual(out.loc[0, "Final_Forecast_MWH"], 100.0)
 
-    def test_operational_residual_learner_blocks_hot_peak_lift_when_cooling_underway(self):
+    def test_operational_residual_learner_blocks_hot_peak_lift_when_cooling_underway(
+        self,
+    ):
         dt = pd.date_range("2026-07-01", periods=96, freq="h")
         train = pd.DataFrame(
             {
@@ -2063,13 +2284,18 @@ class ForecastControlTests(unittest.TestCase):
         )
 
         self.assertEqual(out.loc[0, "Auto_Residual_Correction_MWH"], 0.0)
-        self.assertEqual(out.loc[0, "Auto_Residual_Source"], "hot_peak_cooling_underway_guard_blocked")
+        self.assertEqual(
+            out.loc[0, "Auto_Residual_Source"],
+            "hot_peak_cooling_underway_guard_blocked",
+        )
         self.assertGreater(out.loc[1, "Auto_Residual_Correction_MWH"], 0.0)
         self.assertEqual(out.loc[1, "Auto_Residual_Source"], "global+hot_peak")
         self.assertGreater(out.loc[2, "Auto_Residual_Correction_MWH"], 0.0)
         self.assertEqual(out.loc[2, "Auto_Residual_Source"], "global+hot_peak")
 
-    def test_operational_residual_learner_hot_peak_only_scope_updates_only_gated_hot_rows(self):
+    def test_operational_residual_learner_hot_peak_only_scope_updates_only_gated_hot_rows(
+        self,
+    ):
         dt = pd.date_range("2026-07-01", periods=96, freq="h")
         train = pd.DataFrame(
             {
@@ -2162,9 +2388,13 @@ class ForecastControlTests(unittest.TestCase):
         self.assertGreater(out.loc[1, "Auto_Residual_Correction_MWH"], 0.0)
         self.assertEqual(out.loc[1, "Auto_Residual_Source"], "global+hot_peak")
         self.assertGreater(out.loc[1, "Final_Forecast_MWH"], 100.0)
-        self.assertEqual(out.loc[1, "Stage_Selected_Forecast_MWH"], out.loc[1, "Final_Forecast_MWH"])
+        self.assertEqual(
+            out.loc[1, "Stage_Selected_Forecast_MWH"], out.loc[1, "Final_Forecast_MWH"]
+        )
 
-    def test_operational_residual_learner_capped_full_scope_promotes_small_global_signal(self):
+    def test_operational_residual_learner_capped_full_scope_promotes_small_global_signal(
+        self,
+    ):
         dt = pd.date_range("2026-07-01", periods=72, freq="h")
         train = pd.DataFrame(
             {
@@ -2226,12 +2456,18 @@ class ForecastControlTests(unittest.TestCase):
             also_update_cols=("Stage_Selected_Forecast_MWH",),
         )
 
-        self.assertEqual(out.loc[0, "Auto_Residual_Production_Scope"], "capped_full_shadow")
+        self.assertEqual(
+            out.loc[0, "Auto_Residual_Production_Scope"], "capped_full_shadow"
+        )
         self.assertGreater(out.loc[0, "Auto_Residual_Full_Shadow_Correction_MWH"], 1.0)
         self.assertAlmostEqual(out.loc[0, "Auto_Residual_Correction_MWH"], 1.0)
-        self.assertEqual(out.loc[0, "Auto_Residual_Source"], "global+capped_full_shadow_cap")
+        self.assertEqual(
+            out.loc[0, "Auto_Residual_Source"], "global+capped_full_shadow_cap"
+        )
         self.assertAlmostEqual(out.loc[0, "Final_Forecast_MWH"], 101.0)
-        self.assertEqual(out.loc[0, "Stage_Selected_Forecast_MWH"], out.loc[0, "Final_Forecast_MWH"])
+        self.assertEqual(
+            out.loc[0, "Stage_Selected_Forecast_MWH"], out.loc[0, "Final_Forecast_MWH"]
+        )
 
     def test_operational_residual_learner_walk_forward_marks_insufficient_history(self):
         dt = pd.date_range("2026-07-01", periods=96, freq="h")
@@ -2270,17 +2506,24 @@ class ForecastControlTests(unittest.TestCase):
             forecast_col="Final_Backtest_Forecast_MWH",
         )
 
-        self.assertEqual(out.loc[0, "Auto_Residual_Source"], "insufficient_walk_forward_history")
+        self.assertEqual(
+            out.loc[0, "Auto_Residual_Source"], "insufficient_walk_forward_history"
+        )
         self.assertTrue((out["Final_Backtest_Forecast_MWH"] == 100.0).all())
         self.assertTrue((out["Auto_Residual_Adjusted_Forecast_MWH"] >= 100.0).all())
 
-    def test_hot_peak_shadow_candidate_scorecard_flags_only_slices_that_beat_final(self):
+    def test_hot_peak_shadow_candidate_scorecard_flags_only_slices_that_beat_final(
+        self,
+    ):
         df = pd.DataFrame(
             {
                 "DT": pd.to_datetime(["2026-07-10 17:00", "2026-08-10 17:00"]),
                 "Actual_MWH": [110.0, 100.0],
                 "Final_Backtest_Forecast_MWH": [100.0, 100.0],
-                "Auto_Residual_Broad_HotPeak_Shadow_Adjusted_Forecast_MWH": [108.0, 110.0],
+                "Auto_Residual_Broad_HotPeak_Shadow_Adjusted_Forecast_MWH": [
+                    108.0,
+                    110.0,
+                ],
                 "Replay_Horizon_Bucket": ["Days8to16", "Days8to16"],
                 "Month": [7, 8],
                 "Hour": [17, 17],
@@ -2333,7 +2576,9 @@ class ForecastControlTests(unittest.TestCase):
 
         self.assertTrue((out["Weather_Robustness_Gate"] == 1).all())
         self.assertTrue((out["Weather_Robustness_Hedge_MWH"] > 0.0).all())
-        self.assertGreater(out.loc[0, "Final_Forecast_MWH"], df.loc[0, "Final_Forecast_MWH"])
+        self.assertGreater(
+            out.loc[0, "Final_Forecast_MWH"], df.loc[0, "Final_Forecast_MWH"]
+        )
 
     def test_weather_robustness_hedge_handles_mixed_offset_export_timestamps(self):
         df = pd.DataFrame(
@@ -2407,7 +2652,10 @@ class ForecastControlTests(unittest.TestCase):
         self.assertEqual(out.loc[0, "Weather_Robustness_Gate"], 1)
         self.assertGreater(out.loc[0, "Weather_Robustness_Hedge_MWH"], 0.0)
         self.assertLessEqual(out.loc[0, "Weather_Robustness_Hedge_MWH"], 2.5)
-        self.assertEqual(out.loc[0, "Weather_Robustness_Hedge_Source"], "weather_uncertainty_ramp_hedge")
+        self.assertEqual(
+            out.loc[0, "Weather_Robustness_Hedge_Source"],
+            "weather_uncertainty_ramp_hedge",
+        )
 
     def test_extreme_heat_morning_midday_bands_are_widened(self):
         df = pd.DataFrame(
@@ -2450,7 +2698,7 @@ class ForecastControlTests(unittest.TestCase):
                     "min_daily_max_temp_f": 100.0,
                     "hour_groups": ["LateEvening"],
                     "min_band_mwh": 15.0,
-                }
+                },
             ],
         }
         df = pd.DataFrame(
@@ -2483,7 +2731,9 @@ class ForecastControlTests(unittest.TestCase):
         )
 
         self.assertEqual(out["Band"].tolist(), [13.0, 7.5, 15.0])
-        self.assertTrue(out["Band_Method"].astype(str).str.contains("hot_bucket_floor").all())
+        self.assertTrue(
+            out["Band_Method"].astype(str).str.contains("hot_bucket_floor").all()
+        )
         self.assertEqual(diagnostic_band, 7.5)
         self.assertIn("hot_bucket_floor", diagnostic_method)
 
@@ -2519,7 +2769,9 @@ class ForecastControlTests(unittest.TestCase):
             }
         }
 
-        out = apply_focused_scorecard_guard(df, config, forecast_col="Final_Forecast_MWH")
+        out = apply_focused_scorecard_guard(
+            df, config, forecast_col="Final_Forecast_MWH"
+        )
 
         self.assertEqual(out.loc[0, "Focused_Scorecard_Guard_MWH"], 10.0)
         self.assertEqual(out.loc[0, "Final_Forecast_MWH"], 290.0)
@@ -2561,7 +2813,9 @@ class ForecastControlTests(unittest.TestCase):
             }
         }
 
-        out = apply_focused_scorecard_guard(df, config, forecast_col="Final_Backtest_Forecast_MWH")
+        out = apply_focused_scorecard_guard(
+            df, config, forecast_col="Final_Backtest_Forecast_MWH"
+        )
 
         self.assertEqual(out.loc[0, "Focused_Scorecard_Guard_MWH"], 0.0)
         self.assertEqual(out.loc[0, "Final_Backtest_Forecast_MWH"], 280.0)
@@ -2613,15 +2867,21 @@ class ForecastControlTests(unittest.TestCase):
             }
         }
 
-        out = apply_focused_scorecard_guard(df, config, forecast_col="Final_Backtest_Forecast_MWH")
+        out = apply_focused_scorecard_guard(
+            df, config, forecast_col="Final_Backtest_Forecast_MWH"
+        )
 
         self.assertEqual(out.loc[0, "Focused_Scorecard_Guard_MWH"], -3.0)
         self.assertEqual(out.loc[0, "Final_Backtest_Forecast_MWH"], 217.0)
         self.assertEqual(out.loc[0, "Stage_Selected_Forecast_MWH"], 217.0)
-        self.assertEqual(out.loc[0, "Focused_Scorecard_Guard_Source"], "safe_no_horizon_shape_rule")
+        self.assertEqual(
+            out.loc[0, "Focused_Scorecard_Guard_Source"], "safe_no_horizon_shape_rule"
+        )
         self.assertEqual(out.loc[0, "Focused_Guard_Applied_Flag"], 1)
 
-    def test_focused_guard_explicit_forecast_day_gate_ignores_no_horizon_backtest_rows(self):
+    def test_focused_guard_explicit_forecast_day_gate_ignores_no_horizon_backtest_rows(
+        self,
+    ):
         config = {
             "calibration": {
                 "stage_selector": {
@@ -2656,7 +2916,10 @@ class ForecastControlTests(unittest.TestCase):
         )
         explicit_horizon = pd.DataFrame(
             {
-                "DT": [pd.Timestamp("2026-07-14 14:00"), pd.Timestamp("2026-07-14 14:00")],
+                "DT": [
+                    pd.Timestamp("2026-07-14 14:00"),
+                    pd.Timestamp("2026-07-14 14:00"),
+                ],
                 "Forecast_Day": [2, 8],
                 "Final_Forecast_MWH": [280.0, 280.0],
                 "Stage_Selected_Forecast_MWH": [280.0, 280.0],
@@ -2677,14 +2940,21 @@ class ForecastControlTests(unittest.TestCase):
         )
 
         self.assertEqual(no_horizon_out["Focused_Scorecard_Guard_MWH"].tolist(), [8.0])
-        self.assertEqual(no_horizon_out["Final_Backtest_Forecast_MWH"].tolist(), [288.0])
-        self.assertEqual(explicit_out["Focused_Scorecard_Guard_MWH"].tolist(), [8.0, 0.0])
+        self.assertEqual(
+            no_horizon_out["Final_Backtest_Forecast_MWH"].tolist(), [288.0]
+        )
+        self.assertEqual(
+            explicit_out["Focused_Scorecard_Guard_MWH"].tolist(), [8.0, 0.0]
+        )
         self.assertEqual(explicit_out["Final_Forecast_MWH"].tolist(), [288.0, 280.0])
 
     def test_focused_guard_can_gate_on_prior_focused_stack(self):
         df = pd.DataFrame(
             {
-                "DT": [pd.Timestamp("2026-07-18 16:00"), pd.Timestamp("2026-07-18 16:00")],
+                "DT": [
+                    pd.Timestamp("2026-07-18 16:00"),
+                    pd.Timestamp("2026-07-18 16:00"),
+                ],
                 "Forecast_Day": [12, 12],
                 "Final_Forecast_MWH": [240.0, 190.0],
                 "Stage_Selected_Forecast_MWH": [240.0, 190.0],
@@ -2725,11 +2995,16 @@ class ForecastControlTests(unittest.TestCase):
             }
         }
 
-        out = apply_focused_scorecard_guard(df, config, forecast_col="Final_Forecast_MWH")
+        out = apply_focused_scorecard_guard(
+            df, config, forecast_col="Final_Forecast_MWH"
+        )
 
         self.assertEqual(out["Focused_Scorecard_Guard_MWH"].tolist(), [8.0, 2.0])
         self.assertEqual(out["Final_Forecast_MWH"].tolist(), [248.0, 192.0])
-        self.assertEqual(out["Focused_Scorecard_Guard_Source"].tolist(), ["prior_recovery", "stack_limited_ramp"])
+        self.assertEqual(
+            out["Focused_Scorecard_Guard_Source"].tolist(),
+            ["prior_recovery", "stack_limited_ramp"],
+        )
 
     def test_focused_guard_applies_june_100_to_105_long_hot_ramp_rule(self):
         df = pd.DataFrame(
@@ -2792,15 +3067,24 @@ class ForecastControlTests(unittest.TestCase):
             }
         }
 
-        out = apply_focused_scorecard_guard(df, config, forecast_col="Final_Forecast_MWH")
+        out = apply_focused_scorecard_guard(
+            df, config, forecast_col="Final_Forecast_MWH"
+        )
 
-        self.assertEqual(out["Focused_Scorecard_Guard_MWH"].tolist(), [0.0, 10.0, 8.0, 5.5])
-        self.assertEqual(out["Final_Forecast_MWH"].tolist(), [226.0, 262.0, 294.0, 317.5])
+        self.assertEqual(
+            out["Focused_Scorecard_Guard_MWH"].tolist(), [0.0, 10.0, 8.0, 5.5]
+        )
+        self.assertEqual(
+            out["Final_Forecast_MWH"].tolist(), [226.0, 262.0, 294.0, 317.5]
+        )
 
     def test_focused_guard_rule_can_extend_total_cap_for_narrow_pattern(self):
         df = pd.DataFrame(
             {
-                "DT": [pd.Timestamp("2026-08-26 14:00"), pd.Timestamp("2026-08-26 15:00")],
+                "DT": [
+                    pd.Timestamp("2026-08-26 14:00"),
+                    pd.Timestamp("2026-08-26 15:00"),
+                ],
                 "Forecast_Day": [10, 10],
                 "Final_Forecast_MWH": [250.0, 250.0],
                 "Stage_Selected_Forecast_MWH": [250.0, 250.0],
@@ -2844,7 +3128,9 @@ class ForecastControlTests(unittest.TestCase):
             }
         }
 
-        out = apply_focused_scorecard_guard(df, config, forecast_col="Final_Forecast_MWH")
+        out = apply_focused_scorecard_guard(
+            df, config, forecast_col="Final_Forecast_MWH"
+        )
 
         self.assertEqual(out["Focused_Scorecard_Guard_MWH"].tolist(), [-60.0, -30.0])
         self.assertEqual(out["Final_Forecast_MWH"].tolist(), [190.0, 220.0])
@@ -2922,7 +3208,9 @@ class ForecastControlTests(unittest.TestCase):
             }
         }
 
-        out = apply_focused_scorecard_guard(df, config, forecast_col="Final_Forecast_MWH")
+        out = apply_focused_scorecard_guard(
+            df, config, forecast_col="Final_Forecast_MWH"
+        )
 
         self.assertEqual(out["Focused_Scorecard_Guard_MWH"].tolist(), [8.0, 4.0, -8.0])
         self.assertEqual(out["Final_Forecast_MWH"].tolist(), [158.0, 228.0, 180.0])
@@ -2968,18 +3256,29 @@ class ForecastControlTests(unittest.TestCase):
             }
         }
 
-        out = apply_focused_scorecard_guard(df, config, forecast_col="Final_Forecast_MWH")
+        out = apply_focused_scorecard_guard(
+            df, config, forecast_col="Final_Forecast_MWH"
+        )
 
         self.assertEqual(out["Focused_Scorecard_Guard_MWH"].tolist(), [-5.0, 0.0, 0.0])
         self.assertEqual(out["Final_Forecast_MWH"].tolist(), [215.0, 220.0, 220.0])
-        self.assertEqual(out["Stage_Selected_Forecast_MWH"].tolist(), [215.0, 220.0, 220.0])
-        self.assertEqual(out["Raw_Minus_SameHour7DayMean_MWH"].tolist(), [20.0, 10.0, 20.0])
-        self.assertEqual(out["Raw_Minus_SameHourYesterday_MWH"].tolist(), [5.0, 5.0, -5.0])
+        self.assertEqual(
+            out["Stage_Selected_Forecast_MWH"].tolist(), [215.0, 220.0, 220.0]
+        )
+        self.assertEqual(
+            out["Raw_Minus_SameHour7DayMean_MWH"].tolist(), [20.0, 10.0, 20.0]
+        )
+        self.assertEqual(
+            out["Raw_Minus_SameHourYesterday_MWH"].tolist(), [5.0, 5.0, -5.0]
+        )
 
     def test_focused_guard_can_gate_on_max_raw_minus_same_hour_load_state(self):
         df = pd.DataFrame(
             {
-                "DT": [pd.Timestamp("2026-07-06 16:00"), pd.Timestamp("2026-07-29 16:00")],
+                "DT": [
+                    pd.Timestamp("2026-07-06 16:00"),
+                    pd.Timestamp("2026-07-29 16:00"),
+                ],
                 "Final_Forecast_MWH": [250.0, 250.0],
                 "Stage_Selected_Forecast_MWH": [250.0, 250.0],
                 "Raw_Forecast_MWH": [240.0, 248.0],
@@ -3011,7 +3310,9 @@ class ForecastControlTests(unittest.TestCase):
             }
         }
 
-        out = apply_focused_scorecard_guard(df, config, forecast_col="Final_Forecast_MWH")
+        out = apply_focused_scorecard_guard(
+            df, config, forecast_col="Final_Forecast_MWH"
+        )
 
         self.assertEqual(out["Focused_Scorecard_Guard_MWH"].tolist(), [-10.0, 0.0])
         self.assertEqual(out["Raw_Minus_SameHour7DayMean_MWH"].tolist(), [5.0, 28.0])
@@ -3020,7 +3321,10 @@ class ForecastControlTests(unittest.TestCase):
     def test_focused_guard_rule_audit_scores_rule_only_delta(self):
         df = pd.DataFrame(
             {
-                "DT": [pd.Timestamp("2026-07-29 17:00"), pd.Timestamp("2026-07-29 18:00")],
+                "DT": [
+                    pd.Timestamp("2026-07-29 17:00"),
+                    pd.Timestamp("2026-07-29 18:00"),
+                ],
                 "Actual_MWH": [110.0, 90.0],
                 "Final_Backtest_Forecast_MWH": [105.0, 105.0],
                 "Pre_Focused_Guard_Forecast_MWH": [100.0, 100.0],
@@ -3221,7 +3525,10 @@ class ForecastControlTests(unittest.TestCase):
             artifact,
             config,
             forecast_col="Pre_Focused_Guard_Forecast_MWH",
-            also_update_cols=("Final_Backtest_Forecast_MWH", "Stage_Selected_Forecast_MWH"),
+            also_update_cols=(
+                "Final_Backtest_Forecast_MWH",
+                "Stage_Selected_Forecast_MWH",
+            ),
             update_forecast_col=False,
         )
 
@@ -3229,8 +3536,13 @@ class ForecastControlTests(unittest.TestCase):
         self.assertEqual(out.loc[0, "Pre_Focused_Guard_Forecast_MWH"], 100.0)
         self.assertGreater(out.loc[0, "Final_Backtest_Forecast_MWH"], 105.0)
         self.assertLessEqual(out.loc[0, "Final_Backtest_Forecast_MWH"], 107.0)
-        self.assertEqual(out.loc[0, "Final_Forecast_MWH"], out.loc[0, "Final_Backtest_Forecast_MWH"])
-        self.assertEqual(out.loc[0, "Stage_Selected_Forecast_MWH"], out.loc[0, "Final_Backtest_Forecast_MWH"])
+        self.assertEqual(
+            out.loc[0, "Final_Forecast_MWH"], out.loc[0, "Final_Backtest_Forecast_MWH"]
+        )
+        self.assertEqual(
+            out.loc[0, "Stage_Selected_Forecast_MWH"],
+            out.loc[0, "Final_Backtest_Forecast_MWH"],
+        )
         self.assertEqual(out.loc[0, "Focused_Shape_Shadow_Mode"], 0)
         self.assertIn("focused_shape_production", out.loc[0, "Focused_Shape_Source"])
         self.assertIn("promotion_delta_guard", out.loc[0, "Focused_Shape_Source"])
@@ -3302,14 +3614,19 @@ class ForecastControlTests(unittest.TestCase):
             artifact,
             config,
             forecast_col="Pre_Focused_Guard_Forecast_MWH",
-            also_update_cols=("Final_Backtest_Forecast_MWH", "Stage_Selected_Forecast_MWH"),
+            also_update_cols=(
+                "Final_Backtest_Forecast_MWH",
+                "Stage_Selected_Forecast_MWH",
+            ),
             update_forecast_col=False,
         )
 
         self.assertIsNotNone(artifact)
         self.assertEqual(out.loc[0, "Focused_Shape_Base_Forecast_MWH"], 105.0)
         self.assertGreater(out.loc[0, "Final_Backtest_Forecast_MWH"], 112.0)
-        self.assertEqual(out.loc[0, "Final_Forecast_MWH"], out.loc[0, "Final_Backtest_Forecast_MWH"])
+        self.assertEqual(
+            out.loc[0, "Final_Forecast_MWH"], out.loc[0, "Final_Backtest_Forecast_MWH"]
+        )
 
     def test_metrics_summary_flags_focused_shape_shadow_beating_final(self):
         df = pd.DataFrame(
@@ -3327,7 +3644,9 @@ class ForecastControlTests(unittest.TestCase):
 
         self.assertTrue(summary["Focused_Shape_Shadow_Beats_Final"])
         self.assertAlmostEqual(summary["Focused_Shape_Shadow_MAE_MWH"], 1.0)
-        self.assertAlmostEqual(summary["Focused_Shape_Shadow_MAE_Improvement_vs_Final_MWH"], 4.0)
+        self.assertAlmostEqual(
+            summary["Focused_Shape_Shadow_MAE_Improvement_vs_Final_MWH"], 4.0
+        )
         self.assertEqual(audit.loc[0, "Stage"], "focused_shape_shadow")
         self.assertTrue(audit.loc[0, "Beats_Final"])
 
@@ -3442,7 +3761,9 @@ class ForecastControlTests(unittest.TestCase):
             }
         }
 
-        out = apply_focused_scorecard_guard(df, config, forecast_col="Final_Forecast_MWH")
+        out = apply_focused_scorecard_guard(
+            df, config, forecast_col="Final_Forecast_MWH"
+        )
 
         self.assertEqual(out.loc[0, "Focused_Scorecard_Guard_MWH"], 0.0)
         self.assertTrue((out.loc[1:, "Focused_Scorecard_Guard_MWH"] == 4.0).all())
@@ -3531,7 +3852,9 @@ class ForecastControlTests(unittest.TestCase):
         out = add_solar_features(df, btm)
 
         self.assertGreater(out.loc[0, "BTM_Solar_Proxy_MW"], 0.0)
-        self.assertGreater(out.loc[0, "BTM_ClearSky_Proxy_MW"], out.loc[0, "BTM_Solar_Proxy_MW"])
+        self.assertGreater(
+            out.loc[0, "BTM_ClearSky_Proxy_MW"], out.loc[0, "BTM_Solar_Proxy_MW"]
+        )
         self.assertGreater(out.loc[0, "BTM_Solar_Loss_From_ClearSky_MW"], 0.0)
 
     def test_peak_risk_uses_tree_gap_without_prophet(self):
@@ -3557,7 +3880,11 @@ class ForecastControlTests(unittest.TestCase):
                     "catboost_gap_threshold_mwh": 99.0,
                     "tree_gap_threshold_mwh": 5.0,
                     "tree_gap_signal_strength": 0.50,
-                    "tree_gap_model_cols": ["XGB_Pred_MWH", "LGB_Pred_MWH", "CatBoost_Pred_MWH"],
+                    "tree_gap_model_cols": [
+                        "XGB_Pred_MWH",
+                        "LGB_Pred_MWH",
+                        "CatBoost_Pred_MWH",
+                    ],
                     "blend": 1.0,
                     "cap_mwh": 10.0,
                 }
@@ -3612,13 +3939,18 @@ class ForecastControlTests(unittest.TestCase):
         out = apply_peak_risk_correction(df, config)
 
         self.assertAlmostEqual(out.loc[0, "Peak_Risk_Cal_MWH"], 0.0)
-        self.assertEqual(out.loc[0, "Peak_Risk_Source"], "peak_risk_overforecast_guard_blocked")
+        self.assertEqual(
+            out.loc[0, "Peak_Risk_Source"], "peak_risk_overforecast_guard_blocked"
+        )
         self.assertAlmostEqual(out.loc[0, "Peak_Risk_Adjusted_Forecast_MWH"], 309.1)
 
     def test_peak_risk_positive_guard_preserves_plausibly_low_hot_peak_uplift(self):
         df = pd.DataFrame(
             {
-                "DT": [pd.Timestamp("2026-07-21 17:00"), pd.Timestamp("2026-07-21 18:00")],
+                "DT": [
+                    pd.Timestamp("2026-07-21 17:00"),
+                    pd.Timestamp("2026-07-21 18:00"),
+                ],
                 "Hour": [17, 18],
                 "Temperature_DailyMax": [105.0, 105.0],
                 "Calibrated_Forecast_MWH": [316.0, 318.0],
@@ -3664,7 +3996,10 @@ class ForecastControlTests(unittest.TestCase):
     def test_peak_risk_hot_ramp_override_bypasses_cooling_guard_when_persistent(self):
         df = pd.DataFrame(
             {
-                "DT": [pd.Timestamp("2026-08-02 17:00"), pd.Timestamp("2026-08-02 18:00")],
+                "DT": [
+                    pd.Timestamp("2026-08-02 17:00"),
+                    pd.Timestamp("2026-08-02 18:00"),
+                ],
                 "Hour": [17, 18],
                 "Forecast_Day": [2, 2],
                 "Temperature_DailyMax": [103.6, 103.6],
@@ -3719,10 +4054,14 @@ class ForecastControlTests(unittest.TestCase):
 
         self.assertAlmostEqual(out.loc[0, "Peak_Risk_Cal_MWH"], 8.0)
         self.assertIn("hot_ramp_guard_bypass", out.loc[0, "Peak_Risk_Source"])
-        self.assertAlmostEqual(out.loc[0, "Hot_Ramp_Override_PeakRisk_Protected_MWH"], 8.0)
+        self.assertAlmostEqual(
+            out.loc[0, "Hot_Ramp_Override_PeakRisk_Protected_MWH"], 8.0
+        )
         self.assertEqual(out.loc[0, "Hot_Ramp_Override_Gate"], 1)
         self.assertAlmostEqual(out.loc[1, "Peak_Risk_Cal_MWH"], 0.0)
-        self.assertEqual(out.loc[1, "Peak_Risk_Source"], "peak_risk_overforecast_guard_blocked")
+        self.assertEqual(
+            out.loc[1, "Peak_Risk_Source"], "peak_risk_overforecast_guard_blocked"
+        )
         self.assertEqual(out.loc[1, "Hot_Ramp_Override_Gate"], 0)
 
     def test_hot_ramp_scenario_override_lifts_toward_hot_stress_gap_with_cap(self):
@@ -3740,12 +4079,24 @@ class ForecastControlTests(unittest.TestCase):
                 "Final_Forecast_MWH": [334.0, 333.0, 325.0, 334.0, 334.0],
                 "Stage_Selected_Forecast_MWH": [334.0, 333.0, 325.0, 334.0, 334.0],
                 "Calibrated_Forecast_MWH": [334.0, 333.0, 325.0, 334.0, 334.0],
-                "WeatherScenario_hot_stress_5f_P50_MWH": [354.0, 344.0, 345.0, 354.0, 354.0],
+                "WeatherScenario_hot_stress_5f_P50_MWH": [
+                    354.0,
+                    344.0,
+                    345.0,
+                    354.0,
+                    354.0,
+                ],
                 "Temperature_DailyMax": [108.4, 108.4, 108.4, 110.2, 108.4],
                 "ConsecutiveVeryHotDays95": [5.0, 5.0, 5.0, 5.0, 5.0],
                 "ConsecutiveExtremeHotDays100": [5.0, 5.0, 5.0, 5.0, 5.0],
                 "Hot_Ramp_Override_Cal_MWH": [0.0, 0.0, 0.0, 0.0, 6.5],
-                "Hot_Ramp_Override_Source": ["none", "none", "none", "none", "hot_ramp_guard_bypass"],
+                "Hot_Ramp_Override_Source": [
+                    "none",
+                    "none",
+                    "none",
+                    "none",
+                    "hot_ramp_guard_bypass",
+                ],
             }
         )
         config = {
@@ -3776,7 +4127,9 @@ class ForecastControlTests(unittest.TestCase):
         self.assertAlmostEqual(out.loc[0, "Final_Forecast_MWH"], 340.0)
         self.assertAlmostEqual(out.loc[0, "Stage_Selected_Forecast_MWH"], 340.0)
         self.assertAlmostEqual(out.loc[0, "Calibrated_Forecast_MWH"], 340.0)
-        self.assertEqual(out.loc[0, "Hot_Ramp_Override_Source"], "hot_ramp_hot_stress_scenario_lift")
+        self.assertEqual(
+            out.loc[0, "Hot_Ramp_Override_Source"], "hot_ramp_hot_stress_scenario_lift"
+        )
         self.assertAlmostEqual(out.loc[1, "Hot_Ramp_Override_Scenario_Lift_MWH"], 4.4)
         self.assertEqual(out.loc[2, "Hot_Ramp_Override_Gate"], 0)
         self.assertEqual(out.loc[3, "Hot_Ramp_Override_Gate"], 0)
@@ -3791,8 +4144,18 @@ class ForecastControlTests(unittest.TestCase):
             (6, 126.85, 152.40),
             (7, 132.93, 160.42),
         ]:
-            history_rows.append({"DT": pd.Timestamp("2026-08-02") + pd.Timedelta(hours=hour), "MWH": yesterday})
-            history_rows.append({"DT": pd.Timestamp("2026-08-03") + pd.Timedelta(hours=hour), "MWH": today})
+            history_rows.append(
+                {
+                    "DT": pd.Timestamp("2026-08-02") + pd.Timedelta(hours=hour),
+                    "MWH": yesterday,
+                }
+            )
+            history_rows.append(
+                {
+                    "DT": pd.Timestamp("2026-08-03") + pd.Timedelta(hours=hour),
+                    "MWH": today,
+                }
+            )
         history = pd.DataFrame(history_rows)
         future = pd.DataFrame(
             {
@@ -3840,7 +4203,9 @@ class ForecastControlTests(unittest.TestCase):
         expected_lift = target - 346.5
         self.assertEqual(out.loc[0, "Day1_Live_Ramp_Gate"], 0)
         self.assertEqual(out.loc[1, "Day1_Live_Ramp_Gate"], 1)
-        self.assertAlmostEqual(out.loc[1, "Day1_Live_Ramp_Observed_Delta_MWH"], observed_delta)
+        self.assertAlmostEqual(
+            out.loc[1, "Day1_Live_Ramp_Observed_Delta_MWH"], observed_delta
+        )
         self.assertAlmostEqual(out.loc[1, "Day1_Live_Ramp_Target_MWH"], target)
         self.assertAlmostEqual(out.loc[1, "Day1_Live_Ramp_Cal_MWH"], expected_lift)
         self.assertAlmostEqual(out.loc[1, "Final_Forecast_MWH"], target)
@@ -3905,10 +4270,14 @@ class ForecastControlTests(unittest.TestCase):
         self.assertAlmostEqual(out.loc[1, "MultiDay_Heat_Anchor_Cal_MWH"], 12.0)
         self.assertAlmostEqual(out.loc[1, "Final_Forecast_MWH"], 350.0)
         self.assertAlmostEqual(out.loc[1, "Calibrated_Forecast_MWH"], 350.0)
-        self.assertEqual(out.loc[1, "MultiDay_Heat_Anchor_Source"], "multiday_live_heat_anchor")
+        self.assertEqual(
+            out.loc[1, "MultiDay_Heat_Anchor_Source"], "multiday_live_heat_anchor"
+        )
         self.assertEqual(out.loc[2, "MultiDay_Heat_Anchor_Gate"], 1)
         self.assertAlmostEqual(out.loc[2, "MultiDay_Heat_Anchor_Cal_MWH"], 0.0)
-        self.assertEqual(out.loc[2, "MultiDay_Heat_Anchor_Source"], "already_at_heat_anchor_target")
+        self.assertEqual(
+            out.loc[2, "MultiDay_Heat_Anchor_Source"], "already_at_heat_anchor_target"
+        )
 
     def test_display_df_exports_heat_ramp_review_columns(self):
         train = pd.DataFrame(
@@ -3950,15 +4319,30 @@ class ForecastControlTests(unittest.TestCase):
         self.assertIn("Day1_Live_Ramp_Cal_MWH", out.columns)
         self.assertIn("MultiDay_Heat_Anchor_Cal_MWH", out.columns)
         self.assertIn("MWH_Lag24", out.columns)
-        self.assertEqual(out.loc[out["Actual"].notna(), "DailyMaxTemp_Ramp_1Day"].iloc[0], 1.6)
-        self.assertEqual(out.loc[out["Forecast"].notna(), "Hot_Ramp_Override_Scenario_Lift_MWH"].iloc[0], 6.0)
-        self.assertEqual(out.loc[out["Forecast"].notna(), "Day1_Live_Ramp_Target_MWH"].iloc[0], 360.0)
-        self.assertEqual(out.loc[out["Forecast"].notna(), "MultiDay_Heat_Anchor_Target_MWH"].iloc[0], 352.0)
+        self.assertEqual(
+            out.loc[out["Actual"].notna(), "DailyMaxTemp_Ramp_1Day"].iloc[0], 1.6
+        )
+        self.assertEqual(
+            out.loc[
+                out["Forecast"].notna(), "Hot_Ramp_Override_Scenario_Lift_MWH"
+            ].iloc[0],
+            6.0,
+        )
+        self.assertEqual(
+            out.loc[out["Forecast"].notna(), "Day1_Live_Ramp_Target_MWH"].iloc[0], 360.0
+        )
+        self.assertEqual(
+            out.loc[out["Forecast"].notna(), "MultiDay_Heat_Anchor_Target_MWH"].iloc[0],
+            352.0,
+        )
 
     def test_stage_selector_conditional_override_respects_hour_filter(self):
         df = pd.DataFrame(
             {
-                "DT": [pd.Timestamp("2026-07-15 12:00"), pd.Timestamp("2026-07-15 16:00")],
+                "DT": [
+                    pd.Timestamp("2026-07-15 12:00"),
+                    pd.Timestamp("2026-07-15 16:00"),
+                ],
                 "Forecast_Day": [9, 9],
                 "Season": ["Summer", "Summer"],
                 "Hour": [12, 16],
@@ -3989,14 +4373,21 @@ class ForecastControlTests(unittest.TestCase):
             }
         }
 
-        out = apply_operational_stage_selector(df, config, forecast_col="Final_Forecast_MWH")
+        out = apply_operational_stage_selector(
+            df, config, forecast_col="Final_Forecast_MWH"
+        )
 
         self.assertEqual(out.loc[0, "Stage_Selected_Forecast_MWH"], 250.0)
         self.assertEqual(out.loc[0, "Stage_Selector_Source"], "Raw_Forecast_MWH")
-        self.assertIn("conditional_stage_override:summer_high_temp_raw_override", out.loc[0, "Stage_Selector_Reason"])
+        self.assertIn(
+            "conditional_stage_override:summer_high_temp_raw_override",
+            out.loc[0, "Stage_Selector_Reason"],
+        )
         self.assertEqual(out.loc[1, "Stage_Selected_Forecast_MWH"], 282.0)
         self.assertEqual(out.loc[1, "Stage_Selector_Source"], "Final_Forecast_MWH")
-        self.assertNotIn("conditional_stage_override", out.loc[1, "Stage_Selector_Reason"])
+        self.assertNotIn(
+            "conditional_stage_override", out.loc[1, "Stage_Selector_Reason"]
+        )
 
     def test_stage_selector_day1_summer_hot_peak_override_promotes_peak_risk(self):
         df = pd.DataFrame(
@@ -4040,20 +4431,40 @@ class ForecastControlTests(unittest.TestCase):
             }
         }
 
-        out = apply_operational_stage_selector(df, config, forecast_col="Final_Forecast_MWH")
+        out = apply_operational_stage_selector(
+            df, config, forecast_col="Final_Forecast_MWH"
+        )
 
         self.assertEqual(out.loc[0, "Stage_Selected_Forecast_MWH"], 331.0)
-        self.assertEqual(out.loc[0, "Stage_Selector_Source"], "Peak_Risk_Adjusted_Forecast_MWH")
-        self.assertIn("conditional_stage_override:day1_summer_hot_peak_peak_risk_override", out.loc[0, "Stage_Selector_Reason"])
+        self.assertEqual(
+            out.loc[0, "Stage_Selector_Source"], "Peak_Risk_Adjusted_Forecast_MWH"
+        )
+        self.assertIn(
+            "conditional_stage_override:day1_summer_hot_peak_peak_risk_override",
+            out.loc[0, "Stage_Selector_Reason"],
+        )
         self.assertEqual(out.loc[1, "Stage_Selected_Forecast_MWH"], 295.0)
-        self.assertNotIn("day1_summer_hot_peak_peak_risk_override", out.loc[1, "Stage_Selector_Reason"])
+        self.assertNotIn(
+            "day1_summer_hot_peak_peak_risk_override",
+            out.loc[1, "Stage_Selector_Reason"],
+        )
         self.assertEqual(out.loc[2, "Stage_Selected_Forecast_MWH"], 330.0)
-        self.assertNotIn("day1_summer_hot_peak_peak_risk_override", out.loc[2, "Stage_Selector_Reason"])
+        self.assertNotIn(
+            "day1_summer_hot_peak_peak_risk_override",
+            out.loc[2, "Stage_Selector_Reason"],
+        )
         self.assertEqual(out.loc[3, "Stage_Selected_Forecast_MWH"], 333.0)
-        self.assertEqual(out.loc[3, "Stage_Selector_Source"], "Targeted_Meta_Adjusted_Forecast_MWH")
-        self.assertNotIn("day1_summer_hot_peak_peak_risk_override", out.loc[3, "Stage_Selector_Reason"])
+        self.assertEqual(
+            out.loc[3, "Stage_Selector_Source"], "Targeted_Meta_Adjusted_Forecast_MWH"
+        )
+        self.assertNotIn(
+            "day1_summer_hot_peak_peak_risk_override",
+            out.loc[3, "Stage_Selector_Reason"],
+        )
 
-    def test_stage_selector_day1_cloud_solar_override_uses_peak_risk_only_for_cloud_slice(self):
+    def test_stage_selector_day1_cloud_solar_override_uses_peak_risk_only_for_cloud_slice(
+        self,
+    ):
         df = pd.DataFrame(
             {
                 "DT": [
@@ -4090,17 +4501,29 @@ class ForecastControlTests(unittest.TestCase):
             }
         }
 
-        out = apply_operational_stage_selector(df, config, forecast_col="Final_Forecast_MWH")
+        out = apply_operational_stage_selector(
+            df, config, forecast_col="Final_Forecast_MWH"
+        )
 
         self.assertEqual(out.loc[0, "Stage_Selected_Forecast_MWH"], 205.0)
-        self.assertEqual(out.loc[0, "Stage_Selector_Source"], "Peak_Risk_Adjusted_Forecast_MWH")
+        self.assertEqual(
+            out.loc[0, "Stage_Selector_Source"], "Peak_Risk_Adjusted_Forecast_MWH"
+        )
         self.assertIn("cloud_solar_stage_override", out.loc[0, "Stage_Selector_Reason"])
         self.assertEqual(out.loc[1, "Stage_Selected_Forecast_MWH"], 191.0)
-        self.assertEqual(out.loc[1, "Stage_Selector_Source"], "Targeted_Meta_Adjusted_Forecast_MWH")
-        self.assertNotIn("cloud_solar_stage_override", out.loc[1, "Stage_Selector_Reason"])
+        self.assertEqual(
+            out.loc[1, "Stage_Selector_Source"], "Targeted_Meta_Adjusted_Forecast_MWH"
+        )
+        self.assertNotIn(
+            "cloud_solar_stage_override", out.loc[1, "Stage_Selector_Reason"]
+        )
         self.assertEqual(out.loc[2, "Stage_Selected_Forecast_MWH"], 192.0)
-        self.assertEqual(out.loc[2, "Stage_Selector_Source"], "Targeted_Meta_Adjusted_Forecast_MWH")
-        self.assertNotIn("cloud_solar_stage_override", out.loc[2, "Stage_Selector_Reason"])
+        self.assertEqual(
+            out.loc[2, "Stage_Selector_Source"], "Targeted_Meta_Adjusted_Forecast_MWH"
+        )
+        self.assertNotIn(
+            "cloud_solar_stage_override", out.loc[2, "Stage_Selector_Reason"]
+        )
 
     def test_long_horizon_peak_month_correction_can_scale_specific_month_days(self):
         df = pd.DataFrame(
@@ -4134,10 +4557,16 @@ class ForecastControlTests(unittest.TestCase):
             }
         }
 
-        out = apply_operational_stage_selector(df, config, forecast_col="Final_Forecast_MWH")
+        out = apply_operational_stage_selector(
+            df, config, forecast_col="Final_Forecast_MWH"
+        )
 
-        self.assertEqual(out["Long_Horizon_Peak_Month_Correction_MWH"].tolist(), [0.0, -6.44, 7.76])
-        self.assertEqual(out["Stage_Selected_Forecast_MWH"].tolist(), [100.0, 93.56, 107.76])
+        self.assertEqual(
+            out["Long_Horizon_Peak_Month_Correction_MWH"].tolist(), [0.0, -6.44, 7.76]
+        )
+        self.assertEqual(
+            out["Stage_Selected_Forecast_MWH"].tolist(), [100.0, 93.56, 107.76]
+        )
 
     def test_blend_predictions_pads_short_optional_components(self):
         blended = blend_predictions(
@@ -4154,7 +4583,9 @@ class ForecastControlTests(unittest.TestCase):
         residuals = np.arange(1.0, 49.0)
         df = pd.DataFrame(
             {
-                "DT": pd.date_range("2026-07-01 00:00", periods=len(residuals), freq="h"),
+                "DT": pd.date_range(
+                    "2026-07-01 00:00", periods=len(residuals), freq="h"
+                ),
                 "Actual_MWH": 100.0 + residuals,
                 "Raw_Forecast_MWH": 100.0,
             }
@@ -4217,7 +4648,12 @@ class ForecastControlTests(unittest.TestCase):
                         "cap_mwh": 3.0,
                         "decay_hours": 1.0,
                         "min_decay": 0.0,
-                        "forecast_day_scales": {"day1": 1.0, "days2to3": 1.0, "days4to7": 1.0, "days8plus": 1.0},
+                        "forecast_day_scales": {
+                            "day1": 1.0,
+                            "days2to3": 1.0,
+                            "days4to7": 1.0,
+                            "days8plus": 1.0,
+                        },
                     },
                 }
             }
@@ -4226,7 +4662,9 @@ class ForecastControlTests(unittest.TestCase):
         out = apply_recent_residual_correction(future, profile, config)
 
         self.assertAlmostEqual(out.loc[0, "AR_Residual_Correction_MWH"], 3.0, places=6)
-        self.assertAlmostEqual(out.loc[1, "AR_Residual_Correction_MWH"], 4.0 * np.exp(-1.0), places=6)
+        self.assertAlmostEqual(
+            out.loc[1, "AR_Residual_Correction_MWH"], 4.0 * np.exp(-1.0), places=6
+        )
         self.assertAlmostEqual(out.loc[0, "Recent_Level_Correction_MWH"], 3.0, places=6)
         self.assertIn("ar1_latest_residual", out.loc[0, "Recent_Correction_Source"])
 
@@ -4251,7 +4689,13 @@ class ForecastControlTests(unittest.TestCase):
                 "recent_residual": {
                     "enabled": True,
                     "cap_mwh": 10.0,
-                    "weights": {"recent_mean": 0.0, "last24_mean": 0.0, "same_hour": 0.0, "hourgroup": 0.0, "global": 0.0},
+                    "weights": {
+                        "recent_mean": 0.0,
+                        "last24_mean": 0.0,
+                        "same_hour": 0.0,
+                        "hourgroup": 0.0,
+                        "global": 0.0,
+                    },
                     "ar_residual": {
                         "enabled": True,
                         "blend": 1.0,
@@ -4268,13 +4712,17 @@ class ForecastControlTests(unittest.TestCase):
         out = apply_recent_residual_correction(future, profile, config)
 
         self.assertAlmostEqual(out.loc[0, "AR_Residual_Correction_MWH"], 3.0, places=6)
-        self.assertEqual(out.loc[0, "AR_Residual_Source"], "ar1_latest_residual+same_hour")
+        self.assertEqual(
+            out.loc[0, "AR_Residual_Source"], "ar1_latest_residual+same_hour"
+        )
 
     def test_recent_residual_backtest_ar_uses_only_prior_rows(self):
         residuals = np.arange(1.0, 8.0)
         df = pd.DataFrame(
             {
-                "DT": pd.date_range("2026-07-01 00:00", periods=len(residuals), freq="h"),
+                "DT": pd.date_range(
+                    "2026-07-01 00:00", periods=len(residuals), freq="h"
+                ),
                 "Actual_MWH": 100.0 + residuals,
                 "Raw_Forecast_MWH": 100.0,
             }
@@ -4284,7 +4732,13 @@ class ForecastControlTests(unittest.TestCase):
                 "recent_residual": {
                     "enabled": True,
                     "cap_mwh": 10.0,
-                    "weights": {"recent_mean": 0.0, "last24_mean": 0.0, "same_hour": 0.0, "hourgroup": 0.0, "global": 0.0},
+                    "weights": {
+                        "recent_mean": 0.0,
+                        "last24_mean": 0.0,
+                        "same_hour": 0.0,
+                        "hourgroup": 0.0,
+                        "global": 0.0,
+                    },
                     "ar_residual": {
                         "enabled": True,
                         "lookback_hours": 24,
@@ -4312,7 +4766,9 @@ class ForecastControlTests(unittest.TestCase):
         residuals = [1.0] * 24 + [3.0] * 24 + [5.0] * 24
         df = pd.DataFrame(
             {
-                "DT": pd.date_range("2026-07-01 00:00", periods=len(residuals), freq="h"),
+                "DT": pd.date_range(
+                    "2026-07-01 00:00", periods=len(residuals), freq="h"
+                ),
                 "Actual_MWH": 100.0 + np.array(residuals),
                 "Raw_Forecast_MWH": 100.0,
             }
@@ -4370,7 +4826,13 @@ class ForecastControlTests(unittest.TestCase):
                 "recent_residual": {
                     "enabled": True,
                     "cap_mwh": 10.0,
-                    "weights": {"recent_mean": 0.0, "last24_mean": 0.0, "same_hour": 0.0, "hourgroup": 0.0, "global": 0.0},
+                    "weights": {
+                        "recent_mean": 0.0,
+                        "last24_mean": 0.0,
+                        "same_hour": 0.0,
+                        "hourgroup": 0.0,
+                        "global": 0.0,
+                    },
                     "origin_day_state": {
                         "enabled": True,
                         "blend": 1.0,
@@ -4378,7 +4840,12 @@ class ForecastControlTests(unittest.TestCase):
                         "same_hour_blend": 0.0,
                         "cap_mwh": 3.0,
                         "decay_days": 1.0,
-                        "forecast_day_scales": {"day1": 1.0, "days2to3": 1.0, "days4to7": 1.0, "days8plus": 1.0},
+                        "forecast_day_scales": {
+                            "day1": 1.0,
+                            "days2to3": 1.0,
+                            "days4to7": 1.0,
+                            "days8plus": 1.0,
+                        },
                         "cap_by_forecast_day": {"day1": 2.0, "days2to3": 3.0},
                     },
                 }
@@ -4387,8 +4854,12 @@ class ForecastControlTests(unittest.TestCase):
 
         out = apply_recent_residual_correction(future, profile, config)
 
-        self.assertAlmostEqual(out.loc[0, "OriginDay_State_Correction_MWH"], 2.0, places=6)
-        self.assertAlmostEqual(out.loc[1, "OriginDay_State_Correction_MWH"], 8.0 * np.exp(-1.0), places=6)
+        self.assertAlmostEqual(
+            out.loc[0, "OriginDay_State_Correction_MWH"], 2.0, places=6
+        )
+        self.assertAlmostEqual(
+            out.loc[1, "OriginDay_State_Correction_MWH"], 8.0 * np.exp(-1.0), places=6
+        )
         self.assertIn("origin_day_state", out.loc[0, "Recent_Correction_Source"])
 
     def test_origin_day_state_ignores_opposite_signed_hour_component(self):
@@ -4416,7 +4887,13 @@ class ForecastControlTests(unittest.TestCase):
                 "recent_residual": {
                     "enabled": True,
                     "cap_mwh": 10.0,
-                    "weights": {"recent_mean": 0.0, "last24_mean": 0.0, "same_hour": 0.0, "hourgroup": 0.0, "global": 0.0},
+                    "weights": {
+                        "recent_mean": 0.0,
+                        "last24_mean": 0.0,
+                        "same_hour": 0.0,
+                        "hourgroup": 0.0,
+                        "global": 0.0,
+                    },
                     "origin_day_state": {
                         "enabled": True,
                         "blend": 1.0,
@@ -4432,14 +4909,20 @@ class ForecastControlTests(unittest.TestCase):
 
         out = apply_recent_residual_correction(future, profile, config)
 
-        self.assertAlmostEqual(out.loc[0, "OriginDay_State_Correction_MWH"], 3.5, places=6)
-        self.assertEqual(out.loc[0, "OriginDay_State_Source"], "origin_day_state+hourgroup")
+        self.assertAlmostEqual(
+            out.loc[0, "OriginDay_State_Correction_MWH"], 3.5, places=6
+        )
+        self.assertEqual(
+            out.loc[0, "OriginDay_State_Source"], "origin_day_state+hourgroup"
+        )
 
     def test_recent_residual_backtest_origin_day_state_uses_only_prior_rows(self):
         residuals = [5.0] * 24 + [1.0]
         df = pd.DataFrame(
             {
-                "DT": pd.date_range("2026-07-01 00:00", periods=len(residuals), freq="h"),
+                "DT": pd.date_range(
+                    "2026-07-01 00:00", periods=len(residuals), freq="h"
+                ),
                 "Actual_MWH": 100.0 + np.array(residuals),
                 "Raw_Forecast_MWH": 100.0,
             }
@@ -4449,7 +4932,13 @@ class ForecastControlTests(unittest.TestCase):
                 "recent_residual": {
                     "enabled": True,
                     "cap_mwh": 10.0,
-                    "weights": {"recent_mean": 0.0, "last24_mean": 0.0, "same_hour": 0.0, "hourgroup": 0.0, "global": 0.0},
+                    "weights": {
+                        "recent_mean": 0.0,
+                        "last24_mean": 0.0,
+                        "same_hour": 0.0,
+                        "hourgroup": 0.0,
+                        "global": 0.0,
+                    },
                     "origin_day_state": {
                         "enabled": True,
                         "lookback_days": 7,
@@ -4472,15 +4961,19 @@ class ForecastControlTests(unittest.TestCase):
         out = simulate_recent_residual_correction_backtest(df, config)
 
         self.assertEqual(out.loc[0, "OriginDay_State_Correction_MWH"], 0.0)
-        self.assertAlmostEqual(out.loc[24, "OriginDay_State_Correction_MWH"], 5.0, places=6)
+        self.assertAlmostEqual(
+            out.loc[24, "OriginDay_State_Correction_MWH"], 5.0, places=6
+        )
         self.assertAlmostEqual(out.loc[24, "OriginDay_Latest_Day_MWH"], 5.0, places=6)
 
-    def test_apply_dynamic_temperature_calibration_adjusts_temperatures_with_decay(self):
+    def test_apply_dynamic_temperature_calibration_adjusts_temperatures_with_decay(
+        self,
+    ):
         hist_wx = pd.DataFrame(
             {
                 "DT": pd.date_range("2026-06-15 00:00", periods=24, freq="h"),
                 "TempF": [90.0] * 24,
-                "LocalStation_TempF": [85.0] * 24, # Cooler by 5 degrees consistently
+                "LocalStation_TempF": [85.0] * 24,  # Cooler by 5 degrees consistently
             }
         )
         fut_wx = pd.DataFrame(
@@ -4495,17 +4988,19 @@ class ForecastControlTests(unittest.TestCase):
                     "dynamic_enabled": True,
                     "dynamic_window_hours": 24,
                     "dynamic_cap_f": 6.0,
-                    "dynamic_blend": 0.80, # Expected bias: -5.0 * 0.80 = -4.0
+                    "dynamic_blend": 0.80,  # Expected bias: -5.0 * 0.80 = -4.0
                     "dynamic_decay_hours": 24.0,
                 }
             }
         }
-        
+
         out = apply_dynamic_temperature_calibration(fut_wx, hist_wx, config)
-        
+
         self.assertIn("Dynamic_Weather_Correction_F", out.columns)
         # Verify the first hour (hour 0) has approx -4.0 degrees correction
-        self.assertAlmostEqual(out.loc[0, "Dynamic_Weather_Correction_F"], -4.0, places=2)
+        self.assertAlmostEqual(
+            out.loc[0, "Dynamic_Weather_Correction_F"], -4.0, places=2
+        )
         # Verify the 24th hour has decayed towards 0 (factor of exp(-23/24) = ~0.38 -> -4 * 0.38 = ~-1.5)
         self.assertTrue(-4.0 < out.loc[23, "Dynamic_Weather_Correction_F"] < -1.0)
         self.assertAlmostEqual(out.loc[0, "TempF"], 91.0, places=2)

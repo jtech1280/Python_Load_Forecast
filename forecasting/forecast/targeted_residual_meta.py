@@ -20,7 +20,9 @@ def _month(values: pd.DataFrame) -> pd.Series:
 
 
 def _cloud_norm(values: pd.DataFrame) -> pd.Series:
-    cloud = _as_num(values.get("CloudCover_Norm", pd.Series(np.nan, index=values.index)))
+    cloud = _as_num(
+        values.get("CloudCover_Norm", pd.Series(np.nan, index=values.index))
+    )
     if cloud.notna().any() and cloud.max(skipna=True) > 1.5:
         cloud = cloud / 100.0
     return cloud.clip(0.0, 1.0)
@@ -32,7 +34,11 @@ def _solar_loss(values: pd.DataFrame) -> pd.Series:
         if "BTM_Solar_Loss_From_ClearSky_MW" in values.columns
         else "Midday_Overcast_Solar_Loss_MW"
     )
-    return _as_num(values.get(col, pd.Series(0.0, index=values.index))).fillna(0.0).clip(lower=0.0)
+    return (
+        _as_num(values.get(col, pd.Series(0.0, index=values.index)))
+        .fillna(0.0)
+        .clip(lower=0.0)
+    )
 
 
 def _cloud_solar_midday_mask(values: pd.DataFrame, min_loss_mw: float) -> pd.Series:
@@ -44,8 +50,12 @@ def _cloud_solar_midday_mask(values: pd.DataFrame, min_loss_mw: float) -> pd.Ser
 
 def _hot_peak_mask(values: pd.DataFrame, config: dict) -> pd.Series:
     hours = [int(hour) for hour in config.get("hot_peak_hours", [16, 17, 18, 19, 20])]
-    daily_max = _as_num(values.get("Temperature_DailyMax", pd.Series(np.nan, index=values.index)))
-    return _hour(values).astype(int).isin(hours) & daily_max.ge(float(config.get("hot_peak_min_maxtemp_f", 90.0)))
+    daily_max = _as_num(
+        values.get("Temperature_DailyMax", pd.Series(np.nan, index=values.index))
+    )
+    return _hour(values).astype(int).isin(hours) & daily_max.ge(
+        float(config.get("hot_peak_min_maxtemp_f", 90.0))
+    )
 
 
 def _feature_frame(values: pd.DataFrame, min_loss_mw: float) -> pd.DataFrame:
@@ -54,21 +64,41 @@ def _feature_frame(values: pd.DataFrame, min_loss_mw: float) -> pd.DataFrame:
     month = _month(values)
     cloud = _cloud_norm(values)
     solar_loss = _solar_loss(values)
-    solar_proxy = _as_num(values.get("BTM_Solar_Proxy_MW", pd.Series(0.0, index=values.index))).clip(lower=0.0)
+    solar_proxy = _as_num(
+        values.get("BTM_Solar_Proxy_MW", pd.Series(0.0, index=values.index))
+    ).clip(lower=0.0)
 
-    out["Raw_Forecast_MWH"] = _as_num(values.get("Raw_Forecast_MWH", pd.Series(np.nan, index=values.index)))
-    out["Temperature"] = _as_num(values.get("Temperature", pd.Series(np.nan, index=values.index)))
-    out["Temperature_DailyMax"] = _as_num(values.get("Temperature_DailyMax", pd.Series(np.nan, index=values.index)))
+    out["Raw_Forecast_MWH"] = _as_num(
+        values.get("Raw_Forecast_MWH", pd.Series(np.nan, index=values.index))
+    )
+    out["Temperature"] = _as_num(
+        values.get("Temperature", pd.Series(np.nan, index=values.index))
+    )
+    out["Temperature_DailyMax"] = _as_num(
+        values.get("Temperature_DailyMax", pd.Series(np.nan, index=values.index))
+    )
     out["CloudCover_Norm"] = cloud
-    out["Humidity_Norm"] = _as_num(values.get("Humidity_Norm", pd.Series(np.nan, index=values.index)))
-    out["WindSpeed_Mph"] = _as_num(values.get("WindSpeed_Mph", pd.Series(np.nan, index=values.index)))
-    out["PrecipIn"] = _as_num(values.get("PrecipIn", pd.Series(np.nan, index=values.index))).clip(lower=0.0)
+    out["Humidity_Norm"] = _as_num(
+        values.get("Humidity_Norm", pd.Series(np.nan, index=values.index))
+    )
+    out["WindSpeed_Mph"] = _as_num(
+        values.get("WindSpeed_Mph", pd.Series(np.nan, index=values.index))
+    )
+    out["PrecipIn"] = _as_num(
+        values.get("PrecipIn", pd.Series(np.nan, index=values.index))
+    ).clip(lower=0.0)
     out["BTM_Solar_Proxy_MW"] = solar_proxy
     out["BTM_Solar_Loss_MW"] = solar_loss
-    out["ClearSky_Index"] = _as_num(values.get("ClearSky_Index", pd.Series(np.nan, index=values.index)))
+    out["ClearSky_Index"] = _as_num(
+        values.get("ClearSky_Index", pd.Series(np.nan, index=values.index))
+    )
     out["Solar_Loss_x_Cloud"] = solar_loss * cloud.fillna(0.0)
-    out["Cloudy_Solar_Midday"] = _cloud_solar_midday_mask(values, min_loss_mw).astype(float)
-    out["IsWeekend"] = _as_num(values.get("IsWeekend", pd.Series(0.0, index=values.index))).fillna(0.0)
+    out["Cloudy_Solar_Midday"] = _cloud_solar_midday_mask(values, min_loss_mw).astype(
+        float
+    )
+    out["IsWeekend"] = _as_num(
+        values.get("IsWeekend", pd.Series(0.0, index=values.index))
+    ).fillna(0.0)
     out["IsLikelySystemPeakHour"] = _as_num(
         values.get("IsLikelySystemPeakHour", pd.Series(0.0, index=values.index))
     ).fillna(0.0)
@@ -91,7 +121,9 @@ def _new_model(config: dict, min_samples_leaf: int) -> HistGradientBoostingRegre
     )
 
 
-def _training_matrix(values: pd.DataFrame, target: pd.Series, min_loss_mw: float) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
+def _training_matrix(
+    values: pd.DataFrame, target: pd.Series, min_loss_mw: float
+) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
     features = _feature_frame(values, min_loss_mw=min_loss_mw)
     target = _as_num(target)
     valid = features["Raw_Forecast_MWH"].notna() & target.notna()
@@ -101,7 +133,9 @@ def _training_matrix(values: pd.DataFrame, target: pd.Series, min_loss_mw: float
     return x.fillna(fill).fillna(0.0), y, fill
 
 
-def _predict(model, fill_values: pd.Series, values: pd.DataFrame, min_loss_mw: float) -> pd.Series:
+def _predict(
+    model, fill_values: pd.Series, values: pd.DataFrame, min_loss_mw: float
+) -> pd.Series:
     features = _feature_frame(values, min_loss_mw=min_loss_mw)
     valid = features["Raw_Forecast_MWH"].notna()
     out = pd.Series(0.0, index=values.index, dtype=float)
@@ -112,12 +146,16 @@ def _predict(model, fill_values: pd.Series, values: pd.DataFrame, min_loss_mw: f
     return out
 
 
-def build_targeted_residual_meta_model(raw_backtest_df: pd.DataFrame, config: dict) -> dict | None:
+def build_targeted_residual_meta_model(
+    raw_backtest_df: pd.DataFrame, config: dict
+) -> dict | None:
     """Fit a compact residual layer on origin-available raw holdout errors."""
     if raw_backtest_df is None or raw_backtest_df.empty:
         return None
 
-    cfg = ((config or {}).get("calibration", {}) or {}).get("targeted_residual_meta", {}) or {}
+    cfg = ((config or {}).get("calibration", {}) or {}).get(
+        "targeted_residual_meta", {}
+    ) or {}
     if not bool(cfg.get("enabled", True)):
         return None
 
@@ -127,25 +165,34 @@ def build_targeted_residual_meta_model(raw_backtest_df: pd.DataFrame, config: di
     raw_residual = _as_num(work.get("Residual_MWH", actual - raw))
     min_loss_mw = float(cfg.get("solar_cloud_min_loss_mw", 1.25))
 
-    x_global, y_global, fill_global = _training_matrix(work, raw_residual, min_loss_mw=min_loss_mw)
+    x_global, y_global, fill_global = _training_matrix(
+        work, raw_residual, min_loss_mw=min_loss_mw
+    )
     if len(x_global) < int(cfg.get("min_rows", 336)):
         return None
 
-    global_model = _new_model(cfg, min_samples_leaf=int(cfg.get("min_samples_leaf", 24)))
+    global_model = _new_model(
+        cfg, min_samples_leaf=int(cfg.get("min_samples_leaf", 24))
+    )
     global_model.fit(x_global, y_global)
-    global_correction = _predict(global_model, fill_global, work, min_loss_mw=min_loss_mw)
-    global_correction = (
-        global_correction
-        * float(cfg.get("global_blend", 0.35))
-    ).clip(-float(cfg.get("global_cap_mwh", 6.0)), float(cfg.get("global_cap_mwh", 6.0)))
+    global_correction = _predict(
+        global_model, fill_global, work, min_loss_mw=min_loss_mw
+    )
+    global_correction = (global_correction * float(cfg.get("global_blend", 0.35))).clip(
+        -float(cfg.get("global_cap_mwh", 6.0)), float(cfg.get("global_cap_mwh", 6.0))
+    )
 
     event_model = None
     fill_event = pd.Series(dtype=float)
     event_mask = _cloud_solar_midday_mask(work, min_loss_mw=min_loss_mw)
     event_target = raw_residual - global_correction
-    x_event, y_event, fill_event = _training_matrix(work.loc[event_mask], event_target.loc[event_mask], min_loss_mw=min_loss_mw)
+    x_event, y_event, fill_event = _training_matrix(
+        work.loc[event_mask], event_target.loc[event_mask], min_loss_mw=min_loss_mw
+    )
     if len(x_event) >= int(cfg.get("min_event_rows", 48)):
-        event_model = _new_model(cfg, min_samples_leaf=int(cfg.get("event_min_samples_leaf", 12)))
+        event_model = _new_model(
+            cfg, min_samples_leaf=int(cfg.get("event_min_samples_leaf", 12))
+        )
         event_model.fit(x_event, y_event)
 
     return {
@@ -177,8 +224,14 @@ def apply_targeted_residual_meta_correction(
     raw = _as_num(out.get("Raw_Forecast_MWH", pd.Series(np.nan, index=out.index)))
     out["Targeted_Meta_Adjusted_Forecast_MWH"] = raw.clip(lower=0.0)
 
-    cfg = ((config or {}).get("calibration", {}) or {}).get("targeted_residual_meta", {}) or {}
-    if not bool(cfg.get("enabled", True)) or not artifact or artifact.get("global_model") is None:
+    cfg = ((config or {}).get("calibration", {}) or {}).get(
+        "targeted_residual_meta", {}
+    ) or {}
+    if (
+        not bool(cfg.get("enabled", True))
+        or not artifact
+        or artifact.get("global_model") is None
+    ):
         return out
 
     min_loss_mw = float(cfg.get("solar_cloud_min_loss_mw", 1.25))
@@ -189,7 +242,9 @@ def apply_targeted_residual_meta_correction(
         min_loss_mw=min_loss_mw,
     )
     global_cap = float(cfg.get("global_cap_mwh", 6.0))
-    global_corr = (global_corr * float(cfg.get("global_blend", 0.35))).clip(-global_cap, global_cap)
+    global_corr = (global_corr * float(cfg.get("global_blend", 0.35))).clip(
+        -global_cap, global_cap
+    )
 
     event_corr = pd.Series(0.0, index=out.index, dtype=float)
     event_mask = _cloud_solar_midday_mask(out, min_loss_mw=min_loss_mw)

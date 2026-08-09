@@ -11,7 +11,9 @@ from forecasting.solar.solar_forecaster import (
 
 
 class SolarIndexCacheTests(unittest.TestCase):
-    def _write_interval_parquet(self, root: Path, relative: str, spids: list[str]) -> None:
+    def _write_interval_parquet(
+        self, root: Path, relative: str, spids: list[str]
+    ) -> None:
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(
@@ -43,15 +45,23 @@ class SolarIndexCacheTests(unittest.TestCase):
 
             catalog = load_rec_file_catalog(root, {"REC", "NET"})
             self.assertTrue((root / "_interval_parquet_index.csv").exists())
-            self.assertTrue((root / "_shape_analysis_cache/spid_file_index/file_catalog.parquet").exists())
+            self.assertTrue(
+                (
+                    root / "_shape_analysis_cache/spid_file_index/file_catalog.parquet"
+                ).exists()
+            )
             self.assertEqual(set(catalog["channel"]), {"REC", "NET"})
             self.assertEqual(set(catalog["nem_status"]), {"NEM", "Non-NEM"})
             self.assertIn("GS-1", set(catalog["rate_group"]))
             self.assertIn("RES", set(catalog["rate_group"]))
 
             lookup = load_spid_file_lookup(root)
-            self.assertTrue((root / "_shape_analysis_cache/spid_file_index/lookup").exists())
-            self.assertEqual(set(lookup.columns), {"SPID", "SPID_BASE", "FileID", "RowCount"})
+            self.assertTrue(
+                (root / "_shape_analysis_cache/spid_file_index/lookup").exists()
+            )
+            self.assertEqual(
+                set(lookup.columns), {"SPID", "SPID_BASE", "FileID", "RowCount"}
+            )
             row = lookup.loc[lookup["SPID"].eq("3000001_1")].iloc[0]
             self.assertEqual(row["SPID_BASE"], "3000001")
             self.assertEqual(int(row["RowCount"]), 2)
@@ -59,15 +69,21 @@ class SolarIndexCacheTests(unittest.TestCase):
     def test_legacy_csv_index_is_normalized_and_aggregate_files_are_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            interval_path = root / "RES/REC/Monthly_202401/servicepoint_batch_0001.parquet"
+            interval_path = (
+                root / "RES/REC/Monthly_202401/servicepoint_batch_0001.parquet"
+            )
             self._write_interval_parquet(
                 root,
                 "RES/REC/Monthly_202401/servicepoint_batch_0001.parquet",
                 ["3000001_1", "3000002_1"],
             )
-            aggregate_path = root / "DEL_vs_System/AMI_REC_by_RateGroup_Observed.parquet"
+            aggregate_path = (
+                root / "DEL_vs_System/AMI_REC_by_RateGroup_Observed.parquet"
+            )
             aggregate_path.parent.mkdir(parents=True, exist_ok=True)
-            pd.DataFrame({"Name": ["GS-1"], "Date": ["2024-01-01"], "Value": [1.0]}).to_parquet(
+            pd.DataFrame(
+                {"Name": ["GS-1"], "Date": ["2024-01-01"], "Value": [1.0]}
+            ).to_parquet(
                 aggregate_path,
                 index=False,
             )

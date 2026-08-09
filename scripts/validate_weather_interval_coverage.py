@@ -14,7 +14,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from forecasting.forecast.uncertainty_bands import apply_bands, build_residual_band_lookup
+from forecasting.forecast.uncertainty_bands import (
+    apply_bands,
+    build_residual_band_lookup,
+)
 
 
 def _load_config() -> dict[str, Any]:
@@ -32,7 +35,9 @@ def _latest_replay_label(output_dir: Path) -> str:
         label = path.stem.removeprefix("rolling_origin_replay_results_")
         if label and label != "recent_guard_candidate":
             return label
-    raise FileNotFoundError("No labeled rolling_origin_replay_results_*.csv file found.")
+    raise FileNotFoundError(
+        "No labeled rolling_origin_replay_results_*.csv file found."
+    )
 
 
 def _hour_group(hours: np.ndarray) -> np.ndarray:
@@ -61,7 +66,12 @@ def _add_daily_max_bin(df: pd.DataFrame) -> pd.DataFrame:
 def _read_replay(path: Path) -> pd.DataFrame:
     """Read replay with optimized dtype handling."""
     df = pd.read_csv(path, low_memory=False)
-    for col in ["DT", "Replay_Origin_DT", "Replay_Calibration_Start_DT", "Replay_Calibration_End_DT"]:
+    for col in [
+        "DT",
+        "Replay_Origin_DT",
+        "Replay_Calibration_Start_DT",
+        "Replay_Calibration_End_DT",
+    ]:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce", utc=True)
     return df
@@ -70,7 +80,9 @@ def _read_replay(path: Path) -> pd.DataFrame:
 def _make_band_basis(replay: pd.DataFrame) -> pd.DataFrame:
     basis = replay.copy()
     basis["Residual_MWH"] = pd.to_numeric(basis["Final_Residual_MWH"], errors="coerce")
-    return basis.dropna(subset=["Residual_MWH", "Actual_MWH", "Final_Backtest_Forecast_MWH"]).copy()
+    return basis.dropna(
+        subset=["Residual_MWH", "Actual_MWH", "Final_Backtest_Forecast_MWH"]
+    ).copy()
 
 
 def _make_operational_weather_frame(replay: pd.DataFrame) -> pd.DataFrame:
@@ -87,24 +99,33 @@ def _make_operational_weather_frame(replay: pd.DataFrame) -> pd.DataFrame:
     for source, target in mappings.items():
         if source in work.columns:
             work[target] = pd.to_numeric(work[source], errors="coerce")
-    for source in [c for c in work.columns if c.startswith("WeatherRealism_WeatherScenario_")]:
+    for source in [
+        c for c in work.columns if c.startswith("WeatherRealism_WeatherScenario_")
+    ]:
         target = source.removeprefix("WeatherRealism_")
         work[target] = pd.to_numeric(work[source], errors="coerce")
-    work["Calibrated_Forecast_MWH"] = pd.to_numeric(work["WeatherRealism_Final_Backtest_Forecast_MWH"], errors="coerce")
-    
+    work["Calibrated_Forecast_MWH"] = pd.to_numeric(
+        work["WeatherRealism_Final_Backtest_Forecast_MWH"], errors="coerce"
+    )
+
     # Vectorized hour extraction
     work["Hour"] = pd.to_numeric(work.get("Hour"), errors="coerce")
     missing_hour = work["Hour"].isna()
     if missing_hour.any():
-        work.loc[missing_hour, "Hour"] = pd.to_datetime(work.loc[missing_hour, "DT"]).dt.hour
+        work.loc[missing_hour, "Hour"] = pd.to_datetime(
+            work.loc[missing_hour, "DT"]
+        ).dt.hour
     work["Hour"] = work["Hour"].astype(int)
-    
+
     # Vectorized hour grouping
     work["HourGroup"] = _hour_group(work["Hour"].to_numpy())
     work["Month"] = pd.to_datetime(work["DT"]).dt.month.astype(int)
     work["Season"] = work.get("Season", np.nan)
     work["CloudSolarEventClass"] = ""
-    work = work.drop(columns=["CloudCoverBucket", "SolarLossBucket", "DailyMaxTempBin"], errors="ignore")
+    work = work.drop(
+        columns=["CloudCoverBucket", "SolarLossBucket", "DailyMaxTempBin"],
+        errors="ignore",
+    )
     return _add_daily_max_bin(work)
 
 
@@ -127,7 +148,9 @@ def _prior_weather_cfg(current: dict[str, Any]) -> dict[str, Any]:
     return prior
 
 
-def _apply_policy(frame: pd.DataFrame, lookup: dict, bands_cfg: dict[str, Any], policy: str) -> pd.DataFrame:
+def _apply_policy(
+    frame: pd.DataFrame, lookup: dict, bands_cfg: dict[str, Any], policy: str
+) -> pd.DataFrame:
     weather_cfg = dict(bands_cfg.get("weather_input_risk", {}) or {})
     if policy == "no_weather_risk":
         weather_cfg["enabled"] = False
@@ -146,15 +169,21 @@ def _apply_policy(frame: pd.DataFrame, lookup: dict, bands_cfg: dict[str, Any], 
     )
     actual = pd.to_numeric(out["Actual_MWH"], errors="coerce")
     out["Interval_Covered"] = actual.between(out["Lower_Band"], out["Upper_Band"])
-    out["AbsError_MWH"] = (actual - pd.to_numeric(out["Calibrated_Forecast_MWH"], errors="coerce")).abs()
-    out["Band_Miss_MWH"] = np.maximum(out["AbsError_MWH"] - pd.to_numeric(out["Band"], errors="coerce"), 0.0)
+    out["AbsError_MWH"] = (
+        actual - pd.to_numeric(out["Calibrated_Forecast_MWH"], errors="coerce")
+    ).abs()
+    out["Band_Miss_MWH"] = np.maximum(
+        out["AbsError_MWH"] - pd.to_numeric(out["Band"], errors="coerce"), 0.0
+    )
     out["Policy"] = policy
     return out
 
 
 def _scenario_halfspread(frame: pd.DataFrame) -> pd.Series:
     if "WeatherScenario_HalfSpread_MWH" in frame.columns:
-        return pd.to_numeric(frame["WeatherScenario_HalfSpread_MWH"], errors="coerce").fillna(0.0)
+        return pd.to_numeric(
+            frame["WeatherScenario_HalfSpread_MWH"], errors="coerce"
+        ).fillna(0.0)
     scenario_cols = [
         c
         for c in frame.columns
@@ -180,18 +209,24 @@ def _conformal_quantile(
         (
             calibration[
                 calibration["Weather_Input_Risk_Class"].astype(str).eq(str(risk_class))
-                & calibration["Replay_Horizon_Bucket"].astype(str).eq(str(horizon_bucket))
+                & calibration["Replay_Horizon_Bucket"]
+                .astype(str)
+                .eq(str(horizon_bucket))
             ],
             "risk_horizon",
             min_group_rows,
         ),
         (
-            calibration[calibration["Weather_Input_Risk_Class"].astype(str).eq(str(risk_class))],
+            calibration[
+                calibration["Weather_Input_Risk_Class"].astype(str).eq(str(risk_class))
+            ],
             "risk_class",
             min_group_rows,
         ),
         (
-            calibration[calibration["Replay_Horizon_Bucket"].astype(str).eq(str(horizon_bucket))],
+            calibration[
+                calibration["Replay_Horizon_Bucket"].astype(str).eq(str(horizon_bucket))
+            ],
             "horizon",
             min_group_rows,
         ),
@@ -204,7 +239,9 @@ def _conformal_quantile(
     return np.nan, "insufficient_prior"
 
 
-def _apply_walk_forward_conformal_weather_policy(current_detail: pd.DataFrame, bands_cfg: dict[str, Any]) -> pd.DataFrame:
+def _apply_walk_forward_conformal_weather_policy(
+    current_detail: pd.DataFrame, bands_cfg: dict[str, Any]
+) -> pd.DataFrame:
     cfg = dict((bands_cfg.get("conformal_weather", {}) or {}))
     out = current_detail.copy()
     out["Policy"] = "current_weather_risk_conformal_walkforward"
@@ -229,7 +266,9 @@ def _apply_walk_forward_conformal_weather_policy(current_detail: pd.DataFrame, b
         return out
 
     out[origin_col] = pd.to_datetime(out[origin_col], errors="coerce", utc=True)
-    out["Weather_Input_Risk_Class"] = out.get("Weather_Input_Risk_Class", "none").astype(str)
+    out["Weather_Input_Risk_Class"] = out.get(
+        "Weather_Input_Risk_Class", "none"
+    ).astype(str)
     out["Replay_Horizon_Bucket"] = out.get("Replay_Horizon_Bucket", "").astype(str)
     out = out.sort_values([origin_col, "DT"]).copy()
     origins = sorted(out[origin_col].dropna().unique())
@@ -246,11 +285,13 @@ def _apply_walk_forward_conformal_weather_policy(current_detail: pd.DataFrame, b
         risk_classes = origin_rows["Weather_Input_Risk_Class"].to_numpy()
         horizon_buckets = origin_rows["Replay_Horizon_Bucket"].to_numpy()
         origin_indices = origin_rows.index.to_numpy()
-        
+
         # Batch compute quantiles
         quantiles = []
         sources = []
-        for idx, (risk_class, horizon_bucket) in enumerate(zip(risk_classes, horizon_buckets)):
+        for idx, (risk_class, horizon_bucket) in enumerate(
+            zip(risk_classes, horizon_buckets)
+        ):
             q, source = _conformal_quantile(
                 calibration,
                 str(risk_class),
@@ -261,15 +302,24 @@ def _apply_walk_forward_conformal_weather_policy(current_detail: pd.DataFrame, b
             )
             quantiles.append(q)
             sources.append(source)
-        
+
         out.loc[origin_indices, "Conformal_Weather_Band_MWH"] = quantiles
         out.loc[origin_indices, "Conformal_Weather_Source"] = sources
 
     current = out["Pre_Conformal_Band_MWH"].astype(float)
-    multiplier = pd.to_numeric(out.get("Weather_Input_Risk_Multiplier", 1.0), errors="coerce").replace(0.0, np.nan).fillna(1.0)
+    multiplier = (
+        pd.to_numeric(out.get("Weather_Input_Risk_Multiplier", 1.0), errors="coerce")
+        .replace(0.0, np.nan)
+        .fillna(1.0)
+    )
     base_band = current / multiplier
     conformal = pd.to_numeric(out["Conformal_Weather_Band_MWH"], errors="coerce")
-    scenario_band = pd.to_numeric(out["WeatherScenario_HalfSpread_MWH"], errors="coerce").fillna(0.0) * scenario_mult
+    scenario_band = (
+        pd.to_numeric(out["WeatherScenario_HalfSpread_MWH"], errors="coerce").fillna(
+            0.0
+        )
+        * scenario_mult
+    )
     candidate = np.maximum.reduce(
         [
             base_band.to_numpy(dtype=float),
@@ -277,13 +327,21 @@ def _apply_walk_forward_conformal_weather_policy(current_detail: pd.DataFrame, b
             scenario_band.to_numpy(dtype=float),
         ]
     )
-    eligible = multiplier.gt(1.0) | ~out["Weather_Input_Risk_Class"].astype(str).eq("none")
+    eligible = multiplier.gt(1.0) | ~out["Weather_Input_Risk_Class"].astype(str).eq(
+        "none"
+    )
     candidate = np.where(eligible.to_numpy(), candidate, current.to_numpy(dtype=float))
     no_conformal = out["Conformal_Weather_Source"].astype(str).eq("insufficient_prior")
-    candidate = np.where(no_conformal.to_numpy(), current.to_numpy(dtype=float), candidate)
+    candidate = np.where(
+        no_conformal.to_numpy(), current.to_numpy(dtype=float), candidate
+    )
     if min_fraction > 0:
         candidate = np.maximum(candidate, current.to_numpy(dtype=float) * min_fraction)
-    out["Band"] = candidate if allow_narrowing else np.maximum(current.to_numpy(dtype=float), candidate)
+    out["Band"] = (
+        candidate
+        if allow_narrowing
+        else np.maximum(current.to_numpy(dtype=float), candidate)
+    )
 
     base = pd.to_numeric(out["Calibrated_Forecast_MWH"], errors="coerce")
     actual = pd.to_numeric(out["Actual_MWH"], errors="coerce")
@@ -293,8 +351,13 @@ def _apply_walk_forward_conformal_weather_policy(current_detail: pd.DataFrame, b
     out["P50_Forecast_MWH"] = base.clip(lower=0.0)
     out["P90_Forecast_MWH"] = out["Upper_Band"]
     out["Interval_Covered"] = actual.between(out["Lower_Band"], out["Upper_Band"])
-    out["Band_Miss_MWH"] = np.maximum(out["AbsError_MWH"] - pd.to_numeric(out["Band"], errors="coerce"), 0.0)
-    out["Quantile_Method"] = out.get("Quantile_Method", "conditional_residual_central80").astype(str) + "+walkforward_conformal_weather"
+    out["Band_Miss_MWH"] = np.maximum(
+        out["AbsError_MWH"] - pd.to_numeric(out["Band"], errors="coerce"), 0.0
+    )
+    out["Quantile_Method"] = (
+        out.get("Quantile_Method", "conditional_residual_central80").astype(str)
+        + "+walkforward_conformal_weather"
+    )
     return out
 
 
@@ -304,35 +367,45 @@ def _event_slice_vectorized(frame: pd.DataFrame) -> np.ndarray:
     season = frame["Season"].to_numpy(dtype=str)
     hour = pd.to_numeric(frame["Hour"], errors="coerce").to_numpy(dtype=float)
     day = pd.to_numeric(frame["Forecast_Day"], errors="coerce").to_numpy(dtype=float)
-    temp = pd.to_numeric(frame["Temperature_DailyMax"], errors="coerce").to_numpy(dtype=float)
-    cloud = pd.to_numeric(frame["CloudCover_Norm"], errors="coerce").to_numpy(dtype=float)
-    loss = pd.to_numeric(frame["BTM_Solar_Loss_From_ClearSky_MW"], errors="coerce").to_numpy(dtype=float)
-    
+    temp = pd.to_numeric(frame["Temperature_DailyMax"], errors="coerce").to_numpy(
+        dtype=float
+    )
+    cloud = pd.to_numeric(frame["CloudCover_Norm"], errors="coerce").to_numpy(
+        dtype=float
+    )
+    loss = pd.to_numeric(
+        frame["BTM_Solar_Loss_From_ClearSky_MW"], errors="coerce"
+    ).to_numpy(dtype=float)
+
     result = np.empty(len(frame), dtype=object)
     result[:] = "normal"
-    
+
     # Long horizon
     long_horizon = np.isfinite(day) & (day >= 8)
     result[long_horizon] = "long_horizon_days8to16"
-    
+
     # Hot peak
     hot_peak = (hour_group == "Peak") & np.isfinite(temp) & (temp >= 90)
     result[hot_peak] = "hot_peak"
-    
+
     # Cloud/solar midday
     cloud_solar = (hour_group == "Midday") & (
         (np.isfinite(cloud) & (cloud >= 0.60)) | (np.isfinite(loss) & (loss >= 1.25))
     )
     result[cloud_solar] = "cloudy_solar_loss_midday"
-    
+
     # Shoulder heat
     shoulder = (
-        np.isin(season, ["Spring", "Fall"]) & 
-        np.isfinite(hour) & (hour >= 12) & (hour <= 22) & 
-        np.isfinite(temp) & (temp >= 75) & (temp <= 93)
+        np.isin(season, ["Spring", "Fall"])
+        & np.isfinite(hour)
+        & (hour >= 12)
+        & (hour <= 22)
+        & np.isfinite(temp)
+        & (temp >= 75)
+        & (temp <= 93)
     )
     result[shoulder] = "shoulder_heat_transition"
-    
+
     return result
 
 
@@ -351,12 +424,26 @@ def _coverage_metrics(group: pd.DataFrame) -> pd.Series:
             "Avg_Band_MWH": float(pd.to_numeric(group["Band"], errors="coerce").mean()),
             "Avg_Pre_Conformal_Band_MWH": mean_col("Pre_Conformal_Band_MWH"),
             "Avg_Conformal_Weather_Band_MWH": mean_col("Conformal_Weather_Band_MWH"),
-            "Avg_WeatherScenario_HalfSpread_MWH": mean_col("WeatherScenario_HalfSpread_MWH"),
-            "Avg_AbsError_MWH": float(pd.to_numeric(group["AbsError_MWH"], errors="coerce").mean()),
-            "P90_AbsError_MWH": float(pd.to_numeric(group["AbsError_MWH"], errors="coerce").quantile(0.90)),
-            "Avg_Band_Miss_MWH": float(pd.to_numeric(group["Band_Miss_MWH"], errors="coerce").mean()),
-            "P90_Band_Miss_MWH": float(pd.to_numeric(group["Band_Miss_MWH"], errors="coerce").quantile(0.90)),
-            "Avg_Weather_Risk_Multiplier": float(pd.to_numeric(group["Weather_Input_Risk_Multiplier"], errors="coerce").mean()),
+            "Avg_WeatherScenario_HalfSpread_MWH": mean_col(
+                "WeatherScenario_HalfSpread_MWH"
+            ),
+            "Avg_AbsError_MWH": float(
+                pd.to_numeric(group["AbsError_MWH"], errors="coerce").mean()
+            ),
+            "P90_AbsError_MWH": float(
+                pd.to_numeric(group["AbsError_MWH"], errors="coerce").quantile(0.90)
+            ),
+            "Avg_Band_Miss_MWH": float(
+                pd.to_numeric(group["Band_Miss_MWH"], errors="coerce").mean()
+            ),
+            "P90_Band_Miss_MWH": float(
+                pd.to_numeric(group["Band_Miss_MWH"], errors="coerce").quantile(0.90)
+            ),
+            "Avg_Weather_Risk_Multiplier": float(
+                pd.to_numeric(
+                    group["Weather_Input_Risk_Multiplier"], errors="coerce"
+                ).mean()
+            ),
         }
     )
 
@@ -368,12 +455,25 @@ def _scorecard(detail: pd.DataFrame) -> pd.DataFrame:
         if group_cols and not all(c in detail.columns for c in group_cols):
             return
         if not group_cols:
-            out = detail.groupby("Policy", dropna=False).apply(_coverage_metrics, include_groups=False).reset_index()
+            out = (
+                detail.groupby("Policy", dropna=False)
+                .apply(_coverage_metrics, include_groups=False)
+                .reset_index()
+            )
             out.insert(1, "Slice", "Overall")
             frames.append(out)
             return
-        out = detail.groupby(["Policy"] + group_cols, dropna=False).apply(_coverage_metrics, include_groups=False).reset_index()
-        slice_values = out[group_cols].astype("string").fillna("nan").apply(lambda row: "|".join(row.tolist()), axis=1)
+        out = (
+            detail.groupby(["Policy"] + group_cols, dropna=False)
+            .apply(_coverage_metrics, include_groups=False)
+            .reset_index()
+        )
+        slice_values = (
+            out[group_cols]
+            .astype("string")
+            .fillna("nan")
+            .apply(lambda row: "|".join(row.tolist()), axis=1)
+        )
         out["Slice"] = name + ":" + slice_values
         frames.append(out.drop(columns=group_cols))
 
@@ -385,14 +485,28 @@ def _scorecard(detail: pd.DataFrame) -> pd.DataFrame:
     add("Event", ["Interval_Event_Slice"])
     add("Season", ["Season"])
     add("ConformalSource", ["Conformal_Weather_Source"])
-    return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+    return (
+        pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+    )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Validate weather-realism interval coverage from a saved replay.")
-    parser.add_argument("--label", default=None, help="Replay label, e.g. recent_guard_full_20260524_210025")
-    parser.add_argument("--replay-path", default=None, help="Explicit rolling_origin_replay_results CSV path.")
-    parser.add_argument("--output-label", default=None, help="Output label when --replay-path is used.")
+    parser = argparse.ArgumentParser(
+        description="Validate weather-realism interval coverage from a saved replay."
+    )
+    parser.add_argument(
+        "--label",
+        default=None,
+        help="Replay label, e.g. recent_guard_full_20260524_210025",
+    )
+    parser.add_argument(
+        "--replay-path",
+        default=None,
+        help="Explicit rolling_origin_replay_results CSV path.",
+    )
+    parser.add_argument(
+        "--output-label", default=None, help="Output label when --replay-path is used."
+    )
     args = parser.parse_args()
 
     output_dir = Path("forecast_outputs")
@@ -400,7 +514,11 @@ def main() -> None:
         replay_path = Path(args.replay_path)
         if not replay_path.exists():
             raise FileNotFoundError(f"Replay path not found: {replay_path}")
-        label = args.output_label or replay_path.stem.removeprefix("rolling_origin_replay_results").strip("_") or "adhoc"
+        label = (
+            args.output_label
+            or replay_path.stem.removeprefix("rolling_origin_replay_results").strip("_")
+            or "adhoc"
+        )
     else:
         label = args.label or _latest_replay_label(output_dir)
         replay_path = output_dir / f"rolling_origin_replay_results_{label}.csv"
@@ -414,28 +532,44 @@ def main() -> None:
     )
     operational = _make_operational_weather_frame(replay)
     base_detail = pd.concat(
-        [_apply_policy(operational, lookup, bands_cfg, policy) for policy in ["no_weather_risk", "prior_weather_risk", "current_weather_risk"]],
+        [
+            _apply_policy(operational, lookup, bands_cfg, policy)
+            for policy in [
+                "no_weather_risk",
+                "prior_weather_risk",
+                "current_weather_risk",
+            ]
+        ],
         ignore_index=True,
         sort=False,
     )
     base_detail["Weather_Forecast_Lead_Bucket"] = pd.cut(
-        pd.to_numeric(base_detail.get("WeatherRealism_Forecast_Weather_Lead_Days"), errors="coerce"),
+        pd.to_numeric(
+            base_detail.get("WeatherRealism_Forecast_Weather_Lead_Days"),
+            errors="coerce",
+        ),
         bins=[-np.inf, 1, 3, 7, np.inf],
         labels=["day1", "days2to3", "days4to7", "days8plus"],
         include_lowest=True,
     ).astype("object")
-    
+
     # Vectorized event slicing
     base_detail["Interval_Event_Slice"] = _event_slice_vectorized(base_detail)
-    
+
     current = base_detail[base_detail["Policy"].eq("current_weather_risk")].copy()
     conformal = _apply_walk_forward_conformal_weather_policy(current, bands_cfg)
     detail = pd.concat([base_detail, conformal], ignore_index=True, sort=False)
 
     scorecard = _scorecard(detail)
-    detail_path = output_dir / f"weather_interval_coverage_validation_detail_{label}.csv"
-    scorecard_path = output_dir / f"weather_interval_coverage_validation_scorecard_{label}.csv"
-    summary_path = output_dir / f"weather_interval_coverage_validation_summary_{label}.json"
+    detail_path = (
+        output_dir / f"weather_interval_coverage_validation_detail_{label}.csv"
+    )
+    scorecard_path = (
+        output_dir / f"weather_interval_coverage_validation_scorecard_{label}.csv"
+    )
+    summary_path = (
+        output_dir / f"weather_interval_coverage_validation_summary_{label}.json"
+    )
     detail.to_csv(detail_path, index=False)
     scorecard.to_csv(scorecard_path, index=False)
 
@@ -447,11 +581,25 @@ def main() -> None:
         "scorecard_path": str(scorecard_path),
         "overall": summary_rows.to_dict(orient="records"),
     }
-    summary_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+    summary_path.write_text(
+        json.dumps(summary, indent=2, default=str), encoding="utf-8"
+    )
     print(f"Wrote {scorecard_path}")
     print(f"Wrote {detail_path}")
     print(f"Wrote {summary_path}")
-    print(scorecard[scorecard["Slice"].isin(["Overall", "Horizon:Days2to7", "Event:hot_peak", "Event:shoulder_heat_transition", "Event:cloudy_solar_loss_midday"])].to_string(index=False))
+    print(
+        scorecard[
+            scorecard["Slice"].isin(
+                [
+                    "Overall",
+                    "Horizon:Days2to7",
+                    "Event:hot_peak",
+                    "Event:shoulder_heat_transition",
+                    "Event:cloudy_solar_loss_midday",
+                ]
+            )
+        ].to_string(index=False)
+    )
 
 
 if __name__ == "__main__":

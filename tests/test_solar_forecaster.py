@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 import requests
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SOLAR_DIR = PROJECT_ROOT / "forecasting" / "solar"
 if str(SOLAR_DIR) not in sys.path:
@@ -41,7 +40,9 @@ class SolarForecasterRetryTests(unittest.TestCase):
                 raise requests.ConnectionError("connection reset")
             return _FakeResponse({"hourly": {"time": []}})
 
-        with patch.object(solar_forecaster.requests, "get", side_effect=fake_get), patch.object(
+        with patch.object(
+            solar_forecaster.requests, "get", side_effect=fake_get
+        ), patch.object(
             solar_forecaster.time,
             "sleep",
             return_value=None,
@@ -74,7 +75,9 @@ class SolarForecasterRetryTests(unittest.TestCase):
         }
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(solar_forecaster, "_open_meteo_get_json", return_value=payload) as fetch:
+            with patch.object(
+                solar_forecaster, "_open_meteo_get_json", return_value=payload
+            ) as fetch:
                 first = solar_forecaster.fetch_open_meteo_hourly_weather(
                     sites,
                     date(2026, 7, 3),
@@ -123,7 +126,9 @@ class SolarForecasterRetryTests(unittest.TestCase):
         }
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(solar_forecaster, "_open_meteo_get_json", return_value=payload):
+            with patch.object(
+                solar_forecaster, "_open_meteo_get_json", return_value=payload
+            ):
                 solar_forecaster.fetch_open_meteo_hourly_weather(
                     sites,
                     date(2026, 7, 3),
@@ -156,10 +161,14 @@ class SolarForecasterRetryTests(unittest.TestCase):
             self.assertEqual(len(cached), 1)
             self.assertEqual(float(cached.loc[0, "GHI_kWh_per_m2"]), 0.05)
 
-    def test_interval_forecast_preserves_hourly_output_contract_with_model_columns(self):
+    def test_interval_forecast_preserves_hourly_output_contract_with_model_columns(
+        self,
+    ):
         weather = pd.DataFrame(
             {
-                "IntervalStartDT": pd.date_range("2026-07-05 12:00", periods=2, freq="h"),
+                "IntervalStartDT": pd.date_range(
+                    "2026-07-05 12:00", periods=2, freq="h"
+                ),
                 "GHI_kWh_per_m2": [0.8, 0.7],
                 "WeatherGHI_Wm2": [800.0, 700.0],
                 "CloudCoverPct": [10.0, 20.0],
@@ -247,7 +256,9 @@ class SolarForecasterFeatureAndCapacityTests(unittest.TestCase):
         }
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(solar_forecaster, "_open_meteo_get_json", return_value=payload):
+            with patch.object(
+                solar_forecaster, "_open_meteo_get_json", return_value=payload
+            ):
                 out = solar_forecaster.fetch_open_meteo_hourly_weather(
                     sites,
                     date(2026, 7, 3),
@@ -296,9 +307,7 @@ class SolarForecasterFeatureAndCapacityTests(unittest.TestCase):
         daily = pd.DataFrame(
             {"Date": [date(2025, 6, 1)], "ActiveCapacity_kW": [1234.0]}
         )
-        timestamps = pd.Series(
-            pd.to_datetime(["2025-06-01 09:00", "2025-06-05 09:00"])
-        )
+        timestamps = pd.Series(pd.to_datetime(["2025-06-01 09:00", "2025-06-05 09:00"]))
         resolved = solar_forecaster._resolve_row_capacity(timestamps, daily, 9999.0)
         self.assertEqual(float(resolved.iloc[0]), 1234.0)
         self.assertEqual(float(resolved.iloc[1]), 9999.0)
@@ -352,13 +361,20 @@ class SolarForecasterFeatureAndCapacityTests(unittest.TestCase):
             daily_active_capacity=daily_capacity,
         )
         interval["Date"] = interval["IntervalStartDT"].dt.date
-        day1 = float(interval.loc[interval["Date"] == date(2025, 6, 1), "Forecast_kWh"].sum())
-        day2 = float(interval.loc[interval["Date"] == date(2025, 6, 2), "Forecast_kWh"].sum())
+        day1 = float(
+            interval.loc[interval["Date"] == date(2025, 6, 1), "Forecast_kWh"].sum()
+        )
+        day2 = float(
+            interval.loc[interval["Date"] == date(2025, 6, 2), "Forecast_kWh"].sum()
+        )
         self.assertAlmostEqual(day1, 500.0, places=3)
         self.assertAlmostEqual(day2, 1000.0, places=3)
 
     def test_capacity_weighted_weather_aggregates_per_site_rows(self):
-        timestamps = [pd.Timestamp("2026-07-01 12:00"), pd.Timestamp("2026-07-01 12:00")]
+        timestamps = [
+            pd.Timestamp("2026-07-01 12:00"),
+            pd.Timestamp("2026-07-01 12:00"),
+        ]
         weather = pd.DataFrame(
             {
                 "SolarSiteKey": [1, 2],
@@ -573,7 +589,9 @@ class SolarForecasterFeatureAndCapacityTests(unittest.TestCase):
             0.0,
             peak_hourly_kwh_quantile=0.5,
         )
-        by_minute = interval.set_index(interval["IntervalStartDT"].dt.minute)["Forecast_kWh"]
+        by_minute = interval.set_index(interval["IntervalStartDT"].dt.minute)[
+            "Forecast_kWh"
+        ]
         self.assertGreater(float(by_minute.loc[45]), float(by_minute.loc[0]))
 
 
@@ -635,7 +653,9 @@ class SolarForecasterBacktestDiagnosticTests(unittest.TestCase):
 
         overall = diagnostics.loc[diagnostics["Slice"] == "Overall"].iloc[0]
         self.assertAlmostEqual(float(overall["Actual_MWh"]), 35.0)
-        self.assertAlmostEqual(float(overall["WMAPE_PCT"]), (2.0 + 4.0 + 3.0) / 35.0 * 100.0)
+        self.assertAlmostEqual(
+            float(overall["WMAPE_PCT"]), (2.0 + 4.0 + 3.0) / 35.0 * 100.0
+        )
 
     def test_solar_backtest_top_errors_ranks_under_and_over_forecasts(self):
         top_errors = solar_forecaster.build_solar_backtest_top_errors(
@@ -644,7 +664,9 @@ class SolarForecasterBacktestDiagnosticTests(unittest.TestCase):
             daylight_threshold_mw=0.1,
         )
 
-        self.assertEqual(set(top_errors["ErrorType"]), {"Underforecast", "Overforecast"})
+        self.assertEqual(
+            set(top_errors["ErrorType"]), {"Underforecast", "Overforecast"}
+        )
         under = top_errors.loc[top_errors["ErrorType"] == "Underforecast"].iloc[0]
         over = top_errors.loc[top_errors["ErrorType"] == "Overforecast"].iloc[0]
         self.assertAlmostEqual(float(under["Underforecast_MW"]), 3.0)
@@ -679,9 +701,13 @@ class SolarForecasterBacktestDiagnosticTests(unittest.TestCase):
         backtest["BaseAbsError_MW"] = backtest["BaseError_MW"].abs()
         backtest["Error_kWh"] = backtest["Forecast_kWh"] - backtest["Actual_kWh"]
         backtest["AbsError_kWh"] = backtest["Error_kWh"].abs()
-        backtest["BaseError_kWh"] = backtest["BaseForecast_kWh"] - backtest["Actual_kWh"]
+        backtest["BaseError_kWh"] = (
+            backtest["BaseForecast_kWh"] - backtest["Actual_kWh"]
+        )
         backtest["BaseAbsError_kWh"] = backtest["BaseError_kWh"].abs()
-        backtest["ActualQualityExpected_kWh"] = backtest[["Forecast_kWh", "BaseForecast_kWh"]].max(axis=1)
+        backtest["ActualQualityExpected_kWh"] = backtest[
+            ["Forecast_kWh", "BaseForecast_kWh"]
+        ].max(axis=1)
 
         flagged = solar_forecaster.add_solar_actual_quality_flags(
             backtest,
@@ -691,8 +717,13 @@ class SolarForecasterBacktestDiagnosticTests(unittest.TestCase):
         )
 
         self.assertEqual(int(flagged["SolarBacktestExcluded"].sum()), 2)
-        self.assertEqual(flagged.loc[0, "ActualQualityFlag"], solar_forecaster.ACTUAL_QUALITY_AMI_SUPPRESSED)
-        self.assertEqual(flagged.loc[2, "ActualQualityFlag"], solar_forecaster.ACTUAL_QUALITY_OK)
+        self.assertEqual(
+            flagged.loc[0, "ActualQualityFlag"],
+            solar_forecaster.ACTUAL_QUALITY_AMI_SUPPRESSED,
+        )
+        self.assertEqual(
+            flagged.loc[2, "ActualQualityFlag"], solar_forecaster.ACTUAL_QUALITY_OK
+        )
 
         summary = solar_forecaster.calculate_backtest_summary(flagged).iloc[0]
         self.assertEqual(int(summary["RawIntervals"]), 3)
@@ -701,7 +732,9 @@ class SolarForecasterBacktestDiagnosticTests(unittest.TestCase):
         self.assertAlmostEqual(float(summary["Actual_MWh"]), 8.0)
         self.assertAlmostEqual(float(summary["RawActual_MWh"]), 8.3)
 
-        diagnostics = solar_forecaster.calculate_solar_backtest_diagnostic_metrics(flagged)
+        diagnostics = solar_forecaster.calculate_solar_backtest_diagnostic_metrics(
+            flagged
+        )
         self.assertIn("RawOverall", set(diagnostics["Slice"]))
         self.assertIn("ActualQualityExcluded", set(diagnostics["Slice"]))
         overall = diagnostics.loc[diagnostics["Slice"] == "Overall"].iloc[0]

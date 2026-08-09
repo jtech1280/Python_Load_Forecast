@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pandas as pd
 
-
 KEY_TESTS = [
     "Last 45 days",
     "Seasonal rolling origins",
@@ -52,7 +51,7 @@ def main() -> int:
     output_dir = Path(args.output_dir)
     path = _scorecard_path(output_dir, args.label)
     df = pd.read_csv(path)
-    
+
     # Pre-convert Test column to string for faster comparison
     df["Test"] = df["Test"].astype(str)
 
@@ -72,7 +71,9 @@ def main() -> int:
                 "Bias_MWH": _num(row, "Bias_MWH"),
                 "P90_AbsError_MWH": _num(row, "P90_AbsError_MWH"),
                 "Max_Underforecast_MWH": _num(row, "Max_Underforecast_MWH"),
-                "Underforecast_At_Actual_Peak_MWH": _num(row, "Underforecast_At_Actual_Peak_MWH"),
+                "Underforecast_At_Actual_Peak_MWH": _num(
+                    row, "Underforecast_At_Actual_Peak_MWH"
+                ),
             }
         )
 

@@ -5,8 +5,12 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from forecasting.backtest.rolling_backtest import PRED_COLS as ROLLING_BACKTEST_PRED_COLS
-from forecasting.backtest.rolling_origin_replay import PRED_COLS as ROLLING_REPLAY_PRED_COLS
+from forecasting.backtest.rolling_backtest import (
+    PRED_COLS as ROLLING_BACKTEST_PRED_COLS,
+)
+from forecasting.backtest.rolling_origin_replay import (
+    PRED_COLS as ROLLING_REPLAY_PRED_COLS,
+)
 from forecasting.data.weather_loader import _finalize_weather_frame, _normalize_hourly
 from forecasting.diagnostics.forecast_diagnostics import (
     build_delta_breeze_shape_metrics_by_stage,
@@ -24,7 +28,9 @@ class DeltaBreezeFeatureTests(unittest.TestCase):
     def test_weather_features_capture_clear_hot_westerly_evening_cooling_shape(self):
         df = pd.DataFrame(
             {
-                "DT": pd.date_range("2026-07-28 16:00", periods=8, freq="h", tz="America/Los_Angeles"),
+                "DT": pd.date_range(
+                    "2026-07-28 16:00", periods=8, freq="h", tz="America/Los_Angeles"
+                ),
                 "TempF": [99.0, 100.0, 97.0, 93.0, 88.0, 84.0, 82.0, 80.0],
                 "HumidityPct": [20.0] * 8,
                 "CloudCoverPct": [10.0] * 8,
@@ -61,10 +67,14 @@ class DeltaBreezeFeatureTests(unittest.TestCase):
         self.assertAlmostEqual(hour20["TempDrop_3Hr_F"], 12.0)
         self.assertGreater(hour20["DeltaBreeze_Cooling_Signal"], 0.0)
 
-    def test_non_westerly_direction_does_not_trigger_directional_delta_breeze_flag(self):
+    def test_non_westerly_direction_does_not_trigger_directional_delta_breeze_flag(
+        self,
+    ):
         df = pd.DataFrame(
             {
-                "DT": pd.date_range("2026-07-28 18:00", periods=4, freq="h", tz="America/Los_Angeles"),
+                "DT": pd.date_range(
+                    "2026-07-28 18:00", periods=4, freq="h", tz="America/Los_Angeles"
+                ),
                 "TempF": [100.0, 94.0, 88.0, 84.0],
                 "HumidityPct": [20.0] * 4,
                 "CloudCoverPct": [5.0] * 4,
@@ -84,7 +94,9 @@ class DeltaBreezeFeatureTests(unittest.TestCase):
     def test_weather_features_capture_overcast_mild_hot_peak_slice(self):
         df = pd.DataFrame(
             {
-                "DT": pd.date_range("2026-07-20 16:00", periods=5, freq="h", tz="America/Los_Angeles"),
+                "DT": pd.date_range(
+                    "2026-07-20 16:00", periods=5, freq="h", tz="America/Los_Angeles"
+                ),
                 "TempF": [91.0, 91.5, 91.0, 90.5, 90.0],
                 "HumidityPct": [50.0] * 5,
                 "CloudCoverPct": [80.0] * 5,
@@ -110,8 +122,22 @@ class DeltaBreezeFeatureTests(unittest.TestCase):
     def test_weather_features_capture_non_hot_overcast_peak_window_slices(self):
         df = pd.DataFrame(
             {
-                "DT": list(pd.date_range("2026-11-10 14:00", periods=5, freq="h", tz="America/Los_Angeles"))
-                + list(pd.date_range("2026-11-11 14:00", periods=5, freq="h", tz="America/Los_Angeles")),
+                "DT": list(
+                    pd.date_range(
+                        "2026-11-10 14:00",
+                        periods=5,
+                        freq="h",
+                        tz="America/Los_Angeles",
+                    )
+                )
+                + list(
+                    pd.date_range(
+                        "2026-11-11 14:00",
+                        periods=5,
+                        freq="h",
+                        tz="America/Los_Angeles",
+                    )
+                ),
                 "TempF": [70.0, 71.0, 72.0, 71.0, 70.0, 80.0, 81.0, 82.0, 81.0, 80.0],
                 "HumidityPct": [60.0] * 10,
                 "CloudCoverPct": [80.0] * 10,
@@ -122,9 +148,15 @@ class DeltaBreezeFeatureTests(unittest.TestCase):
             }
         )
         out = add_weather_features(add_time_features(df))
-        below75 = out.loc[out["DT"].eq(pd.Timestamp("2026-11-10 15:00", tz="America/Los_Angeles"))].iloc[0]
-        below75_he16 = out.loc[out["DT"].eq(pd.Timestamp("2026-11-10 16:00", tz="America/Los_Angeles"))].iloc[0]
-        band75to85 = out.loc[out["DT"].eq(pd.Timestamp("2026-11-11 15:00", tz="America/Los_Angeles"))].iloc[0]
+        below75 = out.loc[
+            out["DT"].eq(pd.Timestamp("2026-11-10 15:00", tz="America/Los_Angeles"))
+        ].iloc[0]
+        below75_he16 = out.loc[
+            out["DT"].eq(pd.Timestamp("2026-11-10 16:00", tz="America/Los_Angeles"))
+        ].iloc[0]
+        band75to85 = out.loc[
+            out["DT"].eq(pd.Timestamp("2026-11-11 15:00", tz="America/Los_Angeles"))
+        ].iloc[0]
 
         self.assertEqual(below75["OvercastPeakWindow14to18"], 1.0)
         self.assertEqual(below75["PeakWindowDailyMaxBelow75"], 1.0)
@@ -134,12 +166,16 @@ class DeltaBreezeFeatureTests(unittest.TestCase):
         self.assertEqual(below75_he16["OvercastPeakWindow16to18"], 1.0)
         self.assertEqual(below75_he16["OvercastCoolPeakWindow16to18"], 1.0)
         self.assertEqual(below75_he16["OvercastPeakHE16to18DailyMaxBelow75"], 1.0)
-        self.assertAlmostEqual(below75_he16["Month_x_OvercastPeakHE16to18DailyMaxBelow75"], 11.0)
+        self.assertAlmostEqual(
+            below75_he16["Month_x_OvercastPeakHE16to18DailyMaxBelow75"], 11.0
+        )
         self.assertEqual(band75to85["PeakWindowDailyMax75to85"], 1.0)
         self.assertEqual(band75to85["OvercastPeakDailyMax75to85"], 1.0)
 
     def test_post_peak_load_decay_features_use_lagged_load_only(self):
-        dt_index = pd.date_range("2026-07-01 00:00", periods=72, freq="h", tz="America/Los_Angeles")
+        dt_index = pd.date_range(
+            "2026-07-01 00:00", periods=72, freq="h", tz="America/Los_Angeles"
+        )
         mwh = np.full(72, 250.0)
         target_idx = 68  # 2026-07-03 20:00 local
         mwh[target_idx - 3] = 280.0
@@ -150,7 +186,10 @@ class DeltaBreezeFeatureTests(unittest.TestCase):
             {
                 "DT": dt_index,
                 "MWH": mwh,
-                "TempF": [100.0 if ts.hour == 17 else 85.0 if ts.hour >= 20 else 95.0 for ts in dt_index],
+                "TempF": [
+                    100.0 if ts.hour == 17 else 85.0 if ts.hour >= 20 else 95.0
+                    for ts in dt_index
+                ],
                 "HumidityPct": [20.0] * len(dt_index),
                 "CloudCoverPct": [10.0] * len(dt_index),
                 "WindSpeedMph": [8.0] * len(dt_index),
@@ -161,7 +200,9 @@ class DeltaBreezeFeatureTests(unittest.TestCase):
         )
         out = add_basic_lags(add_weather_features(add_time_features(df)))
         row = out.loc[out["DT"].eq(dt_index[target_idx])].iloc[0]
-        he17 = out.loc[out["DT"].eq(pd.Timestamp("2026-07-03 17:00", tz="America/Los_Angeles"))].iloc[0]
+        he17 = out.loc[
+            out["DT"].eq(pd.Timestamp("2026-07-03 17:00", tz="America/Los_Angeles"))
+        ].iloc[0]
 
         self.assertAlmostEqual(row["Load_Decay_1Hr_MWH"], 10.0)
         self.assertAlmostEqual(row["Load_Decay_2Hr_MWH"], 20.0)
@@ -220,7 +261,9 @@ class DeltaBreezeFeatureTests(unittest.TestCase):
             },
         }
 
-        out = _finalize_weather_frame(_normalize_hourly(payload, pd.Timestamp("2026-07-28T12:00:00Z")), config)
+        out = _finalize_weather_frame(
+            _normalize_hourly(payload, pd.Timestamp("2026-07-28T12:00:00Z")), config
+        )
 
         self.assertIn("WindDirectionDeg", out.columns)
         self.assertEqual(out.loc[0, "WindDirectionDeg"], 270.0)
@@ -228,7 +271,9 @@ class DeltaBreezeFeatureTests(unittest.TestCase):
     def test_delta_breeze_shape_diagnostics_score_stages_on_shape_slices(self):
         df = pd.DataFrame(
             {
-                "DT": pd.date_range("2026-07-28 18:00", periods=3, freq="h", tz="America/Los_Angeles"),
+                "DT": pd.date_range(
+                    "2026-07-28 18:00", periods=3, freq="h", tz="America/Los_Angeles"
+                ),
                 "Actual_MWH": [280.0, 260.0, 240.0],
                 "Raw_Forecast_MWH": [285.0, 275.0, 260.0],
                 "Final_Backtest_Forecast_MWH": [282.0, 266.0, 246.0],

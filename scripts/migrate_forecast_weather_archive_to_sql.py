@@ -21,11 +21,15 @@ def _project_root() -> Path:
 
 
 def _load_config(root: Path) -> dict:
-    return yaml.safe_load((root / "forecasting" / "config.yaml").read_text(encoding="utf-8"))
+    return yaml.safe_load(
+        (root / "forecasting" / "config.yaml").read_text(encoding="utf-8")
+    )
 
 
 def _weather_archive_dir(root: Path, config: dict) -> Path:
-    cache_dir = Path(str((config.get("openmeteo", {}) or {}).get("cache_dir") or "weather_cache"))
+    cache_dir = Path(
+        str((config.get("openmeteo", {}) or {}).get("cache_dir") or "weather_cache")
+    )
     if not cache_dir.is_absolute():
         cache_dir = root / cache_dir
     return cache_dir / "forecast_weather_runs"
@@ -87,7 +91,10 @@ def main() -> None:
         else:
             skipped += 1
 
-    print(f"Forecast weather archive migration complete. Migrated={migrated}, skipped={skipped}", flush=True)
+    print(
+        f"Forecast weather archive migration complete. Migrated={migrated}, skipped={skipped}",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pandas as pd
 
-
 MANIFEST_NAME = "manifest.csv"
 
 
@@ -17,7 +16,9 @@ def _snapshot_hash(df: pd.DataFrame, hash_columns: list[str] | None = None) -> s
         cols = list(df.columns)
     work = df[cols].copy()
     if "DT" in work.columns:
-        work["DT"] = pd.to_datetime(work["DT"], errors="coerce", utc=True).dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        work["DT"] = pd.to_datetime(work["DT"], errors="coerce", utc=True).dt.strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
         work.sort_values("DT", inplace=True)
     work = work.reset_index(drop=True)
     payload = work.to_csv(index=False, lineterminator="\n").encode("utf-8")
@@ -96,9 +97,15 @@ def load_latest_distinct_snapshot(
     if manifest.empty or "SnapshotPath" not in manifest.columns:
         return pd.DataFrame()
 
-    current_hash = _snapshot_hash(current_df, hash_columns=hash_columns) if current_df is not None and not current_df.empty else ""
+    current_hash = (
+        _snapshot_hash(current_df, hash_columns=hash_columns)
+        if current_df is not None and not current_df.empty
+        else ""
+    )
     if "CreatedAtUTC" in manifest.columns:
-        manifest["_CreatedAtUTC"] = pd.to_datetime(manifest["CreatedAtUTC"], errors="coerce", utc=True)
+        manifest["_CreatedAtUTC"] = pd.to_datetime(
+            manifest["CreatedAtUTC"], errors="coerce", utc=True
+        )
         manifest.sort_values("_CreatedAtUTC", ascending=False, inplace=True)
     else:
         manifest = manifest.iloc[::-1].copy()
