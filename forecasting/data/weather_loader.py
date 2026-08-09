@@ -132,6 +132,13 @@ def _cache_was_written_in_import_window(
     return bool(start <= mtime <= end)
 
 
+def _cache_was_written_today(path: Path, now_local: pd.Timestamp) -> bool:
+    mtime = _cache_mtime_local(path, now_local.tzinfo)
+    if mtime is None:
+        return False
+    return bool(mtime.date() == now_local.date())
+
+
 def _mark_forecast_weather_source(
     df: pd.DataFrame,
     *,
@@ -536,6 +543,20 @@ def fetch_forecast_weather(config: dict) -> pd.DataFrame:
                 )
 
         if not _inside_forecast_import_window(now_local, policy):
+            fail_on_missed_window = bool(policy.get("fail_on_missed_window", True))
+            cache_is_from_today = _cache_was_written_today(latest_cache_path, now_local)
+            if fail_on_missed_window and not cache_is_from_today:
+                raise RuntimeError(
+                    "Open-Meteo morning import window "
+                    f"({import_window[0]} to {import_window[1]}) was missed and no weather "
+                    "snapshot has been captured yet today (the newest cached snapshot at "
+                    f"{latest_cache_path} is not from today's local date). Refusing to silently "
+                    "reuse a stale cached forecast. Run the weather import near "
+                    f"{policy.get('target_local_time', '06:30')} local, or set "
+                    "openmeteo.forecast_import_policy.fail_on_missed_window: false to allow "
+                    "falling back to the last cached snapshot instead."
+                )
+
             cached = _read_weather_cache(
                 latest_cache_path, config, require_requested_cols=True
             )
