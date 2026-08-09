@@ -15,6 +15,7 @@ except Exception as exc:
 
 from forecasting.model.xgb_model import DEFAULT_FEATURES, build_sample_weights
 from forecasting.utils.performance import resolve_n_jobs
+from forecasting.model.monotonic_constraints import lgb_monotone_param
 
 _LAST_LGB_TRAINING_INFO: dict[str, Any] = {}
 
@@ -189,8 +190,15 @@ def train_lgb(df: pd.DataFrame, features: list[str] | None = None, config: dict 
         y_valid = pd.to_numeric(valid_df["MWH"], errors="coerce").astype(float)
         valid_weight = build_sample_weights(valid_df.reset_index(drop=True), cfg)
 
+    mono_vector = lgb_monotone_param(features, cfg)
+
     errors: list[str] = []
-    for backend_name, params in _lgb_attempts(cfg):
+    attempts = _lgb_attempts(cfg)
+    if mono_vector is not None:
+        for _, attempt_params in attempts:
+            attempt_params["monotone_constraints"] = mono_vector
+
+    for backend_name, params in attempts:
         model = make_lgb_model(cfg, params_override=params)
         try:
             if backend_name == "gpu":
@@ -203,12 +211,12 @@ def train_lgb(df: pd.DataFrame, features: list[str] | None = None, config: dict 
             if X_valid is not None and y_valid is not None and len(X_valid) and len(y_valid):
                 fit_kwargs["eval_set"] = [(X_valid, y_valid)]
                 try:
-                    params = inspect.signature(model.fit).parameters
+                    fit_sig_params = inspect.signature(model.fit).parameters
                 except Exception:
-                    params = {}
-                if "eval_metric" in params:
+                    fit_sig_params = {}
+                if "eval_metric" in fit_sig_params:
                     fit_kwargs["eval_metric"] = str(es_cfg.get("metric", "mae"))
-                if "eval_sample_weight" in params:
+                if "eval_sample_weight" in fit_sig_params:
                     fit_kwargs["eval_sample_weight"] = [valid_weight] if valid_weight is not None else None
                 cb = _early_stopping_callback(int(es_cfg.get("rounds", 75)))
                 if cb is not None:

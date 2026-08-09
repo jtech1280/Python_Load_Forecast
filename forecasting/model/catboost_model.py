@@ -9,6 +9,7 @@ import pandas as pd
 
 from forecasting.model.xgb_model import DEFAULT_FEATURES, build_sample_weights
 from forecasting.utils.performance import resolve_n_jobs
+from forecasting.model.monotonic_constraints import catboost_monotone_param
 
 _LAST_CATBOOST_TRAINING_INFO: dict[str, Any] = {}
 
@@ -122,8 +123,15 @@ def train_catboost(df: pd.DataFrame, features: list[str] | None = None, config: 
     y = pd.to_numeric(df["MWH"], errors="coerce").astype(float)
     sample_weight = build_sample_weights(df.reset_index(drop=True), cfg)
 
+    mono_vector = catboost_monotone_param(features, cfg)
+
     errors: list[str] = []
-    for backend_name, params in _attempts(cfg):
+    attempts = _attempts(cfg)
+    if mono_vector is not None:
+        for _, attempt_params in attempts:
+            attempt_params["monotone_constraints"] = mono_vector
+
+    for backend_name, params in attempts:
         try:
             print(f"Training CatBoost benchmark with {backend_name.upper()} backend...")
             model = CatBoostRegressor(**params)

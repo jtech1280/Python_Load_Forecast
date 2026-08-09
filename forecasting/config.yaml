@@ -303,6 +303,17 @@ model:
     rounds: 75
     metric: "mae"
 
+  monotonic_constraints:
+    # Forces a non-decreasing relationship between heat/cooling-demand features (Temperature,
+    # CDD, HeatIndex, Extreme_Heat_* flags, hot-peak interaction terms, etc.) and load across
+    # XGBoost, LightGBM, and CatBoost. This is standard practice for AC-driven summer-peaking
+    # load: it keeps tree splits from fitting non-monotonic noise in the sparsely populated
+    # extreme-heat bins, which is exactly where the hot-peak underforecast has historically
+    # shown up, and it keeps predictions well-behaved when a forecast temperature exceeds the
+    # hottest day seen in training. See forecasting/model/monotonic_constraints.py for the
+    # default feature list; override with increasing_features/decreasing_features here if needed.
+    enabled: true
+
   xgb:
     n_estimators: 1400
     max_depth: 8

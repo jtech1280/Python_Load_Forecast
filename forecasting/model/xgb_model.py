@@ -13,6 +13,7 @@ import xgboost as xgb
 from forecasting.features.intraday_load_features import INTRADAY_LOAD_FEATURES
 from forecasting.utils.performance import resolve_n_jobs
 from forecasting.utils.device_utils import ensure_device_consistency
+from forecasting.model.monotonic_constraints import xgb_monotone_param
 
 BASE_FEATURES = [
     # Weather response. Tree ensembles are robust to correlated split candidates, and
@@ -165,7 +166,9 @@ def build_sample_weights(df: pd.DataFrame, config: dict | None = None) -> np.nda
     if "Temperature_DailyMax" in df.columns:
         daily_max = pd.to_numeric(df["Temperature_DailyMax"], errors="coerce")
         hour = pd.to_numeric(df.get("Hour", pd.Series(np.nan, index=df.index)), errors="coerce")
-        likely_peak = pd.to_numeric(df.get("IsLikelySystemPeakHour", 0), errors="coerce").fillna(0).astype(int).eq(1)
+        likely_peak = pd.to_numeric(
+            df.get("IsLikelySystemPeakHour", pd.Series(0, index=df.index)), errors="coerce"
+        ).fillna(0).astype(int).eq(1)
         hot_min = float(sw_cfg.get("hot_day_min_f", 90.0))
         hot_hours = {int(h) for h in sw_cfg.get("hot_peak_hours", [16, 17, 18, 19, 20])}
         peak_hours = {int(h) for h in sw_cfg.get("peak_window_hours", [14, 15, 16, 17, 18])}
@@ -321,8 +324,14 @@ def train_xgb(df: pd.DataFrame, features: list[str] | None = None, config: dict 
         y_valid = pd.to_numeric(valid_df["MWH"], errors="coerce").astype(float)
         valid_weight = build_sample_weights(valid_df.reset_index(drop=True), cfg)
 
+    mono_vector = xgb_monotone_param(features, cfg)
+
     errors: list[str] = []
     attempts = _xgb_attempts(cfg)
+    if mono_vector is not None:
+        for _, attempt_params in attempts:
+            attempt_params["monotone_constraints"] = mono_vector
+
     for backend_name, params in attempts:
         model = make_xgb_model(cfg, params_override=params)
         try:
@@ -336,16 +345,16 @@ def train_xgb(df: pd.DataFrame, features: list[str] | None = None, config: dict 
                 if X_valid is not None and y_valid is not None and len(X_valid) and len(y_valid):
                     fit_kwargs["eval_set"] = [(X_valid, y_valid)]
                     try:
-                        params = inspect.signature(model.fit).parameters
+                        fit_sig_params = inspect.signature(model.fit).parameters
                     except Exception:
-                        params = {}
-                    if "sample_weight_eval_set" in params:
+                        fit_sig_params = {}
+                    if "sample_weight_eval_set" in fit_sig_params:
                         fit_kwargs["sample_weight_eval_set"] = [valid_weight] if valid_weight is not None else None
-                    if "eval_metric" in params:
+                    if "eval_metric" in fit_sig_params:
                         fit_kwargs["eval_metric"] = str(es_cfg.get("metric", "mae"))
-                    if "early_stopping_rounds" in params:
+                    if "early_stopping_rounds" in fit_sig_params:
                         fit_kwargs["early_stopping_rounds"] = int(es_cfg.get("rounds", 75))
-                    if "verbose" in params:
+                    if "verbose" in fit_sig_params:
                         fit_kwargs["verbose"] = False
                 model.fit(X, y, **fit_kwargs)
 
