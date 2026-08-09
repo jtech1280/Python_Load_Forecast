@@ -52,6 +52,38 @@ def _prepare_x(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
     return X.replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(float)
 
 
+def _split_train_validation(
+    df: pd.DataFrame,
+    validation_days: float,
+    min_train_rows: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if df is None or df.empty:
+        return df, pd.DataFrame()
+    if "DT" not in df.columns:
+        return df, pd.DataFrame()
+    df = df.copy().sort_values("DT").reset_index(drop=True)
+    if validation_days <= 0:
+        return df, pd.DataFrame()
+    cutoff = df["DT"].max() - pd.Timedelta(days=float(validation_days))
+    train = df[df["DT"] < cutoff].copy()
+    valid = df[df["DT"] >= cutoff].copy()
+    if len(train) < int(min_train_rows) or len(valid) < 24:
+        return df, pd.DataFrame()
+    return train, valid
+
+
+def _early_stopping_cfg(config: dict | None) -> dict[str, Any]:
+    cfg = config or {}
+    es = _cfg(cfg, "model", "early_stopping", default={}) or {}
+    return {
+        "enabled": _as_bool(es.get("enabled", True), default=True),
+        "validation_days": float(es.get("validation_days", 45)),
+        "min_train_rows": int(es.get("min_train_rows", 2000)),
+        "rounds": int(es.get("rounds", 75)),
+        "metric": str(es.get("metric", "mae")).strip().lower() or "mae",
+    }
+
+
 def _import_catboost():
     try:
         from catboost import CatBoostRegressor
@@ -119,9 +151,25 @@ def train_catboost(df: pd.DataFrame, features: list[str] | None = None, config: 
         print("WARNING: CatBoost benchmark skipped because catboost is not installed or failed to import.")
         return None, features
 
-    X = _prepare_x(df, features)
-    y = pd.to_numeric(df["MWH"], errors="coerce").astype(float)
-    sample_weight = build_sample_weights(df.reset_index(drop=True), cfg)
+    es_cfg = _early_stopping_cfg(cfg)
+    train_df, valid_df = (df, pd.DataFrame())
+    if bool(es_cfg.get("enabled", True)):
+        train_df, valid_df = _split_train_validation(
+            df=df,
+            validation_days=float(es_cfg.get("validation_days", 45)),
+            min_train_rows=int(es_cfg.get("min_train_rows", 2000)),
+        )
+
+    X = _prepare_x(train_df, features)
+    y = pd.to_numeric(train_df["MWH"], errors="coerce").astype(float)
+    sample_weight = build_sample_weights(train_df.reset_index(drop=True), cfg)
+
+    X_valid = None
+    y_valid = None
+    if valid_df is not None and not valid_df.empty:
+        X_valid = _prepare_x(valid_df, features)
+        y_valid = pd.to_numeric(valid_df["MWH"], errors="coerce").astype(float)
+    has_eval_set = X_valid is not None and y_valid is not None and len(X_valid) and len(y_valid)
 
     mono_vector = catboost_monotone_param(features, cfg)
 
@@ -130,18 +178,42 @@ def train_catboost(df: pd.DataFrame, features: list[str] | None = None, config: 
     if mono_vector is not None:
         for _, attempt_params in attempts:
             attempt_params["monotone_constraints"] = mono_vector
+    if has_eval_set:
+        for _, attempt_params in attempts:
+            attempt_params["eval_metric"] = str(es_cfg.get("metric", "mae")).strip().upper()
 
     for backend_name, params in attempts:
         try:
             print(f"Training CatBoost benchmark with {backend_name.upper()} backend...")
             model = CatBoostRegressor(**params)
-            model.fit(X, y, sample_weight=sample_weight)
+            fit_kwargs: dict[str, Any] = {"sample_weight": sample_weight}
+            if has_eval_set:
+                fit_kwargs["eval_set"] = (X_valid, y_valid)
+                fit_kwargs["early_stopping_rounds"] = int(es_cfg.get("rounds", 75))
+                fit_kwargs["use_best_model"] = True
+                fit_kwargs["verbose"] = False
+            model.fit(X, y, **fit_kwargs)
+            best_iteration = None
+            if has_eval_set:
+                try:
+                    raw_best = model.get_best_iteration()
+                    best_iteration = int(raw_best) if raw_best is not None else None
+                except Exception:
+                    best_iteration = None
             _LAST_CATBOOST_TRAINING_INFO = {
                 "enabled": catboost_enabled(cfg),
                 "requested_gpu": _gpu_requested(cfg),
                 "selected_backend": backend_name,
                 "params": params,
                 "failed_attempts": errors,
+                "early_stopping": {
+                    "enabled": bool(has_eval_set),
+                    "metric": str(es_cfg.get("metric", "mae")),
+                    "rounds": int(es_cfg.get("rounds", 75)),
+                    "validation_days": float(es_cfg.get("validation_days", 45)),
+                    "best_iteration": best_iteration,
+                    "tree_count": int(model.tree_count_) if hasattr(model, "tree_count_") else None,
+                },
                 "n_rows": int(len(df)),
                 "n_features": int(len(features)),
             }
