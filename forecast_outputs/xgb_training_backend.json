@@ -1,0 +1,30 @@
+{
+  "requested_gpu": true,
+  "selected_backend": "cuda",
+  "xgboost_version": "3.2.0",
+  "params": {
+    "X": "X: Any",
+    "y": "y: Any",
+    "sample_weight": "sample_weight: Optional[Any] = None",
+    "base_margin": "base_margin: Optional[Any] = None",
+    "eval_set": "eval_set: Optional[Sequence[Tuple[Any, Any]]] = None",
+    "verbose": "verbose: Union[bool, int, NoneType] = True",
+    "xgb_model": "xgb_model: Union[xgboost.core.Booster, ForwardRef('XGBModel'), str, NoneType] = None",
+    "sample_weight_eval_set": "sample_weight_eval_set: Optional[Sequence[Any]] = None",
+    "base_margin_eval_set": "base_margin_eval_set: Optional[Sequence[Any]] = None",
+    "feature_weights": "feature_weights: Optional[Any] = None"
+  },
+  "failed_attempts": [],
+  "early_stopping": {
+    "enabled": true,
+    "metric": "mae",
+    "rounds": 75,
+    "validation_days": 45.0,
+    "best_iteration": null,
+    "best_score": null
+  },
+  "booster_attributes": {},
+  "actual_device": "cuda:0",
+  "n_rows": 57863,
+  "n_features": 292
+}
