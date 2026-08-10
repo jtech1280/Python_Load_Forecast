@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from multiprocessing import Pool, cpu_count
+import os
 from pathlib import Path
 import time
 from typing import Any
@@ -1550,6 +1551,33 @@ def _run_single_origin_replay(
     return corrected, timing_rows
 
 
+def _worker_config_for_parallel_replay(config: dict, num_processes: int) -> dict:
+    """Clone config with hardware.cpu_threads divided across replay worker processes.
+
+    Origin-level parallelism (the multiprocessing.Pool below) is independent of each
+    worker's own model-training thread pool. Left at the "-1 = all cores" default,
+    every concurrent worker independently requests every logical CPU core for
+    CPU-bound LightGBM/CatBoost training, so N concurrent workers oversubscribe the
+    CPU by roughly N times and erase most of the benefit of running origins in
+    parallel. Only auto-divide when cpu_threads is left at its default; an explicit
+    positive value is assumed to already account for concurrency and is left as-is.
+    """
+    if num_processes <= 1:
+        return config
+    hardware_cfg = config.get("hardware", {}) or {}
+    try:
+        current = int(hardware_cfg.get("cpu_threads", -1))
+    except Exception:
+        current = -1
+    if current > 0:
+        return config
+    total_cores = os.cpu_count() or 1
+    per_worker_threads = max(1, total_cores // num_processes)
+    worker_config = dict(config)
+    worker_config["hardware"] = {**hardware_cfg, "cpu_threads": per_worker_threads}
+    return worker_config
+
+
 def run_rolling_origin_replay(
     train_df: pd.DataFrame, features: list[str], config: dict
 ) -> pd.DataFrame:
@@ -1571,7 +1599,19 @@ def run_rolling_origin_replay(
     origins = _origin_candidates(work, config)
 
     parallel_cfg = (cfg.get("parallel", {}) or {}) if isinstance(cfg, dict) else {}
-    parallel_enabled = bool(parallel_cfg.get("enabled", True))
+    parallel_enabled = bool(parallel_cfg.get("enabled", True)) and len(origins) > 1
+
+    num_processes = parallel_cfg.get("processes")
+    if not isinstance(num_processes, int) or num_processes <= 0:
+        try:
+            num_processes = max(1, cpu_count() // 2)
+        except NotImplementedError:
+            num_processes = 2
+    num_processes = min(num_processes, max(1, len(origins)))
+
+    run_config = config
+    if parallel_enabled and num_processes > 1:
+        run_config = _worker_config_for_parallel_replay(config, num_processes)
 
     pool_args = [
         (
@@ -1579,7 +1619,7 @@ def run_rolling_origin_replay(
             origin_dt,
             work,
             features,
-            config,
+            run_config,
             horizon_days,
             calibration_days,
             log_timing,
@@ -1590,19 +1630,12 @@ def run_rolling_origin_replay(
         for origin_number, origin_dt in enumerate(origins, start=1)
     ]
 
-    if not parallel_enabled or len(origins) <= 1:
+    if not parallel_enabled:
         print(
             f"Running {len(origins)} rolling-origin replays sequentially.", flush=True
         )
         results = [_run_single_origin_replay(arg) for arg in pool_args]
     else:
-        num_processes = parallel_cfg.get("processes")
-        if not isinstance(num_processes, int) or num_processes <= 0:
-            try:
-                num_processes = max(1, cpu_count() // 2)
-            except NotImplementedError:
-                num_processes = 2
-        num_processes = min(num_processes, len(origins))
         print(
             f"Running {len(origins)} rolling-origin replays in parallel on {num_processes} processes...",
             flush=True,

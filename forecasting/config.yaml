@@ -395,7 +395,7 @@ model:
     l2_leaf_reg: 4.0
     loss_function: "RMSE"
     random_seed: 42
-    task_type: "CPU"        # GPU first when hardware.use_gpu=true; CPU fallback is automatic
+    task_type: "GPU"        # GPU first when hardware.use_gpu=true; CPU fallback is automatic
     devices: "0"
     thread_count: -1
 
