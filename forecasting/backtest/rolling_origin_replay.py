@@ -35,6 +35,7 @@ from forecasting.forecast.forecast_pipeline import (
     _production_ensemble_weights,
     apply_origin_available_correction_chain,
     build_correction_artifacts,
+    rare_event_artifact_lookback_days,
 )
 from forecasting.forecast.focused_scorecard_guard import (
     apply_focused_scorecard_guard,
@@ -1470,8 +1471,34 @@ def _run_single_origin_replay(
             detail=str(timing.get("Detail", "") or ""),
         )
     raw_calibration.attrs = {}
+    extended_lookback_raw = None
+    extended_lookback_days = rare_event_artifact_lookback_days(config, calibration_days)
+    if extended_lookback_days is not None:
+        stage_started = time.perf_counter()
+        extended_lookback_raw = run_rolling_backtest(
+            train_df=pre_origin,
+            features=features,
+            ensemble_weights=_production_ensemble_weights(config),
+            backtest_days=extended_lookback_days,
+            config=config,
+            skip_catboost=True,
+            skip_prophet=True,
+        )
+        _log_and_record_timing(
+            timing_rows,
+            origin_number=origin_number,
+            origin_dt=origin_dt,
+            stage="rare-event artifact lookback backtest",
+            started=stage_started,
+            log_timing=log_timing,
+            rows=len(extended_lookback_raw),
+            detail=f"lookback_days={extended_lookback_days}",
+        )
+        extended_lookback_raw.attrs = {}
     stage_started = time.perf_counter()
-    artifacts = build_correction_artifacts(raw_calibration, config)
+    artifacts = build_correction_artifacts(
+        raw_calibration, config, extended_lookback_df=extended_lookback_raw
+    )
     _log_and_record_timing(
         timing_rows,
         origin_number=origin_number,

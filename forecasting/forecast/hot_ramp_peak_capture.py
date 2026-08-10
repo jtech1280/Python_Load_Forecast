@@ -995,7 +995,11 @@ def _cooling_underway_guard(values: pd.DataFrame, cfg: dict) -> pd.Series:
 
 
 def _scope_mask(
-    values: pd.DataFrame, cfg: dict, *, enforce_forecast_day: bool = True
+    values: pd.DataFrame,
+    cfg: dict,
+    *,
+    enforce_forecast_day: bool = True,
+    training: bool = False,
 ) -> tuple[pd.Series, pd.Series]:
     dt = _local_datetime(values)
     hour = _hour(values, dt=dt).astype(int)
@@ -1005,10 +1009,30 @@ def _scope_mask(
     cloud = _cloud_norm(values)
 
     hours = [int(h) for h in cfg.get("hours", [16, 17, 18, 19, 20])]
+    # The walk-forward lookup artifact is starved of training days when it requires the
+    # exact same joint temp/ramp thresholds used at apply time: "hot AND ramping today"
+    # is rare enough in a short calibration window that build_hot_ramp_peak_capture_artifact
+    # often finds zero qualifying days and returns None, silently falling back to the
+    # static targeted_missing_slices rules for the whole origin. train_min_maxtemp_f /
+    # train_min_dailymax_ramp_1day_f let the training frame pool a wider set of hot days
+    # (still gated, just less strictly) while apply-time gating is unchanged. Defaulting
+    # both to the apply-time values keeps this a no-op unless configured looser.
+    min_maxtemp_f = float(
+        cfg.get("train_min_maxtemp_f", cfg.get("min_maxtemp_f", 100.0))
+        if training
+        else cfg.get("min_maxtemp_f", 100.0)
+    )
+    min_ramp_f = float(
+        cfg.get(
+            "train_min_dailymax_ramp_1day_f", cfg.get("min_dailymax_ramp_1day_f", 2.0)
+        )
+        if training
+        else cfg.get("min_dailymax_ramp_1day_f", 2.0)
+    )
     mask = (
         hour.isin(hours)
-        & daily_max.ge(float(cfg.get("min_maxtemp_f", 100.0))).fillna(False)
-        & ramp.ge(float(cfg.get("min_dailymax_ramp_1day_f", 2.0))).fillna(False)
+        & daily_max.ge(min_maxtemp_f).fillna(False)
+        & ramp.ge(min_ramp_f).fillna(False)
     )
     if enforce_forecast_day:
         min_day = cfg.get("min_forecast_day", 1)
@@ -1055,6 +1079,7 @@ def _daily_training_frame(
         work,
         cfg,
         enforce_forecast_day=bool(cfg.get("train_enforce_forecast_day", False)),
+        training=True,
     )
     work["_Scope"] = scope & ~cooling
 
@@ -1122,6 +1147,7 @@ def _persistence_scope_mask(
     cfg: dict,
     *,
     enforce_forecast_day: bool = True,
+    training: bool = False,
 ) -> tuple[pd.Series, pd.Series]:
     dt = _local_datetime(values)
     hour = _hour(values, dt=dt).astype(int)
@@ -1133,14 +1159,36 @@ def _persistence_scope_mask(
     cloud = _cloud_norm(values)
 
     hours = [int(h) for h in cfg.get("hours", [16, 17, 18, 19, 20])]
+    # Same rationale as _scope_mask's train_min_* overrides: requiring min_maxtemp_f AND
+    # 3+ consecutive extreme-hot days AND a high 3-day mean simultaneously is an even
+    # narrower joint condition than hot_ramp_peak_capture's, so this artifact is starved
+    # even more easily. Training-only overrides default to the apply-time values (no-op
+    # unless configured looser).
+    min_maxtemp_f = float(
+        cfg.get("train_min_maxtemp_f", cfg.get("min_maxtemp_f", 100.0))
+        if training
+        else cfg.get("min_maxtemp_f", 100.0)
+    )
+    min_consecutive = float(
+        cfg.get(
+            "train_min_consecutive_extreme_days100",
+            cfg.get("min_consecutive_extreme_days100", 3.0),
+        )
+        if training
+        else cfg.get("min_consecutive_extreme_days100", 3.0)
+    )
     mask = (
         hour.isin(hours)
-        & daily_max.ge(float(cfg.get("min_maxtemp_f", 100.0))).fillna(False)
-        & consecutive_extreme.ge(
-            float(cfg.get("min_consecutive_extreme_days100", 3.0))
-        ).fillna(False)
+        & daily_max.ge(min_maxtemp_f).fillna(False)
+        & consecutive_extreme.ge(min_consecutive).fillna(False)
     )
-    min_3day = cfg.get("min_dailymax_3day_mean_f", 100.0)
+    min_3day = (
+        cfg.get(
+            "train_min_dailymax_3day_mean_f", cfg.get("min_dailymax_3day_mean_f", 100.0)
+        )
+        if training
+        else cfg.get("min_dailymax_3day_mean_f", 100.0)
+    )
     if min_3day is not None:
         mask &= dailymax_3day.ge(float(min_3day)).fillna(False)
     min_ramp = cfg.get("min_dailymax_ramp_1day_f")
@@ -1197,6 +1245,7 @@ def _daily_persistence_training_frame(
         work,
         cfg,
         enforce_forecast_day=bool(cfg.get("train_enforce_forecast_day", False)),
+        training=True,
     )
     work["_Scope"] = scope & ~cooling
 

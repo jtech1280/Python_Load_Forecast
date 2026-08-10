@@ -229,8 +229,47 @@ def _production_ensemble_weights(config: dict) -> dict[str, float]:
     return weights
 
 
-def build_correction_artifacts(raw_backtest_df: pd.DataFrame, config: dict) -> dict:
-    """Build correction lookups and the origin-available recent profile from raw residuals."""
+def rare_event_artifact_lookback_days(
+    config: dict, base_backtest_days: int
+) -> int | None:
+    """Return the configured extra backtest length for the rare-event artifact lookback.
+
+    Returns None when unset or not greater than base_backtest_days, meaning "skip the
+    extra backtest pass entirely" -- the default, zero-cost behavior. Opt in via
+    calibration.rare_event_artifact_lookback_days once train_min_maxtemp_f-style
+    loosening alone isn't giving hot_ramp_peak_capture/heat_persistence_peak_capture
+    enough training days.
+    """
+    cal_cfg = config.get("calibration", {}) or {}
+    raw = cal_cfg.get("rare_event_artifact_lookback_days")
+    if raw is None:
+        return None
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if days <= int(base_backtest_days):
+        return None
+    return days
+
+
+def build_correction_artifacts(
+    raw_backtest_df: pd.DataFrame,
+    config: dict,
+    *,
+    extended_lookback_df: pd.DataFrame | None = None,
+) -> dict:
+    """Build correction lookups and the origin-available recent profile from raw residuals.
+
+    extended_lookback_df is an optional, longer-history raw backtest frame used only to
+    train hot_ramp_peak_capture/heat_persistence_peak_capture's walk-forward lookup
+    artifacts. Those two stages require a rare joint condition (e.g. hot AND ramping on
+    the same day), so the normal calibration window often contains zero qualifying days,
+    the artifact comes back empty, and the stage silently falls back to its static
+    targeted_missing_slices rules for the whole origin. Passing a wider window here gives
+    the lookup more days to draw from without changing the window used for every other
+    correction stage. Omit (default) to preserve prior behavior exactly.
+    """
     cal_cfg = config.get("calibration", {})
     artifacts = {
         "targeted_meta_artifact": None,
@@ -476,9 +515,27 @@ def build_correction_artifacts(raw_backtest_df: pd.DataFrame, config: dict) -> d
                 also_update_cols=("Stage_Selected_Forecast_MWH",),
                 evaluation_mode="hot_ramp_training_basis",
             )
+        hot_ramp_lookup_basis = hot_ramp_basis
+        if extended_lookback_df is not None and not extended_lookback_df.empty:
+            hot_ramp_lookup_basis = _apply_v126_correction_chain_to_frame(
+                raw_df=extended_lookback_df,
+                config=config,
+                targeted_meta_artifact=artifacts["targeted_meta_artifact"],
+                lookup_bundle=artifacts["lookup_bundle"],
+                heat_lookup=artifacts["heat_lookup"],
+                warm_lookup=artifacts["warm_lookup"],
+                cloud_solar_lookup=artifacts["cloud_solar_lookup"],
+                simulate_recent=True,
+                apply_auto_residual=False,
+                focused_shape_residual_artifact=artifacts.get(
+                    "focused_shape_residual_artifact"
+                ),
+                daily_peak_shadow_artifact=None,
+                hot_ramp_peak_capture_artifact=None,
+            )
         artifacts["hot_ramp_peak_capture_artifact"] = (
             build_hot_ramp_peak_capture_artifact(
-                hot_ramp_basis,
+                hot_ramp_lookup_basis,
                 config,
                 forecast_col="Final_Backtest_Forecast_MWH",
             )
@@ -511,9 +568,28 @@ def build_correction_artifacts(raw_backtest_df: pd.DataFrame, config: dict) -> d
                 also_update_cols=("Stage_Selected_Forecast_MWH",),
                 evaluation_mode="heat_persistence_training_basis",
             )
+        heat_persistence_lookup_basis = heat_persistence_basis
+        if extended_lookback_df is not None and not extended_lookback_df.empty:
+            heat_persistence_lookup_basis = _apply_v126_correction_chain_to_frame(
+                raw_df=extended_lookback_df,
+                config=config,
+                targeted_meta_artifact=artifacts["targeted_meta_artifact"],
+                lookup_bundle=artifacts["lookup_bundle"],
+                heat_lookup=artifacts["heat_lookup"],
+                warm_lookup=artifacts["warm_lookup"],
+                cloud_solar_lookup=artifacts["cloud_solar_lookup"],
+                simulate_recent=True,
+                apply_auto_residual=False,
+                focused_shape_residual_artifact=artifacts.get(
+                    "focused_shape_residual_artifact"
+                ),
+                daily_peak_shadow_artifact=None,
+                hot_ramp_peak_capture_artifact=None,
+                heat_persistence_peak_capture_artifact=None,
+            )
         artifacts["heat_persistence_peak_capture_artifact"] = (
             build_heat_persistence_peak_capture_artifact(
-                heat_persistence_basis,
+                heat_persistence_lookup_basis,
                 config,
                 forecast_col="Final_Backtest_Forecast_MWH",
             )
@@ -1480,8 +1556,25 @@ def run_pipeline(
     targeted_meta_cfg = cal_cfg.get("targeted_residual_meta", {}) or {}
     residual_band_lookup = None
 
+    extended_lookback_raw_df = None
+    extended_lookback_days = rare_event_artifact_lookback_days(config, backtest_days)
+    if extended_lookback_days is not None:
+        _progress(progress_callback, "Running extended rare-event lookback backtest")
+        extended_lookback_raw_df = run_rolling_backtest(
+            train_df=train_df,
+            features=features,
+            ensemble_weights=ensemble_weights,
+            backtest_days=extended_lookback_days,
+            config=config,
+            skip_catboost=True,
+            skip_prophet=True,
+        )
+        _progress(progress_callback, "Completed extended rare-event lookback backtest")
+
     _progress(progress_callback, "Building correction artifacts")
-    correction_artifacts = build_correction_artifacts(backtest_raw_df, config)
+    correction_artifacts = build_correction_artifacts(
+        backtest_raw_df, config, extended_lookback_df=extended_lookback_raw_df
+    )
     lookup_bundle = correction_artifacts["lookup_bundle"]
     targeted_meta_artifact = correction_artifacts["targeted_meta_artifact"]
     heat_lookup = correction_artifacts["heat_lookup"]
