@@ -114,5 +114,102 @@ class TrainCatboostRuntimeFallbackTests(unittest.TestCase):
         self.assertIn("gpu", info["failed_attempts"][0])
 
 
+class AlwaysSucceedsCatBoostRegressor:
+    """Stand-in that succeeds on whichever backend it's given, so the GPU attempt is
+    the one actually selected (mirrors a real GPU-capable machine)."""
+
+    def __init__(self, **params):
+        self.params = params
+        self.tree_count_ = 5
+
+    def fit(self, X, y, **kwargs):
+        return self
+
+    def predict(self, X):
+        return np.zeros(len(X))
+
+    def get_best_iteration(self):
+        return 4
+
+
+class CatBoostGpuMonotonicConstraintTests(unittest.TestCase):
+    """CatBoost's GPU backend does not support monotone_constraints (a hard engine
+    limitation, confirmed against CatBoost's own docs/FAQ) -- regression tests for the
+    accuracy/speed tradeoff: GPU attempts must omit the constraint, CPU attempts (either
+    chosen outright or reached via fallback) must still get it.
+    """
+
+    def _config(self, *, task_type: str) -> dict:
+        return {
+            "hardware": {"use_gpu": True, "fallback_to_cpu": True},
+            "model": {
+                "early_stopping": {"enabled": False},
+                "monotonic_constraints": {"enabled": True},
+                "catboost": {
+                    "enabled": True,
+                    "iterations": 10,
+                    "depth": 2,
+                    "task_type": task_type,
+                },
+            },
+        }
+
+    def test_gpu_attempt_omits_monotone_constraints(self):
+        df = _synthetic_frame()
+        with patch(
+            "forecasting.model.catboost_model._import_catboost",
+            return_value=(AlwaysSucceedsCatBoostRegressor, None),
+        ):
+            model, feats = train_catboost(
+                df,
+                features=["Temperature", "Hour"],
+                config=self._config(task_type="GPU"),
+            )
+
+        self.assertIsNotNone(model)
+        info = get_last_catboost_training_info()
+        self.assertEqual(info["selected_backend"], "gpu")
+        self.assertNotIn("monotone_constraints", info["params"])
+        self.assertTrue(info["monotonic_constraints_requested"])
+        self.assertFalse(info["monotonic_constraints_applied"])
+
+    def test_cpu_fallback_still_gets_monotone_constraints_after_gpu_failure(self):
+        df = _synthetic_frame()
+        with patch(
+            "forecasting.model.catboost_model._import_catboost",
+            return_value=(FakeCatBoostRegressor, None),
+        ):
+            model, feats = train_catboost(
+                df,
+                features=["Temperature", "Hour"],
+                config=self._config(task_type="GPU"),
+            )
+
+        self.assertIsNotNone(model)
+        info = get_last_catboost_training_info()
+        self.assertEqual(info["selected_backend"], "cpu")
+        self.assertIn("monotone_constraints", info["params"])
+        self.assertTrue(info["monotonic_constraints_requested"])
+        self.assertTrue(info["monotonic_constraints_applied"])
+
+    def test_cpu_only_task_type_still_gets_monotone_constraints(self):
+        df = _synthetic_frame()
+        with patch(
+            "forecasting.model.catboost_model._import_catboost",
+            return_value=(AlwaysSucceedsCatBoostRegressor, None),
+        ):
+            model, feats = train_catboost(
+                df,
+                features=["Temperature", "Hour"],
+                config=self._config(task_type="CPU"),
+            )
+
+        self.assertIsNotNone(model)
+        info = get_last_catboost_training_info()
+        self.assertEqual(info["selected_backend"], "cpu")
+        self.assertIn("monotone_constraints", info["params"])
+        self.assertTrue(info["monotonic_constraints_applied"])
+
+
 if __name__ == "__main__":
     unittest.main()

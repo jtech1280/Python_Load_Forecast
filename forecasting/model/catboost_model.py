@@ -192,7 +192,13 @@ def train_catboost(
     errors: list[str] = []
     attempts = _attempts(cfg)
     if mono_vector is not None:
-        for _, attempt_params in attempts:
+        # CatBoost does not support monotone_constraints on GPU (a hard, documented
+        # engine limitation, not a config issue), so only the CPU attempt gets it.
+        # Training a GPU attempt without the constraint is a deliberate accuracy/speed
+        # tradeoff choice, not a silent gap: it's recorded per-attempt in params below.
+        for backend_name, attempt_params in attempts:
+            if backend_name == "gpu":
+                continue
             attempt_params["monotone_constraints"] = mono_vector
     if has_eval_set:
         for _, attempt_params in attempts:
@@ -223,6 +229,8 @@ def train_catboost(
                 "requested_gpu": _gpu_requested(cfg),
                 "selected_backend": backend_name,
                 "params": params,
+                "monotonic_constraints_requested": mono_vector is not None,
+                "monotonic_constraints_applied": "monotone_constraints" in params,
                 "failed_attempts": errors,
                 "early_stopping": {
                     "enabled": bool(has_eval_set),
