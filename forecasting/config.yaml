@@ -398,6 +398,13 @@ model:
     task_type: "GPU"        # GPU first when hardware.use_gpu=true; CPU fallback is automatic
     devices: "0"
     thread_count: -1
+    # PENDING REPLAY VALIDATION (added 2026-08-10): CatBoost's own default (0.95) grabs
+    # ~95% of free VRAM on startup, which is fine for one process but causes a CUDA
+    # out-of-memory/bad-allocation failure when replay.parallel.processes runs multiple
+    # origins concurrently against the same GPU. Sized for parallel.processes: 4 with
+    # headroom for driver/context overhead and concurrent XGB GPU usage; retune if that
+    # process count changes (roughly 1 / (processes + 1)).
+    gpu_ram_part: 0.20
 
   prophet:
     enabled: true

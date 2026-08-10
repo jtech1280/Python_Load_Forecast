@@ -61,6 +61,38 @@ class CatBoostAttemptOrderingTests(unittest.TestCase):
         self.assertEqual(backends, ["cpu"])
 
 
+class CatBoostGpuRamPartTests(unittest.TestCase):
+    """Regression tests for the CUDA out-of-memory fix: replay.parallel.processes runs
+    multiple origins concurrently against one GPU, and CatBoost's own default
+    (gpu_ram_part=0.95, grab ~95% of free VRAM) causes every process after the first to
+    fail with a bad-allocation error. gpu_ram_part must reach the GPU attempt only.
+    """
+
+    def test_configured_gpu_ram_part_is_applied_to_gpu_attempt(self):
+        config = {
+            "hardware": {"use_gpu": True, "fallback_to_cpu": True},
+            "model": {"catboost": {"task_type": "GPU", "gpu_ram_part": 0.2}},
+        }
+        attempts = dict(_attempts(config))
+        self.assertAlmostEqual(attempts["gpu"]["gpu_ram_part"], 0.2)
+
+    def test_gpu_ram_part_not_set_on_cpu_attempt(self):
+        config = {
+            "hardware": {"use_gpu": True, "fallback_to_cpu": True},
+            "model": {"catboost": {"task_type": "GPU", "gpu_ram_part": 0.2}},
+        }
+        attempts = dict(_attempts(config))
+        self.assertNotIn("gpu_ram_part", attempts["cpu"])
+
+    def test_unset_gpu_ram_part_leaves_catboost_default_untouched(self):
+        config = {
+            "hardware": {"use_gpu": True, "fallback_to_cpu": True},
+            "model": {"catboost": {"task_type": "GPU"}},
+        }
+        attempts = dict(_attempts(config))
+        self.assertNotIn("gpu_ram_part", attempts["gpu"])
+
+
 class FakeCatBoostRegressor:
     """Stand-in that fails to fit on GPU (as it would with no CUDA device visible)
     but succeeds on CPU, so train_catboost's runtime fallback can be exercised without
