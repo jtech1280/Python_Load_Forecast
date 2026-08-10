@@ -1,0 +1,18 @@
+{
+  "enabled": true,
+  "shadow_mode": true,
+  "model_version": "heat_persistence_peak_capture_shadow_v1",
+  "evaluation_rows": 2,
+  "baseline_mae_mwh": 13.807955974616505,
+  "heat_persistence_peak_shadow_mae_mwh": 6.847821884226761,
+  "delta_mae_mwh": -6.960134090389744,
+  "bias_mwh": 6.578568005909659,
+  "underforecast_rate_pct": 50.0,
+  "improved_rows": 2,
+  "worsened_rows": 0,
+  "mean_correction_mwh": 7.229387968706851,
+  "source_counts": {
+    "out_of_scope": 9206,
+    "heat_persistence_peak_shadow": 2
+  }
+}

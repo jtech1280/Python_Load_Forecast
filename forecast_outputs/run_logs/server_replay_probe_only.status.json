@@ -1,0 +1,13 @@
+﻿{
+    "backend_mode":  "safe",
+    "replay_max_origins":  1,
+    "elapsed_minutes":  0.14,
+    "fixed_origins_file":  "forecast_outputs\\fixed_replay_origins_hot_peak_summers_20260531.txt",
+    "run_label":  "probe_only",
+    "command":  "\".\\.venv\\Scripts\\python.exe\" -u -m forecasting.main --save-csv --rolling-origin-replay --replay-max-origins 1 --replay-fixed-origins-file forecast_outputs\\fixed_replay_origins_hot_peak_summers_20260531.txt --safe-performance --disable-prophet --disable-catboost --skip-diagnostics",
+    "error":  "C:\\Users\\ProsserJames\\PycharmProjects\\XGBoost_Roseville_System_Load_Forecast\\.venv\\Lib\\site-packages\\urllib3\\connectionpool.py:1110: InsecureRequestWarning: Unverified HTTPS request is being made to host \u0027api.open-meteo.com\u0027. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#tls-warnings",
+    "log_path":  "C:\\Users\\ProsserJames\\PycharmProjects\\XGBoost_Roseville_System_Load_Forecast\\forecast_outputs\\run_logs\\server_replay_probe_only.log",
+    "finished_at":  "2026-06-02T15:26:21.1456221-07:00",
+    "status":  "error",
+    "started_at":  "2026-06-02T15:26:12.9639913-07:00"
+}

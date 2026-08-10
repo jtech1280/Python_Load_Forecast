@@ -1,0 +1,10 @@
+{
+  "source": "forecast_weather_latest_cache_outside_morning_window",
+  "snapshot_path": "",
+  "cache_path": "C:\\Users\\ProsserJames\\PycharmProjects\\XGBoost_Roseville_System_Load_Forecast\\weather_cache\\forecast_weather_latest.csv",
+  "daily_cache_path": "C:\\Users\\ProsserJames\\PycharmProjects\\XGBoost_Roseville_System_Load_Forecast\\weather_cache\\forecast_weather_morning_2026-08-09.csv",
+  "import_window_local": "2026-08-09 06:00:00-07:00 to 2026-08-09 07:45:00-07:00",
+  "rows": 420,
+  "first_dt": "2026-08-06 19:00:00-07:00",
+  "last_dt": "2026-08-24 06:00:00-07:00"
+}

@@ -1,0 +1,19 @@
+{
+  "cpu_count_visible": 16,
+  "resolved_cpu_threads": 16,
+  "set_thread_env": true,
+  "overwrite_thread_env": false,
+  "env": {
+    "OMP_NUM_THREADS": "16",
+    "OPENBLAS_NUM_THREADS": "16",
+    "MKL_NUM_THREADS": "16",
+    "NUMEXPR_NUM_THREADS": "16",
+    "VECLIB_MAXIMUM_THREADS": "16",
+    "BLIS_NUM_THREADS": "16",
+    "LOKY_MAX_CPU_COUNT": "16"
+  },
+  "performance_mode": "max",
+  "xgb_gpu_requested": true,
+  "lgb_gpu_requested": false,
+  "parallel_tree_training": true
+}

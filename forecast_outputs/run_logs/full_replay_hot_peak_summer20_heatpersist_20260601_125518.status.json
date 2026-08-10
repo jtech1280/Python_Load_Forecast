@@ -1,0 +1,13 @@
+﻿{
+    "five_min_load_enabled":  true,
+    "replay_max_origins":  20,
+    "elapsed_minutes":  189.07,
+    "exit_code":  0,
+    "run_label":  "hot_peak_summer20_heatpersist_20260601_125518",
+    "local_weather_calibration_enabled":  false,
+    "log_path":  "C:\\Users\\ProsserJames\\PycharmProjects\\XGBoost_Roseville_System_Load_Forecast\\forecast_outputs\\run_logs\\full_replay_hot_peak_summer20_heatpersist_20260601_125518.log",
+    "finished_at":  "2026-06-01T16:04:23.3806644-07:00",
+    "status":  "completed",
+    "fixed_origins_file":  "forecast_outputs\\fixed_replay_origins_hot_peak_summers_20260531.txt",
+    "started_at":  "2026-06-01T12:55:18.9202573-07:00"
+}

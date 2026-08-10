@@ -1,0 +1,68 @@
+{
+  "label": "localwx_base_berry_fivemin_fixed_20260530",
+  "replay_path": "C:\\Users\\ProsserJames\\PycharmProjects\\XGBoost_Roseville_System_Load_Forecast\\forecast_outputs\\rolling_origin_replay_results.csv",
+  "detail_path": "forecast_outputs\\weather_interval_coverage_validation_detail_localwx_base_berry_fivemin_fixed_20260530.csv",
+  "scorecard_path": "forecast_outputs\\weather_interval_coverage_validation_scorecard_localwx_base_berry_fivemin_fixed_20260530.csv",
+  "overall": [
+    {
+      "Policy": "current_weather_risk",
+      "Slice": "Overall",
+      "N": 2015.0,
+      "Coverage_PCT": 75.43424317617865,
+      "Avg_Band_MWH": 16.214967885584436,
+      "Avg_Pre_Conformal_Band_MWH": NaN,
+      "Avg_Conformal_Weather_Band_MWH": NaN,
+      "Avg_WeatherScenario_HalfSpread_MWH": 5.710209381666729,
+      "Avg_AbsError_MWH": 9.21772106432385,
+      "P90_AbsError_MWH": 22.20649656085687,
+      "Avg_Band_Miss_MWH": 1.2069894238029983,
+      "P90_Band_Miss_MWH": 4.173007402985899,
+      "Avg_Weather_Risk_Multiplier": 3.170263957816377
+    },
+    {
+      "Policy": "current_weather_risk_conformal_walkforward",
+      "Slice": "Overall",
+      "N": 2015.0,
+      "Coverage_PCT": 87.19602977667493,
+      "Avg_Band_MWH": 19.526262168277526,
+      "Avg_Pre_Conformal_Band_MWH": 16.214967885584436,
+      "Avg_Conformal_Weather_Band_MWH": 14.596702358955278,
+      "Avg_WeatherScenario_HalfSpread_MWH": 5.710209381666729,
+      "Avg_AbsError_MWH": 9.21772106432385,
+      "P90_AbsError_MWH": 22.20649656085687,
+      "Avg_Band_Miss_MWH": 0.72325313835964,
+      "P90_Band_Miss_MWH": 1.2949512921058186,
+      "Avg_Weather_Risk_Multiplier": 3.170263957816377
+    },
+    {
+      "Policy": "no_weather_risk",
+      "Slice": "Overall",
+      "N": 2015.0,
+      "Coverage_PCT": 35.28535980148884,
+      "Avg_Band_MWH": 4.781380594589204,
+      "Avg_Pre_Conformal_Band_MWH": NaN,
+      "Avg_Conformal_Weather_Band_MWH": NaN,
+      "Avg_WeatherScenario_HalfSpread_MWH": 5.710209381666729,
+      "Avg_AbsError_MWH": 9.21772106432385,
+      "P90_AbsError_MWH": 22.20649656085687,
+      "Avg_Band_Miss_MWH": 5.3876059591427605,
+      "P90_Band_Miss_MWH": 16.36918448305636,
+      "Avg_Weather_Risk_Multiplier": 1.0
+    },
+    {
+      "Policy": "prior_weather_risk",
+      "Slice": "Overall",
+      "N": 2015.0,
+      "Coverage_PCT": 49.478908188585606,
+      "Avg_Band_MWH": 7.752079747034274,
+      "Avg_Pre_Conformal_Band_MWH": NaN,
+      "Avg_Conformal_Weather_Band_MWH": NaN,
+      "Avg_WeatherScenario_HalfSpread_MWH": 5.710209381666729,
+      "Avg_AbsError_MWH": 9.21772106432385,
+      "P90_AbsError_MWH": 22.20649656085687,
+      "Avg_Band_Miss_MWH": 3.728659535577636,
+      "P90_Band_Miss_MWH": 12.55729778895709,
+      "Avg_Weather_Risk_Multiplier": 1.5905235732009924
+    }
+  ]
+}

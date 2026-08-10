@@ -1,0 +1,12 @@
+{
+  "replay_path": "forecast_outputs\\replay_runs\\rolling_origin_replay_results_20260723_045716_b90c2762cf.csv",
+  "label": "20260723_045716",
+  "rows": 7680,
+  "reports": {
+    "focused_sources": 50,
+    "focused_rules": 46,
+    "long_horizon": 314,
+    "stage_reasons": 9,
+    "correction_activity": 5
+  }
+}

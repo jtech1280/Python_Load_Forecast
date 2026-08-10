@@ -1,0 +1,7 @@
+{
+    "status":  "failed_stale_launch",
+    "run_label":  "hot_peak_summer20_extremecap16_20260601_195744",
+    "note":  "Wrapper launch exited early; active rerun is hot_peak_summer20_extremecap16b_20260601_195909",
+    "superseded_by":  "hot_peak_summer20_extremecap16b_20260601_195909",
+    "updated_at":  "2026-06-01T20:01:20.1020555-07:00"
+}

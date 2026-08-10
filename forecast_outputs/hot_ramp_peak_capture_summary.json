@@ -1,0 +1,33 @@
+{
+  "enabled": true,
+  "shadow_mode": false,
+  "model_version": "hot_ramp_peak_capture_guarded_prod_v2",
+  "evaluation_rows": 101,
+  "baseline_mae_mwh": 7.950517724714581,
+  "hot_ramp_peak_shadow_mae_mwh": 5.630999983344626,
+  "delta_mae_mwh": -2.319517741369956,
+  "bias_mwh": -0.6201491454628743,
+  "underforecast_rate_pct": 43.56435643564357,
+  "improved_rows": 75,
+  "worsened_rows": 26,
+  "mean_correction_mwh": 7.528112839895575,
+  "source_counts": {
+    "insufficient_history": 4992,
+    "out_of_scope": 4106,
+    "hot_ramp_peak_guarded_prod": 22,
+    "hot_ramp_peak_targeted_july_days4to7_95_98_clear_neutral_state": 19,
+    "hot_ramp_peak_targeted_july_days2to3_85_90_clear_deep_low_state": 14,
+    "hot_ramp_peak_cooling_underway_blocked": 9,
+    "hot_ramp_peak_targeted_july_days4to7_90_92_overcast_deep_low_state": 8,
+    "hot_ramp_peak_targeted_july_days4to7_95_100_clear_high_state": 6,
+    "hot_ramp_peak_targeted_july_days2to3_90_92_clear_negative_state": 5,
+    "hot_ramp_peak_targeted_july_days2to3_90_92_clear_neutral_state": 5,
+    "hot_ramp_peak_targeted_july_days4to7_95_98_clear_mild_negative_state": 5,
+    "hot_ramp_peak_targeted_june_days4to7_92_95_clear_moderate_state": 4,
+    "hot_ramp_peak_targeted_july_long_100_105_clear_high_state": 4,
+    "hot_ramp_peak_targeted_july_long_98_100_clear_moderate_state": 3,
+    "hot_ramp_peak_targeted_july_long_90_92_clear_negative_state": 2,
+    "hot_ramp_peak_targeted_july_days4to7_90_92_overcast_deep_low_state_he14_15": 2,
+    "hot_ramp_peak_targeted_july_long_98_100_clear_negative_state": 2
+  }
+}

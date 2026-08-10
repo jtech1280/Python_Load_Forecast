@@ -1,0 +1,16 @@
+{
+  "N": 1081,
+  "Actual_Mean_MWH": 127.61379119333948,
+  "Forecast_Mean_MWH": 127.55966290571865,
+  "Bias_MWH": 0.054128287620822585,
+  "MAE_MWH": 2.7084530053799996,
+  "RMSE_MWH": 3.752824793668207,
+  "MAPE_PCT": 2.0645782927097196,
+  "Underforecast_Rate_PCT": 58.371877890841816,
+  "P90_AbsError_MWH": 6.748649396105236,
+  "Max_Underforecast_MWH": 14.051127922009869,
+  "Max_Overforecast_MWH": 12.99887174148985,
+  "Actual_Peak_MWH": 253.572,
+  "Forecast_At_Actual_Peak_MWH": 252.62598958089484,
+  "Underforecast_At_Actual_Peak_MWH": 0.9460104191051641
+}
