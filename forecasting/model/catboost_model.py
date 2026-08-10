@@ -135,6 +135,14 @@ def _attempts(config: dict | None) -> list[tuple[str, dict[str, Any]]]:
         gp["task_type"] = "GPU"
         if p.get("devices") is not None:
             gp["devices"] = str(p.get("devices"))
+        # CatBoost defaults gpu_ram_part to 0.95 (grabs ~95% of free VRAM on startup).
+        # Fine for a single process, but replay.parallel.processes runs multiple origins
+        # concurrently against the same physical GPU -- the first process to reach
+        # CatBoost training reserves nearly all VRAM, and every other concurrent
+        # process's GPU attempt then fails with a CUDA out-of-memory/bad-allocation
+        # error. Cap it so N processes can share the card.
+        if p.get("gpu_ram_part") is not None:
+            gp["gpu_ram_part"] = float(p.get("gpu_ram_part"))
         attempts.append(("gpu", gp))
     cp = dict(base)
     cp["task_type"] = "CPU"
