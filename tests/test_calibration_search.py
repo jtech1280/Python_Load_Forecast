@@ -3,11 +3,13 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
 from forecasting.tuning.calibration_search import (
     RawOriginBundle,
+    build_raw_origin_bundles,
     load_raw_origin_bundles,
     save_raw_origin_bundles,
     score_bundles,
@@ -132,6 +134,109 @@ class RawOriginBundlePersistenceTests(unittest.TestCase):
         self.assertEqual(
             load_raw_origin_bundles("/nonexistent/path/does/not/exist"), []
         )
+
+
+class ExtendedLookbackWiringTests(unittest.TestCase):
+    """Regression tests for wiring calibration.rare_event_artifact_lookback_days into the
+    calibration_search tool (previously only wired into rolling_origin_replay.py and the
+    live pipeline, so an Optuna search silently never exercised it)."""
+
+    def test_score_bundles_passes_extended_lookback_to_build_correction_artifacts(self):
+        bundle = _minimal_bundle()
+        bundle.extended_lookback_raw = pd.DataFrame({"marker": [1]})
+        with patch(
+            "forecasting.tuning.calibration_search.build_correction_artifacts"
+        ) as mock_build:
+            mock_build.return_value = {
+                "targeted_meta_artifact": None,
+                "lookup_bundle": {},
+                "heat_lookup": None,
+                "warm_lookup": None,
+                "cloud_solar_lookup": None,
+                "recent_profile": None,
+                "operational_residual_artifact": None,
+                "focused_shape_residual_artifact": None,
+                "daily_peak_shadow_artifact": None,
+                "hot_ramp_peak_capture_artifact": None,
+                "heat_persistence_peak_capture_artifact": None,
+                "pre_recent_frame": pd.DataFrame(),
+            }
+            with patch(
+                "forecasting.tuning.calibration_search.apply_origin_correction_chain",
+                return_value=pd.DataFrame(),
+            ):
+                score_bundles([bundle], _minimal_config(cap_mwh=10.0))
+
+        _, kwargs = mock_build.call_args
+        self.assertIs(kwargs["extended_lookback_df"], bundle.extended_lookback_raw)
+
+    def test_score_bundles_tolerates_bundle_missing_extended_lookback_attribute(self):
+        """Simulates a RawOriginBundle pickled before extended_lookback_raw existed:
+        construct one bypassing __init__ so the attribute is genuinely absent from
+        __dict__, matching what unpickling an old cache file produces."""
+        bundle = _minimal_bundle()
+        old_style = object.__new__(RawOriginBundle)
+        old_style.__dict__.update(
+            {k: v for k, v in bundle.__dict__.items() if k != "extended_lookback_raw"}
+        )
+        self.assertNotIn("extended_lookback_raw", old_style.__dict__)
+
+        out = score_bundles([old_style], _minimal_config(cap_mwh=10.0))
+        self.assertFalse(out.empty)
+
+    def test_build_raw_origin_bundles_skips_extended_backtest_when_unconfigured(self):
+        dt = pd.Timestamp("2026-07-01")
+        with (
+            patch(
+                "forecasting.tuning.calibration_search._origin_candidates",
+                return_value=[dt],
+            ),
+            patch(
+                "forecasting.tuning.calibration_search.run_rolling_backtest",
+                return_value=pd.DataFrame({"DT": [dt]}),
+            ) as mock_backtest,
+            patch(
+                "forecasting.tuning.calibration_search._origin_raw_forecasts",
+                return_value=(pd.DataFrame({"DT": [dt]}), pd.DataFrame(), {}, {}),
+            ),
+        ):
+            bundles = build_raw_origin_bundles(
+                pd.DataFrame({"DT": [dt]}), features=[], config={"calibration": {}}
+            )
+
+        self.assertEqual(mock_backtest.call_count, 1)
+        self.assertIsNone(bundles[0].extended_lookback_raw)
+
+    def test_build_raw_origin_bundles_builds_extended_lookback_when_configured(self):
+        dt = pd.Timestamp("2026-07-01")
+        config = {
+            "calibration": {"rare_event_artifact_lookback_days": 730},
+            "training": {"rolling_origin_replay": {"calibration_days": 45}},
+        }
+        with (
+            patch(
+                "forecasting.tuning.calibration_search._origin_candidates",
+                return_value=[dt],
+            ),
+            patch(
+                "forecasting.tuning.calibration_search.run_rolling_backtest",
+                return_value=pd.DataFrame({"DT": [dt]}),
+            ) as mock_backtest,
+            patch(
+                "forecasting.tuning.calibration_search._origin_raw_forecasts",
+                return_value=(pd.DataFrame({"DT": [dt]}), pd.DataFrame(), {}, {}),
+            ),
+        ):
+            bundles = build_raw_origin_bundles(
+                pd.DataFrame({"DT": [dt]}), features=[], config=config
+            )
+
+        self.assertEqual(mock_backtest.call_count, 2)
+        second_call_kwargs = mock_backtest.call_args_list[1].kwargs
+        self.assertEqual(second_call_kwargs["backtest_days"], 730)
+        self.assertTrue(second_call_kwargs["skip_catboost"])
+        self.assertTrue(second_call_kwargs["skip_prophet"])
+        self.assertIsNotNone(bundles[0].extended_lookback_raw)
 
 
 if __name__ == "__main__":

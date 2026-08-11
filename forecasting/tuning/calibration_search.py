@@ -37,6 +37,7 @@ from forecasting.backtest.rolling_origin_replay import (
 )
 from forecasting.forecast.forecast_pipeline import (
     build_correction_artifacts,
+    rare_event_artifact_lookback_days,
     _production_ensemble_weights,
 )
 
@@ -54,6 +55,14 @@ class RawOriginBundle:
     raw_weather_realism: pd.DataFrame
     raw_realized_scenarios: dict[str, pd.DataFrame]
     raw_weather_scenarios: dict[str, pd.DataFrame]
+    # Optional longer-history raw backtest for hot_ramp_peak_capture/
+    # heat_persistence_peak_capture's walk-forward lookup artifacts (see
+    # calibration.rare_event_artifact_lookback_days). None when unset -- matches
+    # build_correction_artifacts' own default (no extra backtest, no behavior change).
+    # Bundles pickled before this field existed won't have it; score_bundles() reads it
+    # with getattr(..., None) so old caches still load, they just won't benefit from the
+    # extended lookback until the cache is rebuilt.
+    extended_lookback_raw: pd.DataFrame | None = None
 
 
 def build_raw_origin_bundles(
@@ -84,6 +93,8 @@ def build_raw_origin_bundles(
     if origin_limit is not None:
         origins = origins[: int(origin_limit)]
 
+    extended_lookback_days = rare_event_artifact_lookback_days(config, calibration_days)
+
     bundles: list[RawOriginBundle] = []
     for origin_number, origin_dt in enumerate(origins, start=1):
         print(
@@ -101,6 +112,23 @@ def build_raw_origin_bundles(
             skip_prophet=skip_calibration_prophet,
         )
         raw_calibration.attrs = {}
+        extended_lookback_raw = None
+        if extended_lookback_days is not None:
+            print(
+                f"[calibration_search] building rare-event lookback ({extended_lookback_days}d) "
+                f"for origin {origin_number}/{len(origins)}: {origin_dt}",
+                flush=True,
+            )
+            extended_lookback_raw = run_rolling_backtest(
+                train_df=pre_origin,
+                features=features,
+                ensemble_weights=_production_ensemble_weights(config),
+                backtest_days=extended_lookback_days,
+                config=config,
+                skip_catboost=True,
+                skip_prophet=True,
+            )
+            extended_lookback_raw.attrs = {}
         (
             raw_origin,
             raw_weather_realism,
@@ -126,6 +154,7 @@ def build_raw_origin_bundles(
                 raw_weather_realism=raw_weather_realism,
                 raw_realized_scenarios=raw_realized_scenarios,
                 raw_weather_scenarios=raw_weather_scenarios,
+                extended_lookback_raw=extended_lookback_raw,
             )
         )
     return bundles
@@ -171,7 +200,11 @@ def score_bundles(bundles: list[RawOriginBundle], config: dict) -> pd.DataFrame:
     """
     frames: list[pd.DataFrame] = []
     for bundle in bundles:
-        artifacts = build_correction_artifacts(bundle.raw_calibration, config)
+        artifacts = build_correction_artifacts(
+            bundle.raw_calibration,
+            config,
+            extended_lookback_df=getattr(bundle, "extended_lookback_raw", None),
+        )
         corrected = apply_origin_correction_chain(
             bundle.raw_origin,
             bundle.raw_weather_realism,
