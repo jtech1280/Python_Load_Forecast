@@ -577,10 +577,14 @@ calibration:
   # qualifying days for most origins within the normal calibration window, so it returned
   # None and the stage silently fell back to targeted_missing_slices rules for the whole
   # origin -- which is why that rule list keeps growing instead of the lookup generalizing.
-  # null (default) skips the extra backtest pass entirely (zero cost, zero behavior change).
-  # Set higher than calibration_days (e.g. 90-120) to test whether more training days let the
-  # lookup activate on its own; costs one extra XGB+LGB-only backtest pass per origin/run.
-  rare_event_artifact_lookback_days: null
+  # null skips the extra backtest pass entirely (zero cost, zero behavior change).
+  # 2026-08-10: set to 730 (2 years) per explicit request to let the walk-forward lookup
+  # generalize hot-ramp/heat-persistence peak behavior from a much larger sample instead
+  # of leaning on the hand-typed targeted_missing_slices rules. Costs one extra
+  # XGB+LGB-only recursive backtest pass per origin/run over the full 730-day window
+  # (~16x the recursive-forecast length of the 45-day calibration_days window) -- if this
+  # makes the run too slow, drop toward 180-365 first rather than back to null.
+  rare_event_artifact_lookback_days: 730
   stage_selector:
     # Full seasonal replay showed raw Day 1 and final peak-window selection leaving accuracy
     # on the table. Select the most robust stage by operational horizon and peak window.
