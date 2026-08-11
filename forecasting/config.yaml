@@ -395,7 +395,13 @@ model:
     l2_leaf_reg: 4.0
     loss_function: "RMSE"
     random_seed: 42
-    task_type: "GPU"        # GPU first when hardware.use_gpu=true; CPU fallback is automatic
+    # GPU first when hardware.use_gpu=true; CPU fallback is automatic. Some machines
+    # sharing this same repo checkout (moved by zip copy, not git, so a machine-local
+    # config.local.yaml would get carried along too) run CatBoost on a much smaller GPU
+    # than others -- override with a real OS environment variable on that machine only
+    # (e.g. Windows: setx FORECAST_CATBOOST_TASK_TYPE CPU, then open a new terminal) to
+    # force CPU there without touching this file or anything that gets zipped/copied.
+    task_type: "${FORECAST_CATBOOST_TASK_TYPE:-GPU}"
     devices: "0"
     thread_count: -1
     # PENDING REPLAY VALIDATION (added 2026-08-10): CatBoost's own default (0.95) grabs
