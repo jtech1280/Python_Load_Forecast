@@ -604,6 +604,89 @@ def _apply_ensemble_outlier_guard(df: pd.DataFrame, config: dict) -> pd.DataFram
     return out
 
 
+def _gfs_run_lock_cfg(config: dict) -> dict:
+    return (config.get("openmeteo", {}) or {}).get("gfs_run_lock", {}) or {}
+
+
+def _fetch_single_run(
+    config: dict, *, run_dt_utc: dt.datetime, model: str, single_runs_url: str
+) -> pd.DataFrame:
+    """One attempt at Open-Meteo's Single Runs API for a specific model + init time."""
+    params = _standard_params(config)
+    params.update(
+        {
+            "forecast_days": int(config["openmeteo"]["forecast_days"]),
+            "models": model,
+            "run": run_dt_utc.strftime("%Y-%m-%dT%H:%M"),
+        }
+    )
+    verify = _weather_request_verify(config)
+    payload = _fetch_json(
+        single_runs_url,
+        params,
+        verify,
+        timeout_seconds=90,
+        retries=2,
+        backoff_seconds=4.0,
+    )
+    return _finalize_weather_frame(
+        _normalize_hourly(payload, pd.Timestamp.now("UTC")), config
+    )
+
+
+def _fetch_gfs_locked_forecast(config: dict) -> tuple[pd.DataFrame, str]:
+    """Pull a specific GFS run cycle (default 06Z) via Open-Meteo's Single Runs API so
+    every day's import comes from the same model + cycle, rather than whichever run the
+    best_match blend happens to be showing at whatever time the import actually runs.
+
+    Tries today's UTC calendar date at the configured run hour first. GFS's own
+    publication latency is a few hours after init, and this project's morning import
+    already runs well after that (target_local_time ~06:30 Pacific is ~13:30-14:30 UTC,
+    comfortably after a 06Z run's typical ~10-11 UTC publication), so this should
+    normally succeed on the first try. If it doesn't -- not yet published, a transient
+    API issue, anything -- falls back to yesterday's same-hour run once, then gives up.
+    Returns (empty DataFrame, "") on total failure; never raises. Callers should fall
+    back to the standard forecast API in that case.
+    """
+    lock_cfg = _gfs_run_lock_cfg(config)
+    model = str(lock_cfg.get("model", "gfs_global"))
+    run_hour = int(lock_cfg.get("run_hour_utc", 6))
+    single_runs_url = str(
+        lock_cfg.get("single_runs_url")
+        or "https://single-runs-api.open-meteo.com/v1/forecast"
+    )
+    today_utc = dt.datetime.now(dt.timezone.utc).date()
+    candidates = [today_utc]
+    if bool(lock_cfg.get("allow_previous_day_fallback", True)):
+        candidates.append(today_utc - dt.timedelta(days=1))
+
+    for run_date in candidates:
+        run_dt_utc = dt.datetime(
+            run_date.year,
+            run_date.month,
+            run_date.day,
+            run_hour,
+            tzinfo=dt.timezone.utc,
+        )
+        try:
+            df = _fetch_single_run(
+                config,
+                run_dt_utc=run_dt_utc,
+                model=model,
+                single_runs_url=single_runs_url,
+            )
+        except Exception as exc:
+            warnings.warn(
+                f"GFS run-locked fetch failed for run={run_dt_utc.isoformat()} ({exc}); "
+                "trying next candidate.",
+                RuntimeWarning,
+            )
+            continue
+        if not df.empty:
+            return df, run_dt_utc.strftime("%Y-%m-%dT%HZ")
+    return pd.DataFrame(), ""
+
+
 def fetch_forecast_weather(config: dict) -> pd.DataFrame:
     params = _standard_params(config)
     params.update({"forecast_days": int(config["openmeteo"]["forecast_days"])})
@@ -700,12 +783,27 @@ def fetch_forecast_weather(config: dict) -> pd.DataFrame:
             )
 
     try:
-        payload = _fetch_json(
-            url, params, verify, timeout_seconds=90, retries=4, backoff_seconds=6.0
-        )
-        df = _finalize_weather_frame(
-            _normalize_hourly(payload, pd.Timestamp.now("UTC")), config
-        )
+        df = pd.DataFrame()
+        source_tag = "open_meteo_forecast"
+        if bool(_gfs_run_lock_cfg(config).get("enabled", False)):
+            df, gfs_run_tag = _fetch_gfs_locked_forecast(config)
+            if not df.empty:
+                source_tag = f"open_meteo_gfs_run_locked_{gfs_run_tag}"
+            else:
+                warnings.warn(
+                    "GFS run-locked fetch found no usable run; falling back to the "
+                    "standard Open-Meteo forecast (best_match) for this import.",
+                    RuntimeWarning,
+                )
+
+        if df.empty:
+            payload = _fetch_json(
+                url, params, verify, timeout_seconds=90, retries=4, backoff_seconds=6.0
+            )
+            df = _finalize_weather_frame(
+                _normalize_hourly(payload, pd.Timestamp.now("UTC")), config
+            )
+
         df = _apply_ensemble_outlier_guard(df, config)
         _write_weather_cache(df, latest_cache_path)
         if daily_cache_path is not None:
@@ -713,7 +811,7 @@ def fetch_forecast_weather(config: dict) -> pd.DataFrame:
         snapshot_path = _archive_forecast_weather(df, config)
         _mark_forecast_weather_source(
             df,
-            source="open_meteo_forecast",
+            source=source_tag,
             snapshot_path=snapshot_path,
             cache_path=latest_cache_path,
             daily_cache_path=daily_cache_path,
