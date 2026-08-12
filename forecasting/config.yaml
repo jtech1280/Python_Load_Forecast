@@ -186,6 +186,27 @@ openmeteo:
     import_window_start_local: "06:00"
     import_window_end_local: "07:45"
     daily_cache_stem: "forecast_weather_morning"
+  # PENDING VALIDATION (added 2026-08-11): guards against a single-run Open-Meteo point-
+  # forecast temperature "flyer" getting frozen into the whole day's forecast by
+  # forecast_import_policy above. Diagnosed from a real incident: 8/19/2026's forecasted
+  # max had been trending 102/96/92F, then one 6:20am pull showed 79F, and a same-morning
+  # re-pull recovered to 86F -- a run-to-run model artifact, not a real shift. When
+  # enabled, cross-checks each hour's point-forecast temperature against Open-Meteo's
+  # Ensemble API member spread; if the point value deviates from the ensemble mean by
+  # more than min_deviation_f (and enough members are present to trust it), the ensemble
+  # mean is used instead and the hour is flagged via TempF_Outlier_Corrected. Costs one
+  # extra API call per import; any failure fetching the ensemble is non-fatal and falls
+  # back to the point forecast unmodified. Disabled by default -- opt in per machine.
+  ensemble_outlier_guard:
+    enabled: false
+    ensemble_url: "https://ensemble-api.open-meteo.com/v1/ensemble"
+    # GFS's ensemble (GEFS, ~31 members) covers the full 16-day forecast horizon this
+    # project uses. Verify against Open-Meteo's current ensemble-supported model list
+    # before relying on this in production; an unsupported/renamed model id just fails
+    # the (non-fatal) ensemble fetch rather than breaking the main forecast import.
+    model: "gfs_seamless"
+    min_deviation_f: 10.0
+    min_members: 5
   # TLS certificate verification for weather API calls. Keep true so responses are
   # authenticated. On Windows, ssl_use_os_truststore lets requests honor the machine
   # certificate store via truststore, which fixes managed/self-signed proxy chains

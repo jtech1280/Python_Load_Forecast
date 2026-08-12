@@ -32,6 +32,10 @@ WEATHER_CACHE_COLS = [
     "PrecipIn",
     "GHI_Wm2",
     "IsDay",
+    "TempF_Ensemble_Mean",
+    "TempF_Ensemble_Std",
+    "TempF_Ensemble_Member_Count",
+    "TempF_Outlier_Corrected",
 ]
 _TRUSTSTORE_INJECTED = False
 _TRUSTSTORE_WARNING_EMITTED = False
@@ -486,6 +490,120 @@ def fetch_historical_weather(config: dict) -> pd.DataFrame:
         raise
 
 
+def _ensemble_outlier_guard_cfg(config: dict) -> dict:
+    return (config.get("openmeteo", {}) or {}).get("ensemble_outlier_guard", {}) or {}
+
+
+def _fetch_ensemble_temperature_stats(config: dict) -> pd.DataFrame:
+    """Query Open-Meteo's Ensemble API and return per-hour temperature spread stats.
+
+    Returns DT (project-local, tz-aware), TempF_Ensemble_Mean, TempF_Ensemble_Std,
+    TempF_Ensemble_Member_Count. Member columns are discovered dynamically
+    (temperature_2m_member01, _member02, ...) since the count varies by model.
+    """
+    guard_cfg = _ensemble_outlier_guard_cfg(config)
+    params = _standard_params(config)
+    params.update(
+        {
+            "forecast_days": int(config["openmeteo"]["forecast_days"]),
+            "models": str(guard_cfg.get("model", "gfs_seamless")),
+        }
+    )
+    url = str(
+        guard_cfg.get("ensemble_url")
+        or "https://ensemble-api.open-meteo.com/v1/ensemble"
+    )
+    verify = _weather_request_verify(config)
+    payload = _fetch_json(
+        url, params, verify, timeout_seconds=90, retries=2, backoff_seconds=4.0
+    )
+    hourly = payload.get("hourly", {}) or {}
+    times = hourly.get("time", [])
+    if not times:
+        return pd.DataFrame()
+
+    member_cols = sorted(
+        col for col in hourly if col.startswith("temperature_2m_member")
+    )
+    if not member_cols:
+        return pd.DataFrame()
+
+    members = pd.DataFrame({col: hourly[col] for col in member_cols})
+    out = pd.DataFrame({"ValidTimeLocal": pd.to_datetime(times)})
+    out["TempF_Ensemble_Mean"] = members.mean(axis=1, skipna=True)
+    out["TempF_Ensemble_Std"] = members.std(axis=1, skipna=True)
+    out["TempF_Ensemble_Member_Count"] = members.notna().sum(axis=1)
+
+    tz_local = ZoneInfo(config["project"]["timezone"])
+    tz_api_name = str((config.get("openmeteo", {}) or {}).get("timezone") or "GMT")
+    tz_api = "UTC" if tz_api_name.upper() in {"UTC", "GMT"} else ZoneInfo(tz_api_name)
+    out["DT"] = out["ValidTimeLocal"].dt.tz_localize(
+        tz_api, ambiguous="NaT", nonexistent="NaT"
+    )
+    if tz_api != tz_local:
+        out["DT"] = out["DT"].dt.tz_convert(tz_local)
+    out = out.dropna(subset=["DT"]).drop(columns=["ValidTimeLocal"])
+    return (
+        out.sort_values("DT")
+        .drop_duplicates(subset=["DT"], keep="last")
+        .reset_index(drop=True)
+    )
+
+
+def _apply_ensemble_outlier_guard(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """Replace a single-run point-forecast temperature flyer with the ensemble mean.
+
+    Diagnosed 2026-08-11: a single Open-Meteo pull showed 79F for a date that was
+    trending 102/96/92F over the preceding days and recovered to 86F on a same-morning
+    re-pull -- a run-to-run model artifact, not a real forecast shift. That flyer got
+    frozen into the whole day's production forecast because openmeteo.forecast_import_policy
+    caches one morning snapshot per day. Comparing the point value against the Ensemble
+    API's member spread catches this at ingestion time, before it gets cached: when the
+    point forecast deviates from the ensemble mean by more than min_deviation_f (and
+    enough members are present to trust the mean), swap in the ensemble mean instead and
+    flag it via TempF_Outlier_Corrected. Opt-in and disabled by default; any failure
+    fetching the ensemble (unsupported model, network issue) is non-fatal -- the point
+    forecast is used unmodified, same as before this guard existed.
+    """
+    guard_cfg = _ensemble_outlier_guard_cfg(config)
+    out = df.copy()
+    out["TempF_Outlier_Corrected"] = False
+    if not bool(guard_cfg.get("enabled", False)) or out.empty or "TempF" not in out:
+        return out
+
+    try:
+        ensemble = _fetch_ensemble_temperature_stats(config)
+    except Exception as exc:
+        warnings.warn(
+            f"Ensemble outlier guard skipped: Open-Meteo ensemble fetch failed ({exc}); "
+            "using the point forecast unmodified.",
+            RuntimeWarning,
+        )
+        return out
+    if ensemble.empty:
+        return out
+
+    min_deviation_f = float(guard_cfg.get("min_deviation_f", 10.0))
+    min_members = int(guard_cfg.get("min_members", 5))
+
+    out = out.merge(ensemble, on="DT", how="left")
+    trustworthy = out["TempF_Ensemble_Member_Count"].fillna(0) >= min_members
+    deviation = (out["TempF"] - out["TempF_Ensemble_Mean"]).abs()
+    outlier = trustworthy & deviation.ge(min_deviation_f).fillna(False)
+    if outlier.any():
+        corrected_rows = out.loc[outlier, ["DT", "TempF", "TempF_Ensemble_Mean"]]
+        for _, row in corrected_rows.iterrows():
+            print(
+                "Ensemble outlier guard: correcting Open-Meteo point forecast at "
+                f"{row['DT']} from {row['TempF']:.1f}F to ensemble mean "
+                f"{row['TempF_Ensemble_Mean']:.1f}F.",
+                flush=True,
+            )
+        out.loc[outlier, "TempF"] = out.loc[outlier, "TempF_Ensemble_Mean"]
+        out.loc[outlier, "TempF_Outlier_Corrected"] = True
+    return out
+
+
 def fetch_forecast_weather(config: dict) -> pd.DataFrame:
     params = _standard_params(config)
     params.update({"forecast_days": int(config["openmeteo"]["forecast_days"])})
@@ -588,6 +706,7 @@ def fetch_forecast_weather(config: dict) -> pd.DataFrame:
         df = _finalize_weather_frame(
             _normalize_hourly(payload, pd.Timestamp.now("UTC")), config
         )
+        df = _apply_ensemble_outlier_guard(df, config)
         _write_weather_cache(df, latest_cache_path)
         if daily_cache_path is not None:
             _write_weather_cache(df, daily_cache_path)
