@@ -1545,7 +1545,6 @@ def run_pipeline(
         intraday_load_features=intraday_features,
         solar_df=solar_df,
     )
-    train_df.attrs["config"] = config
     _progress(progress_callback, "Built training frame", advance=1)
 
     features = [c for c in XGB_FEATURES if c in train_df.columns]
