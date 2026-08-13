@@ -992,12 +992,6 @@ def build_recent_residual_profile(
     }
 
 
-def _row_with_buckets(row: pd.Series) -> pd.Series:
-    tmp = pd.DataFrame([row.to_dict()])
-    tmp = _add_weather_residual_buckets(tmp)
-    return tmp.iloc[0]
-
-
 def _weighted_recent_correction(
     row: pd.Series,
     profile: dict,
@@ -1031,7 +1025,6 @@ def _weighted_recent_correction(
     w_loss_hg = float(weights.get("solar_loss_hourgroup", 0.03))
     w_temp_cloud_hg = float(weights.get("temp_cloud_hourgroup", 0.01))
 
-    row = _row_with_buckets(row)
     hour = int(row.get("Hour", pd.to_datetime(row.get("DT")).hour))
     hourgroup = str(row.get("HourGroup", _hour_group(hour)))
     temp_bucket = (
