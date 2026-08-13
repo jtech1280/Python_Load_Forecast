@@ -1049,12 +1049,69 @@ def _scope_mask(
     return mask.fillna(False), cooling.fillna(False)
 
 
+def _daily_peak_rows(
+    candidates: pd.DataFrame, agg_max_cols: list[str]
+) -> pd.DataFrame | None:
+    """Vectorized replacement for "iterate per calendar day, find the base-forecast peak
+    row and the actual-load peak row (which may differ), plus max-aggregate a set of
+    columns across all scope-passing hours that day" -- the pattern shared by
+    _daily_training_frame and _daily_persistence_training_frame. Iterating per date in
+    plain Python was the dominant cost when the lookback window is large (e.g. the
+    calibration.rare_event_artifact_lookback_days_search 730-day window): 730+
+    iterations of groupby-slice/idxmax/loc/float() calls, repeated for every origin and
+    every Optuna trial.
+
+    `candidates` must already be scope-filtered and carry _Date, _Base, _Actual, _Hour,
+    _Month, _ForecastDay, _Same7, _Lag24, plus every column in agg_max_cols. Returns one
+    row per date (indexed by _Date) with the base-peak row's own columns plus
+    _ActualPeak/_ActualPeakHour and the requested max-aggregates, restricted to dates
+    with both a finite base peak and a finite actual peak -- mirrors the original loop's
+    "skip if base/actual values are empty after dropna" and "skip if either peak isn't
+    finite" checks. Returns None if no date qualifies (matches the original returning an
+    empty frame in that case).
+    """
+    if candidates.empty:
+        return None
+    base_candidates = candidates.dropna(subset=["_Base"])
+    actual_candidates = candidates.dropna(subset=["_Actual"])
+    if base_candidates.empty or actual_candidates.empty:
+        return None
+
+    base_idx = base_candidates.groupby("_Date")["_Base"].idxmax()
+    actual_idx = actual_candidates.groupby("_Date")["_Actual"].idxmax()
+    common_dates = base_idx.index.intersection(actual_idx.index)
+    if common_dates.empty:
+        return None
+    base_idx = base_idx.loc[common_dates]
+    actual_idx = actual_idx.loc[common_dates]
+
+    peak_rows = candidates.loc[base_idx.to_numpy()].copy()
+    peak_rows.index = common_dates
+    peak_rows["_ActualPeak"] = candidates.loc[
+        actual_idx.to_numpy(), "_Actual"
+    ].to_numpy()
+    peak_rows["_ActualPeakHour"] = candidates.loc[
+        actual_idx.to_numpy(), "_Hour"
+    ].to_numpy()
+
+    if agg_max_cols:
+        aggs = candidates.groupby("_Date")[agg_max_cols].max().loc[common_dates]
+        for col in agg_max_cols:
+            peak_rows[col] = aggs[col].to_numpy()
+
+    finite = np.isfinite(peak_rows["_Base"].astype(float)) & np.isfinite(
+        peak_rows["_ActualPeak"].astype(float)
+    )
+    peak_rows = peak_rows[finite]
+    return peak_rows if not peak_rows.empty else None
+
+
 def _daily_training_frame(
     values: pd.DataFrame, cfg: dict, forecast_col: str
 ) -> pd.DataFrame:
     if values is None or values.empty:
         return pd.DataFrame()
-    work = values.copy()
+    work = values.copy().reset_index(drop=True)
     dt = _local_datetime(work)
     work["_Date"] = _date(work, dt=dt)
     work["_Hour"] = _hour(work, dt=dt).astype(int)
@@ -1083,63 +1140,55 @@ def _daily_training_frame(
     )
     work["_Scope"] = scope & ~cooling
 
-    rows: list[dict[str, Any]] = []
-    for date, group in work.groupby("_Date", dropna=False):
-        candidates = group[group["_Scope"]].copy()
-        if candidates.empty:
-            continue
-        base_values = _as_num(candidates["_Base"], candidates.index).dropna()
-        actual_values = _as_num(candidates["_Actual"], candidates.index).dropna()
-        if base_values.empty or actual_values.empty:
-            continue
-        base_peak_idx = base_values.idxmax()
-        actual_peak_idx = actual_values.idxmax()
-        base_row = candidates.loc[base_peak_idx]
-        actual_row = candidates.loc[actual_peak_idx]
-        base_peak = float(base_row["_Base"])
-        actual_peak = float(actual_row["_Actual"])
-        if not (np.isfinite(base_peak) and np.isfinite(actual_peak)):
-            continue
-        daily_max = float(candidates["_DailyMax"].max())
-        ramp = float(candidates["_Ramp1D"].max())
-        cloud = float(candidates["_Cloud"].max())
-        forecast_day = float(base_row["_ForecastDay"])
-        same7 = float(base_row["_Same7"]) if pd.notna(base_row["_Same7"]) else np.nan
-        lag24 = float(base_row["_Lag24"]) if pd.notna(base_row["_Lag24"]) else np.nan
-        rows.append(
-            {
-                "Date": str(date),
-                "Forecast_Day": forecast_day,
-                "HorizonBucket": _horizon_bucket(forecast_day),
-                "Month": (
-                    int(base_row["_Month"]) if pd.notna(base_row["_Month"]) else np.nan
-                ),
-                "DailyMaxTempBucket": _temp_bucket(daily_max),
-                "CloudCoverBucket": _cloud_bucket(cloud),
-                "Temperature_DailyMax": daily_max,
-                "DailyMaxTemp_Ramp_1Day": ramp,
-                "CloudCover_Max": cloud,
-                "Base_PeakHour": float(base_row["_Hour"]),
-                "Actual_PeakHour": float(actual_row["_Hour"]),
-                "Base_DailyPeak_MWH": base_peak,
-                "Actual_DailyPeak_MWH": actual_peak,
-                "Target_PeakResidual_MWH": actual_peak - base_peak,
-                "SameHour7_AtBasePeak_MWH": same7,
-                "SameHour7_TargetResidual_MWH": (
-                    actual_peak - same7 if np.isfinite(same7) else np.nan
-                ),
-                "Lag24_AtBasePeak_MWH": lag24,
-                "Lag24_TargetResidual_MWH": (
-                    actual_peak - lag24 if np.isfinite(lag24) else np.nan
-                ),
-                "Lag24_RampSlope_MWH_Per_F": (
-                    (actual_peak - lag24) / max(ramp, 1.0)
-                    if np.isfinite(lag24)
-                    else np.nan
-                ),
-            }
-        )
-    return pd.DataFrame(rows)
+    peak_rows = _daily_peak_rows(
+        work[work["_Scope"]], ["_DailyMax", "_Ramp1D", "_Cloud"]
+    )
+    if peak_rows is None:
+        return pd.DataFrame()
+
+    forecast_day = peak_rows["_ForecastDay"].astype(float)
+    daily_max = peak_rows["_DailyMax"].astype(float)
+    ramp = peak_rows["_Ramp1D"].astype(float)
+    cloud = peak_rows["_Cloud"].astype(float)
+    base_peak = peak_rows["_Base"].astype(float)
+    actual_peak = peak_rows["_ActualPeak"].astype(float)
+    same7 = pd.to_numeric(peak_rows["_Same7"], errors="coerce")
+    lag24 = pd.to_numeric(peak_rows["_Lag24"], errors="coerce")
+    same7_finite = np.isfinite(same7.to_numpy())
+    lag24_finite = np.isfinite(lag24.to_numpy())
+    ramp_floor = ramp.clip(lower=1.0).to_numpy()
+
+    return pd.DataFrame(
+        {
+            "Date": [str(d) for d in peak_rows.index],
+            "Forecast_Day": forecast_day.to_numpy(),
+            "HorizonBucket": [_horizon_bucket(v) for v in forecast_day.to_numpy()],
+            "Month": peak_rows["_Month"].astype(float).to_numpy(),
+            "DailyMaxTempBucket": [_temp_bucket(v) for v in daily_max.to_numpy()],
+            "CloudCoverBucket": [_cloud_bucket(v) for v in cloud.to_numpy()],
+            "Temperature_DailyMax": daily_max.to_numpy(),
+            "DailyMaxTemp_Ramp_1Day": ramp.to_numpy(),
+            "CloudCover_Max": cloud.to_numpy(),
+            "Base_PeakHour": peak_rows["_Hour"].astype(float).to_numpy(),
+            "Actual_PeakHour": peak_rows["_ActualPeakHour"].astype(float).to_numpy(),
+            "Base_DailyPeak_MWH": base_peak.to_numpy(),
+            "Actual_DailyPeak_MWH": actual_peak.to_numpy(),
+            "Target_PeakResidual_MWH": (actual_peak - base_peak).to_numpy(),
+            "SameHour7_AtBasePeak_MWH": same7.to_numpy(),
+            "SameHour7_TargetResidual_MWH": np.where(
+                same7_finite, actual_peak.to_numpy() - same7.to_numpy(), np.nan
+            ),
+            "Lag24_AtBasePeak_MWH": lag24.to_numpy(),
+            "Lag24_TargetResidual_MWH": np.where(
+                lag24_finite, actual_peak.to_numpy() - lag24.to_numpy(), np.nan
+            ),
+            "Lag24_RampSlope_MWH_Per_F": np.where(
+                lag24_finite,
+                (actual_peak.to_numpy() - lag24.to_numpy()) / ramp_floor,
+                np.nan,
+            ),
+        }
+    ).reset_index(drop=True)
 
 
 def _persistence_scope_mask(
@@ -1218,7 +1267,7 @@ def _daily_persistence_training_frame(
 ) -> pd.DataFrame:
     if values is None or values.empty:
         return pd.DataFrame()
-    work = values.copy()
+    work = values.copy().reset_index(drop=True)
     dt = _local_datetime(work)
     work["_Date"] = _date(work, dt=dt)
     work["_Hour"] = _hour(work, dt=dt).astype(int)
@@ -1249,63 +1298,57 @@ def _daily_persistence_training_frame(
     )
     work["_Scope"] = scope & ~cooling
 
-    rows: list[dict[str, Any]] = []
-    for date, group in work.groupby("_Date", dropna=False):
-        candidates = group[group["_Scope"]].copy()
-        if candidates.empty:
-            continue
-        base_values = _as_num(candidates["_Base"], candidates.index).dropna()
-        actual_values = _as_num(candidates["_Actual"], candidates.index).dropna()
-        if base_values.empty or actual_values.empty:
-            continue
-        base_peak_idx = base_values.idxmax()
-        actual_peak_idx = actual_values.idxmax()
-        base_row = candidates.loc[base_peak_idx]
-        actual_row = candidates.loc[actual_peak_idx]
-        base_peak = float(base_row["_Base"])
-        actual_peak = float(actual_row["_Actual"])
-        if not (np.isfinite(base_peak) and np.isfinite(actual_peak)):
-            continue
-        daily_max = float(candidates["_DailyMax"].max())
-        ramp = float(candidates["_Ramp1D"].max())
-        dailymax_3day = float(candidates["_DailyMax3DayMean"].max())
-        consecutive_extreme = float(candidates["_ConsecutiveExtreme"].max())
-        cloud = float(candidates["_Cloud"].max())
-        forecast_day = float(base_row["_ForecastDay"])
-        same7 = float(base_row["_Same7"]) if pd.notna(base_row["_Same7"]) else np.nan
-        lag24 = float(base_row["_Lag24"]) if pd.notna(base_row["_Lag24"]) else np.nan
-        rows.append(
-            {
-                "Date": str(date),
-                "Forecast_Day": forecast_day,
-                "HorizonBucket": _horizon_bucket(forecast_day),
-                "Month": (
-                    int(base_row["_Month"]) if pd.notna(base_row["_Month"]) else np.nan
-                ),
-                "DailyMaxTempBucket": _temp_bucket(daily_max),
-                "CloudCoverBucket": _cloud_bucket(cloud),
-                "PersistenceBucket": _persistence_bucket(consecutive_extreme),
-                "Temperature_DailyMax": daily_max,
-                "DailyMaxTemp_Ramp_1Day": ramp,
-                "DailyMaxTemp_3DayMean": dailymax_3day,
-                "ConsecutiveExtremeHotDays100": consecutive_extreme,
-                "CloudCover_Max": cloud,
-                "Base_PeakHour": float(base_row["_Hour"]),
-                "Actual_PeakHour": float(actual_row["_Hour"]),
-                "Base_DailyPeak_MWH": base_peak,
-                "Actual_DailyPeak_MWH": actual_peak,
-                "Target_PeakResidual_MWH": actual_peak - base_peak,
-                "SameHour7_AtBasePeak_MWH": same7,
-                "SameHour7_TargetResidual_MWH": (
-                    actual_peak - same7 if np.isfinite(same7) else np.nan
-                ),
-                "Lag24_AtBasePeak_MWH": lag24,
-                "Lag24_TargetResidual_MWH": (
-                    actual_peak - lag24 if np.isfinite(lag24) else np.nan
-                ),
-            }
-        )
-    return pd.DataFrame(rows)
+    peak_rows = _daily_peak_rows(
+        work[work["_Scope"]],
+        ["_DailyMax", "_Ramp1D", "_DailyMax3DayMean", "_ConsecutiveExtreme", "_Cloud"],
+    )
+    if peak_rows is None:
+        return pd.DataFrame()
+
+    forecast_day = peak_rows["_ForecastDay"].astype(float)
+    daily_max = peak_rows["_DailyMax"].astype(float)
+    ramp = peak_rows["_Ramp1D"].astype(float)
+    dailymax_3day = peak_rows["_DailyMax3DayMean"].astype(float)
+    consecutive_extreme = peak_rows["_ConsecutiveExtreme"].astype(float)
+    cloud = peak_rows["_Cloud"].astype(float)
+    base_peak = peak_rows["_Base"].astype(float)
+    actual_peak = peak_rows["_ActualPeak"].astype(float)
+    same7 = pd.to_numeric(peak_rows["_Same7"], errors="coerce")
+    lag24 = pd.to_numeric(peak_rows["_Lag24"], errors="coerce")
+    same7_finite = np.isfinite(same7.to_numpy())
+    lag24_finite = np.isfinite(lag24.to_numpy())
+
+    return pd.DataFrame(
+        {
+            "Date": [str(d) for d in peak_rows.index],
+            "Forecast_Day": forecast_day.to_numpy(),
+            "HorizonBucket": [_horizon_bucket(v) for v in forecast_day.to_numpy()],
+            "Month": peak_rows["_Month"].astype(float).to_numpy(),
+            "DailyMaxTempBucket": [_temp_bucket(v) for v in daily_max.to_numpy()],
+            "CloudCoverBucket": [_cloud_bucket(v) for v in cloud.to_numpy()],
+            "PersistenceBucket": [
+                _persistence_bucket(v) for v in consecutive_extreme.to_numpy()
+            ],
+            "Temperature_DailyMax": daily_max.to_numpy(),
+            "DailyMaxTemp_Ramp_1Day": ramp.to_numpy(),
+            "DailyMaxTemp_3DayMean": dailymax_3day.to_numpy(),
+            "ConsecutiveExtremeHotDays100": consecutive_extreme.to_numpy(),
+            "CloudCover_Max": cloud.to_numpy(),
+            "Base_PeakHour": peak_rows["_Hour"].astype(float).to_numpy(),
+            "Actual_PeakHour": peak_rows["_ActualPeakHour"].astype(float).to_numpy(),
+            "Base_DailyPeak_MWH": base_peak.to_numpy(),
+            "Actual_DailyPeak_MWH": actual_peak.to_numpy(),
+            "Target_PeakResidual_MWH": (actual_peak - base_peak).to_numpy(),
+            "SameHour7_AtBasePeak_MWH": same7.to_numpy(),
+            "SameHour7_TargetResidual_MWH": np.where(
+                same7_finite, actual_peak.to_numpy() - same7.to_numpy(), np.nan
+            ),
+            "Lag24_AtBasePeak_MWH": lag24.to_numpy(),
+            "Lag24_TargetResidual_MWH": np.where(
+                lag24_finite, actual_peak.to_numpy() - lag24.to_numpy(), np.nan
+            ),
+        }
+    ).reset_index(drop=True)
 
 
 def _mean_if_valid(series: pd.Series, default: float = 0.0) -> float:
