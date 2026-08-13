@@ -482,6 +482,21 @@ class RecentResidualBacktestVectorizationTests(unittest.TestCase):
         new_out = simulate_recent_residual_correction_backtest(df.copy(), config=cfg)
         _assert_frames_match(ref_out, new_out, "duplicate_dt")
 
+    def test_missing_optional_weather_columns_entirely(self):
+        """Regression test: Temperature_DailyMax/CloudCover_Norm/Forecast_Day/Season absent
+        as COLUMNS (not just NaN values within a present column) used to crash the
+        vectorized hot-peak/horizon-regime scale helpers, since out.get(missing_col)
+        returns a bare None rather than an all-NaN Series."""
+        df = _random_frame(np.random.default_rng(19), 60)
+        df = df.drop(
+            columns=["Temperature_DailyMax", "CloudCover_Norm", "Forecast_Day", "Season"],
+            errors="ignore",
+        )
+        cfg = _random_cfg(np.random.default_rng(20), False, False)
+        ref_out = _reference_simulate_recent_residual_correction_backtest(df.copy(), config=cfg)
+        new_out = simulate_recent_residual_correction_backtest(df.copy(), config=cfg)
+        _assert_frames_match(ref_out, new_out, "missing_optional_weather_columns")
+
     def test_tiny_and_huge_windows(self):
         tiny_cfg = _random_cfg(np.random.default_rng(15), False, True)
         tiny_cfg["calibration"]["recent_residual"]["recent_hours"] = 1

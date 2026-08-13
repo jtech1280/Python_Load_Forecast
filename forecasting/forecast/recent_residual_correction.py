@@ -11,6 +11,120 @@ def _as_num(s: pd.Series | Any) -> pd.Series:
     return pd.to_numeric(s, errors="coerce")
 
 
+def _col_or_nan(df: pd.DataFrame, col: str) -> pd.Series:
+    """df[col] if present, else an all-NaN Series aligned to df's index. Unlike df.get(col),
+    which returns a bare None for a missing column, this always returns something safe to
+    pass through pd.to_numeric(...).to_numpy() in the vectorized helpers below."""
+    if col in df.columns:
+        return df[col]
+    return pd.Series(np.nan, index=df.index)
+
+
+_MONTH_TO_SEASON = np.array(
+    [
+        "",
+        "Winter",
+        "Winter",
+        "Spring",
+        "Spring",
+        "Spring",
+        "Summer",
+        "Summer",
+        "Summer",
+        "Summer",
+        "Fall",
+        "Fall",
+        "Winter",
+    ],
+    dtype=object,
+)
+
+
+def _effective_season_array(out: pd.DataFrame) -> np.ndarray:
+    """Row's own Season column, falling back to a month-derived season where missing --
+    vectorized equivalent of the `if pd.isna(season): season = _season_from_month(...)`
+    branch shared by the two scale functions below."""
+    n = len(out)
+    if "Season" in out.columns:
+        season = out["Season"].to_numpy(dtype=object)
+    else:
+        season = np.full(n, None, dtype=object)
+    missing = pd.isna(pd.Series(season, index=out.index)).to_numpy()
+    if missing.any():
+        month_arr = out["DT"].dt.month.fillna(0).astype(int).to_numpy()
+        month_arr = np.clip(month_arr, 0, 12)
+        fallback = _MONTH_TO_SEASON[month_arr]
+        season = np.where(missing, fallback, season)
+    return season
+
+
+def _recent_hot_peak_scale_vectorized(out: pd.DataFrame, recent_cfg: dict) -> np.ndarray:
+    hot_cfg = recent_cfg.get("hot_peak", {}) or {}
+    hours = np.array([int(h) for h in hot_cfg.get("hours", [16, 17, 18, 19, 20])])
+    hour = out["Hour"].to_numpy()
+    daily_max = pd.to_numeric(_col_or_nan(out, "Temperature_DailyMax"), errors="coerce").to_numpy()
+    min_maxtemp = float(hot_cfg.get("min_maxtemp_f", 90.0))
+    in_hot_window = np.isin(hour, hours) & np.isfinite(daily_max) & (daily_max >= min_maxtemp)
+
+    season = _effective_season_array(out)
+    season_scales = hot_cfg.get("season_scales", {}) or {}
+    default_scale = float(hot_cfg.get("default_scale", 1.0))
+    season_scale = np.array(
+        [float(season_scales.get(str(s), default_scale)) for s in season], dtype=float
+    )
+    return np.where(in_hot_window, season_scale, 1.0)
+
+
+def _forecast_day_array(out: pd.DataFrame, horizon_index: int | None = None) -> np.ndarray:
+    day = pd.to_numeric(_col_or_nan(out, "Forecast_Day"), errors="coerce").to_numpy()
+    h = max(1, int(horizon_index or 1))
+    fallback = int(math.ceil(h / 24.0))
+    finite = np.isfinite(day)
+    return np.where(finite, np.maximum(1, np.nan_to_num(day, nan=1.0).astype(int)), fallback)
+
+
+def _recent_horizon_regime_scale_vectorized(
+    out: pd.DataFrame, recent_cfg: dict, horizon_index: int | None = None
+) -> np.ndarray:
+    scale_cfg = recent_cfg.get("horizon_regime_scales", {}) or {}
+    forecast_day = _forecast_day_array(out, horizon_index)
+
+    day_scales = scale_cfg.get("forecast_day_scales", {}) or {}
+    conditions = [
+        (forecast_day >= 2) & (forecast_day <= 3),
+        (forecast_day >= 4) & (forecast_day <= 7),
+        forecast_day >= 8,
+    ]
+    choices = [
+        float(day_scales.get("days2to3", 1.0)),
+        float(day_scales.get("days4to7", 1.0)),
+        float(day_scales.get("days8plus", 1.0)),
+    ]
+    scale = np.select(conditions, choices, default=1.0)
+
+    hot_clear_cfg = scale_cfg.get("summer_clear_hot_days2to7", {}) or {}
+    if bool(hot_clear_cfg.get("enabled", False)):
+        eligible_day = (forecast_day >= 2) & (forecast_day <= 7)
+        season = _effective_season_array(out)
+        daily_max = pd.to_numeric(_col_or_nan(out, "Temperature_DailyMax"), errors="coerce").to_numpy()
+        cloud = pd.to_numeric(_col_or_nan(out, "CloudCover_Norm"), errors="coerce").to_numpy()
+        cloud_finite = np.isfinite(cloud)
+        cloud = np.where(cloud_finite & (cloud > 1.5), cloud / 100.0, cloud)
+        min_temp = float(hot_clear_cfg.get("min_maxtemp_f", 90.0))
+        max_cloud = float(hot_clear_cfg.get("max_cloud_cover_norm", 0.20))
+        hot_clear_mask = (
+            eligible_day
+            & (season == "Summer")
+            & np.isfinite(daily_max)
+            & (daily_max >= min_temp)
+            & np.isfinite(cloud)
+            & (cloud <= max_cloud)
+        )
+        scale = np.where(hot_clear_mask, scale * float(hot_clear_cfg.get("scale", 1.0)), scale)
+
+    return np.clip(scale, 0.0, 2.0)
+
+
 def _hour_group(hour: int) -> str:
     h = int(hour)
     if 0 <= h <= 5:
@@ -1319,15 +1433,9 @@ def simulate_recent_residual_correction_backtest(
             name for name, is_present in zip(names, present[i]) if is_present
         )
 
-    correction_scale = np.ones(n)
-    matched_idx = np.nonzero(has_match)[0]
-    if matched_idx.size:
-        scale_frame = out.iloc[matched_idx]
-        computed_scale = scale_frame.apply(
-            lambda row: _recent_hot_peak_scale(row, c) * _recent_horizon_regime_scale(row, c),
-            axis=1,
-        )
-        correction_scale[matched_idx] = computed_scale.to_numpy()
+    correction_scale = _recent_hot_peak_scale_vectorized(
+        out, c
+    ) * _recent_horizon_regime_scale_vectorized(out, c)
 
     base_correction = np.where(
         has_match, np.clip(raw * blend * correction_scale, -cap, cap), 0.0
