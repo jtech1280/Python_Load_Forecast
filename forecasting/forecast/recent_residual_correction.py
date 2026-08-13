@@ -1102,6 +1102,55 @@ def apply_recent_residual_correction(
     return out
 
 
+def _factorize_series(s: pd.Series) -> tuple[np.ndarray, int]:
+    codes, uniques = pd.factorize(s, sort=False, use_na_sentinel=True)
+    return codes, len(uniques)
+
+
+def _combo_codes(*parts: pd.Series) -> tuple[np.ndarray, int]:
+    mask = pd.Series(True, index=parts[0].index)
+    for p in parts:
+        mask = mask & p.notna()
+    joined = parts[0].astype(str)
+    for p in parts[1:]:
+        joined = joined + "\x00" + p.astype(str)
+    combo = joined.where(mask, other=np.nan)
+    return _factorize_series(combo)
+
+
+def _range_source_means(
+    valid_mask: np.ndarray,
+    resid_valid: np.ndarray,
+    row_codes: np.ndarray,
+    n_categories: int,
+    left_idx: np.ndarray,
+    right_idx: np.ndarray,
+    cap: float,
+) -> np.ndarray:
+    """Causal (prior-rows-only), category-grouped mean of resid_valid over [left_idx, right_idx)
+    positions of the valid-residual subsequence, evaluated per row against that row's own
+    category code. NaN where the row's own category is missing (code < 0) or the range has
+    no matching observations."""
+    codes_valid = row_codes[valid_mask]
+    n_valid = len(resid_valid)
+    n_cat = max(1, n_categories)
+    contrib_sum = np.zeros((n_valid, n_cat))
+    contrib_cnt = np.zeros((n_valid, n_cat))
+    ok = codes_valid >= 0
+    idx = np.nonzero(ok)[0]
+    contrib_sum[idx, codes_valid[ok]] = resid_valid[ok]
+    contrib_cnt[idx, codes_valid[ok]] = 1.0
+    csum = np.vstack([np.zeros((1, n_cat)), np.cumsum(contrib_sum, axis=0)])
+    ccnt = np.vstack([np.zeros((1, n_cat)), np.cumsum(contrib_cnt, axis=0)])
+
+    k = np.clip(row_codes, 0, n_cat - 1)
+    total = csum[right_idx, k] - csum[left_idx, k]
+    count = ccnt[right_idx, k] - ccnt[left_idx, k]
+    safe_count = np.where(count > 0, count, 1.0)
+    mean = np.where((count > 0) & (row_codes >= 0), total / safe_count, np.nan)
+    return np.clip(mean, -cap, cap)
+
+
 def simulate_recent_residual_correction_backtest(
     backtest_df: pd.DataFrame,
     config: dict | None = None,
@@ -1109,9 +1158,13 @@ def simulate_recent_residual_correction_backtest(
 ) -> pd.DataFrame:
     """Simulate the recent correction over a backtest using only prior residuals for each row.
 
-    This implementation is intentionally lightweight because it runs every normal forecast run.
-    It uses only residuals from earlier holdout hours and matches future rows to prior rows by
-    hour, hour group, temperature bucket, cloud bucket, solar bucket, and solar-loss bucket.
+    Vectorized: for every row this used to slice a growing DataFrame (out.iloc[:i]) and run
+    ~8 boolean-mask filters against it, which is O(n^2)-ish in pandas overhead and became the
+    dominant cost once this ran on multi-hundred-day extended-lookback frames (Optuna search,
+    hot_ramp/heat_persistence lookup basis). It now computes the same causal, per-source means
+    via prefix-sum range queries over a factorized category index, with no per-row DataFrame
+    slicing. The AR-residual / origin-day-state carryover (both disabled by default) still need
+    a growing history and fall back to the original per-row loop only when either is enabled.
     """
     c = _cfg(config)
     out = backtest_df.copy().sort_values("DT").reset_index(drop=True)
@@ -1163,190 +1216,209 @@ def simulate_recent_residual_correction_backtest(
     cap = float(c.get("cap_mwh", 10.0))
     blend = float(c.get("blend", 0.85))
 
-    corrections: list[float] = []
-    sources: list[str] = []
-    ar_corrections: list[float] = []
-    ar_phis: list[float] = []
-    ar_latest_residuals: list[float] = []
-    ar_sources: list[str] = []
-    origin_day_corrections: list[float] = []
-    origin_day_states: list[float] = []
-    origin_day_latest_days: list[float] = []
-    origin_day_sources: list[str] = []
+    n = len(out)
+    valid_mask = out["_RecentBasisResidual"].notna().to_numpy()
+    resid_valid = out.loc[valid_mask, "_RecentBasisResidual"].to_numpy(dtype=float)
+    valid_dt = out.loc[valid_mask, "DT"].to_numpy()
 
-    def add(
-        vals: list[tuple[str, float, float]],
-        name: str,
-        series: pd.Series,
-        weight: float,
-    ):
-        if weight <= 0 or series.empty:
-            return
-        v = pd.to_numeric(series, errors="coerce").mean()
-        if np.isfinite(v):
-            vals.append((name, float(np.clip(v, -cap, cap)), float(weight)))
+    cumsum_valid = np.cumsum(valid_mask.astype(np.int64))
+    pos_i = np.concatenate([[0], cumsum_valid[:-1]]) if n else np.array([], dtype=np.int64)
 
-    for i, row in out.iterrows():
-        hist = out.iloc[:i]
-        hist = hist[
-            pd.to_numeric(hist["_RecentBasisResidual"], errors="coerce").notna()
-        ]
-        if hist.empty:
-            corrections.append(0.0)
-            sources.append("insufficient_prior_residuals")
-            ar_corrections.append(0.0)
-            ar_phis.append(np.nan)
-            ar_latest_residuals.append(np.nan)
-            ar_sources.append("ar_disabled_or_empty")
-            origin_day_corrections.append(0.0)
-            origin_day_states.append(np.nan)
-            origin_day_latest_days.append(np.nan)
-            origin_day_sources.append("origin_day_disabled_or_empty")
-            continue
+    thresholds = (out["DT"] - pd.Timedelta(days=max(1, same_hour_days))).to_numpy()
+    if len(valid_dt):
+        window_left_raw = np.searchsorted(valid_dt, thresholds, side="left")
+    else:
+        window_left_raw = np.zeros(n, dtype=np.int64)
+    window_left_raw = np.minimum(window_left_raw, pos_i)
+    window_empty = window_left_raw >= pos_i
+    window_left = np.where(window_empty, 0, window_left_raw)
+    window_right = pos_i
 
-        vals: list[tuple[str, float, float]] = []
-        same_window_start = row["DT"] - pd.Timedelta(days=max(1, same_hour_days))
-        same_window = hist[hist["DT"] >= same_window_start]
-        if same_window.empty:
-            same_window = hist
+    zero_codes = np.zeros(n, dtype=np.int64)
+    hour_codes, n_hour = _factorize_series(out["Hour"])
+    hourgroup_codes, n_hourgroup = _factorize_series(out["HourGroup"])
+    temp_hg_codes, n_temp_hg = _combo_codes(out["DailyMaxTempBucket"], out["HourGroup"])
+    cloud_hg_codes, n_cloud_hg = _combo_codes(out["CloudCoverBucket"], out["HourGroup"])
+    solar_hg_codes, n_solar_hg = _combo_codes(out["BTMSolarBucket"], out["HourGroup"])
+    loss_hg_codes, n_loss_hg = _combo_codes(out["SolarLossBucket"], out["HourGroup"])
+    temp_cloud_hg_codes, n_temp_cloud_hg = _combo_codes(
+        out["DailyMaxTempBucket"], out["CloudCoverBucket"], out["HourGroup"]
+    )
 
-        add(
-            vals,
-            "recent_mean",
-            hist.tail(max(1, recent_hours))["_RecentBasisResidual"],
-            w_recent,
-        )
-        add(
-            vals,
-            "last24_mean",
-            hist.tail(min(24, len(hist)))["_RecentBasisResidual"],
-            w_last24,
-        )
-        add(
-            vals,
-            "same_hour",
-            same_window.loc[
-                same_window["Hour"].eq(row["Hour"]), "_RecentBasisResidual"
-            ],
-            w_same,
-        )
-        add(
-            vals,
-            "hourgroup",
-            same_window.loc[
-                same_window["HourGroup"].eq(row["HourGroup"]), "_RecentBasisResidual"
-            ],
-            w_hourgroup,
-        )
-        add(vals, "global", hist["_RecentBasisResidual"], w_global)
-        if pd.notna(row.get("DailyMaxTempBucket")):
-            add(
-                vals,
-                "temp_hourgroup",
-                same_window.loc[
-                    same_window["DailyMaxTempBucket"].eq(row.get("DailyMaxTempBucket"))
-                    & same_window["HourGroup"].eq(row["HourGroup"]),
-                    "_RecentBasisResidual",
-                ],
-                w_temp_hg,
-            )
-        if pd.notna(row.get("CloudCoverBucket")):
-            add(
-                vals,
-                "cloud_hourgroup",
-                same_window.loc[
-                    same_window["CloudCoverBucket"].eq(row.get("CloudCoverBucket"))
-                    & same_window["HourGroup"].eq(row["HourGroup"]),
-                    "_RecentBasisResidual",
-                ],
-                w_cloud_hg,
-            )
-        if pd.notna(row.get("BTMSolarBucket")):
-            add(
-                vals,
-                "solar_hourgroup",
-                same_window.loc[
-                    same_window["BTMSolarBucket"].eq(row.get("BTMSolarBucket"))
-                    & same_window["HourGroup"].eq(row["HourGroup"]),
-                    "_RecentBasisResidual",
-                ],
-                w_solar_hg,
-            )
-        if pd.notna(row.get("SolarLossBucket")):
-            add(
-                vals,
-                "solar_loss_hourgroup",
-                same_window.loc[
-                    same_window["SolarLossBucket"].eq(row.get("SolarLossBucket"))
-                    & same_window["HourGroup"].eq(row["HourGroup"]),
-                    "_RecentBasisResidual",
-                ],
-                w_loss_hg,
-            )
-        if pd.notna(row.get("DailyMaxTempBucket")) and pd.notna(
-            row.get("CloudCoverBucket")
-        ):
-            add(
-                vals,
-                "temp_cloud_hourgroup",
-                same_window.loc[
-                    same_window["DailyMaxTempBucket"].eq(row.get("DailyMaxTempBucket"))
-                    & same_window["CloudCoverBucket"].eq(row.get("CloudCoverBucket"))
-                    & same_window["HourGroup"].eq(row["HourGroup"]),
-                    "_RecentBasisResidual",
-                ],
-                w_temp_cloud_hg,
-            )
+    recent_left = np.maximum(0, pos_i - recent_hours)
+    last24_left = np.maximum(0, pos_i - 24)
 
-        if vals:
-            raw = sum(v * w for _, v, w in vals) / sum(w for _, _, w in vals)
-            correction_scale = _recent_hot_peak_scale(
-                row, c
-            ) * _recent_horizon_regime_scale(row, c)
-            base_correction = float(np.clip(raw * blend * correction_scale, -cap, cap))
-            base_source = "+".join(name for name, _, _ in vals)
-        else:
-            base_correction = 0.0
-            base_source = "no_match"
-
-        residual_state_profile = {
-            "enabled": True,
-            "ar_residual": _build_ar_residual_state(
-                hist, c, residual_col="_RecentBasisResidual"
-            ),
-            "origin_day_state": _build_origin_day_state(
-                hist, c, residual_col="_RecentBasisResidual"
-            ),
-        }
+    sources_spec = [
+        ("recent_mean", zero_codes, 1, recent_left, pos_i, w_recent),
+        ("last24_mean", zero_codes, 1, last24_left, pos_i, w_last24),
+        ("same_hour", hour_codes, n_hour, window_left, window_right, w_same),
+        ("hourgroup", hourgroup_codes, n_hourgroup, window_left, window_right, w_hourgroup),
+        ("global", zero_codes, 1, np.zeros(n, dtype=np.int64), pos_i, w_global),
         (
-            correction,
-            source,
-            ar_corr,
-            ar_phi,
-            ar_latest,
-            ar_source,
-            origin_day_corr,
-            origin_day_state,
-            origin_day_latest,
-            origin_day_source,
-        ) = _combine_recent_and_ar_corrections(
-            base_correction,
-            base_source,
-            row,
-            residual_state_profile,
-            c,
-            horizon_index=1,
+            "temp_hourgroup",
+            temp_hg_codes,
+            n_temp_hg,
+            window_left,
+            window_right,
+            w_temp_hg,
+        ),
+        (
+            "cloud_hourgroup",
+            cloud_hg_codes,
+            n_cloud_hg,
+            window_left,
+            window_right,
+            w_cloud_hg,
+        ),
+        (
+            "solar_hourgroup",
+            solar_hg_codes,
+            n_solar_hg,
+            window_left,
+            window_right,
+            w_solar_hg,
+        ),
+        (
+            "solar_loss_hourgroup",
+            loss_hg_codes,
+            n_loss_hg,
+            window_left,
+            window_right,
+            w_loss_hg,
+        ),
+        (
+            "temp_cloud_hourgroup",
+            temp_cloud_hg_codes,
+            n_temp_cloud_hg,
+            window_left,
+            window_right,
+            w_temp_cloud_hg,
+        ),
+    ]
+
+    values = np.full((n, len(sources_spec)), np.nan)
+    weights_arr = np.array([spec[5] for spec in sources_spec], dtype=float)
+    for col, (name, codes, n_cat, left, right, weight) in enumerate(sources_spec):
+        if weight <= 0:
+            continue
+        values[:, col] = _range_source_means(
+            valid_mask, resid_valid, codes, n_cat, left, right, cap
         )
-        corrections.append(correction)
-        sources.append(source)
-        ar_corrections.append(ar_corr)
-        ar_phis.append(ar_phi)
-        ar_latest_residuals.append(ar_latest)
-        ar_sources.append(ar_source)
-        origin_day_corrections.append(origin_day_corr)
-        origin_day_states.append(origin_day_state)
-        origin_day_latest_days.append(origin_day_latest)
-        origin_day_sources.append(origin_day_source)
+
+    present = np.isfinite(values) & (weights_arr[None, :] > 0)
+    weighted_vals = np.where(present, values * weights_arr[None, :], 0.0)
+    denom = np.where(present, weights_arr[None, :], 0.0).sum(axis=1)
+    numer = weighted_vals.sum(axis=1)
+    has_match = denom > 0
+    raw = np.where(has_match, numer / np.where(has_match, denom, 1.0), 0.0)
+
+    names = [spec[0] for spec in sources_spec]
+    joined_names = np.empty(n, dtype=object)
+    for i in range(n):
+        joined_names[i] = "+".join(
+            name for name, is_present in zip(names, present[i]) if is_present
+        )
+
+    correction_scale = np.ones(n)
+    matched_idx = np.nonzero(has_match)[0]
+    if matched_idx.size:
+        scale_frame = out.iloc[matched_idx]
+        computed_scale = scale_frame.apply(
+            lambda row: _recent_hot_peak_scale(row, c) * _recent_horizon_regime_scale(row, c),
+            axis=1,
+        )
+        correction_scale[matched_idx] = computed_scale.to_numpy()
+
+    base_correction = np.where(
+        has_match, np.clip(raw * blend * correction_scale, -cap, cap), 0.0
+    )
+    base_source = np.where(
+        pos_i == 0,
+        "insufficient_prior_residuals",
+        np.where(has_match, joined_names, "no_match"),
+    )
+
+    ar_cfg = _ar_config(c)
+    origin_cfg = _origin_day_config(c)
+    ar_enabled = bool(ar_cfg.get("enabled", False))
+    origin_enabled = bool(origin_cfg.get("enabled", False))
+
+    if not ar_enabled and not origin_enabled:
+        corrections = base_correction
+        sources = base_source
+        ar_corrections = np.zeros(n)
+        ar_phis = np.full(n, np.nan)
+        ar_latest_residuals = np.full(n, np.nan)
+        ar_sources = np.full(n, "ar_disabled_or_empty", dtype=object)
+        origin_day_corrections = np.zeros(n)
+        origin_day_states = np.full(n, np.nan)
+        origin_day_latest_days = np.full(n, np.nan)
+        origin_day_sources = np.full(n, "origin_day_disabled_or_empty", dtype=object)
+    else:
+        corrections = np.empty(n)
+        sources = np.empty(n, dtype=object)
+        ar_corrections = np.empty(n)
+        ar_phis = np.empty(n)
+        ar_latest_residuals = np.empty(n)
+        ar_sources = np.empty(n, dtype=object)
+        origin_day_corrections = np.empty(n)
+        origin_day_states = np.empty(n)
+        origin_day_latest_days = np.empty(n)
+        origin_day_sources = np.empty(n, dtype=object)
+        for i in range(n):
+            if pos_i[i] == 0:
+                corrections[i] = 0.0
+                sources[i] = "insufficient_prior_residuals"
+                ar_corrections[i] = 0.0
+                ar_phis[i] = np.nan
+                ar_latest_residuals[i] = np.nan
+                ar_sources[i] = "ar_disabled_or_empty"
+                origin_day_corrections[i] = 0.0
+                origin_day_states[i] = np.nan
+                origin_day_latest_days[i] = np.nan
+                origin_day_sources[i] = "origin_day_disabled_or_empty"
+                continue
+            hist = out.iloc[:i]
+            hist = hist[hist["_RecentBasisResidual"].notna()]
+            row = out.iloc[i]
+            residual_state_profile = {
+                "enabled": True,
+                "ar_residual": _build_ar_residual_state(
+                    hist, c, residual_col="_RecentBasisResidual"
+                ),
+                "origin_day_state": _build_origin_day_state(
+                    hist, c, residual_col="_RecentBasisResidual"
+                ),
+            }
+            (
+                correction,
+                source,
+                ar_corr,
+                ar_phi,
+                ar_latest,
+                ar_source,
+                origin_day_corr,
+                origin_day_state,
+                origin_day_latest,
+                origin_day_source,
+            ) = _combine_recent_and_ar_corrections(
+                base_correction[i],
+                base_source[i],
+                row,
+                residual_state_profile,
+                c,
+                horizon_index=1,
+            )
+            corrections[i] = correction
+            sources[i] = source
+            ar_corrections[i] = ar_corr
+            ar_phis[i] = ar_phi
+            ar_latest_residuals[i] = ar_latest
+            ar_sources[i] = ar_source
+            origin_day_corrections[i] = origin_day_corr
+            origin_day_states[i] = origin_day_state
+            origin_day_latest_days[i] = origin_day_latest
+            origin_day_sources[i] = origin_day_source
 
     out["Recent_Level_Correction_MWH"] = corrections
     out["Recent_Correction_Source"] = sources
