@@ -230,7 +230,10 @@ def _production_ensemble_weights(config: dict) -> dict[str, float]:
 
 
 def rare_event_artifact_lookback_days(
-    config: dict, base_backtest_days: int
+    config: dict,
+    base_backtest_days: int,
+    *,
+    config_key: str = "rare_event_artifact_lookback_days",
 ) -> int | None:
     """Return the configured extra backtest length for the rare-event artifact lookback.
 
@@ -239,9 +242,19 @@ def rare_event_artifact_lookback_days(
     calibration.rare_event_artifact_lookback_days once train_min_maxtemp_f-style
     loosening alone isn't giving hot_ramp_peak_capture/heat_persistence_peak_capture
     enough training days.
+
+    config_key lets callers use a different value than the live/replay paths. The
+    extra backtest is expensive (one recursive XGB+LGB pass over the full lookback
+    window), and its cost-per-use varies a lot by caller: calibration_search.py's
+    --build-cache pays it once per origin and then reuses that cached data across
+    potentially hundreds of cheap Optuna trials (great amortization), while the live
+    forecast pays the full cost every single day just to correct one day's forecast,
+    and a replay pays it once per origin with no reuse. Per 2026-08-11 discussion,
+    calibration_search.py passes config_key="rare_event_artifact_lookback_days_search"
+    so it can carry its own (larger) value independently of the live/replay default.
     """
     cal_cfg = config.get("calibration", {}) or {}
-    raw = cal_cfg.get("rare_event_artifact_lookback_days")
+    raw = cal_cfg.get(config_key)
     if raw is None:
         return None
     try:

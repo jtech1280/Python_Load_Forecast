@@ -57,7 +57,9 @@ class RawOriginBundle:
     raw_weather_scenarios: dict[str, pd.DataFrame]
     # Optional longer-history raw backtest for hot_ramp_peak_capture/
     # heat_persistence_peak_capture's walk-forward lookup artifacts (see
-    # calibration.rare_event_artifact_lookback_days). None when unset -- matches
+    # calibration.rare_event_artifact_lookback_days_search -- a dedicated key so this
+    # tool's cache-once-reuse-many-trials use case can carry its own value independently
+    # of the live/replay default). None when unset -- matches
     # build_correction_artifacts' own default (no extra backtest, no behavior change).
     # Bundles pickled before this field existed won't have it; score_bundles() reads it
     # with getattr(..., None) so old caches still load, they just won't benefit from the
@@ -93,7 +95,11 @@ def build_raw_origin_bundles(
     if origin_limit is not None:
         origins = origins[: int(origin_limit)]
 
-    extended_lookback_days = rare_event_artifact_lookback_days(config, calibration_days)
+    extended_lookback_days = rare_event_artifact_lookback_days(
+        config,
+        calibration_days,
+        config_key="rare_event_artifact_lookback_days_search",
+    )
 
     bundles: list[RawOriginBundle] = []
     for origin_number, origin_dt in enumerate(origins, start=1):

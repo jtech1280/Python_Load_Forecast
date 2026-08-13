@@ -212,6 +212,28 @@ class RareEventArtifactLookbackDaysTests(unittest.TestCase):
             rare_event_artifact_lookback_days(config, base_backtest_days=45)
         )
 
+    def test_config_key_selects_an_independent_value(self):
+        """calibration_search.py passes config_key="rare_event_artifact_lookback_days_search"
+        so it can carry its own value independently of the live/replay default -- the two
+        keys must not interfere with each other."""
+        config = {
+            "calibration": {
+                "rare_event_artifact_lookback_days": None,
+                "rare_event_artifact_lookback_days_search": 730,
+            }
+        }
+        self.assertIsNone(
+            rare_event_artifact_lookback_days(config, base_backtest_days=45)
+        )
+        self.assertEqual(
+            rare_event_artifact_lookback_days(
+                config,
+                base_backtest_days=45,
+                config_key="rare_event_artifact_lookback_days_search",
+            ),
+            730,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -210,7 +210,7 @@ class ExtendedLookbackWiringTests(unittest.TestCase):
     def test_build_raw_origin_bundles_builds_extended_lookback_when_configured(self):
         dt = pd.Timestamp("2026-07-01")
         config = {
-            "calibration": {"rare_event_artifact_lookback_days": 730},
+            "calibration": {"rare_event_artifact_lookback_days_search": 730},
             "training": {"rolling_origin_replay": {"calibration_days": 45}},
         }
         with (
@@ -237,6 +237,37 @@ class ExtendedLookbackWiringTests(unittest.TestCase):
         self.assertTrue(second_call_kwargs["skip_catboost"])
         self.assertTrue(second_call_kwargs["skip_prophet"])
         self.assertIsNotNone(bundles[0].extended_lookback_raw)
+
+    def test_build_raw_origin_bundles_ignores_the_live_replay_key(self):
+        """rare_event_artifact_lookback_days (the live/replay key) must NOT affect
+        calibration_search.py -- it has its own independent
+        rare_event_artifact_lookback_days_search key so the two contexts, with very
+        different cost-per-use profiles, can be tuned separately."""
+        dt = pd.Timestamp("2026-07-01")
+        config = {
+            "calibration": {"rare_event_artifact_lookback_days": 730},
+            "training": {"rolling_origin_replay": {"calibration_days": 45}},
+        }
+        with (
+            patch(
+                "forecasting.tuning.calibration_search._origin_candidates",
+                return_value=[dt],
+            ),
+            patch(
+                "forecasting.tuning.calibration_search.run_rolling_backtest",
+                return_value=pd.DataFrame({"DT": [dt]}),
+            ) as mock_backtest,
+            patch(
+                "forecasting.tuning.calibration_search._origin_raw_forecasts",
+                return_value=(pd.DataFrame({"DT": [dt]}), pd.DataFrame(), {}, {}),
+            ),
+        ):
+            bundles = build_raw_origin_bundles(
+                pd.DataFrame({"DT": [dt]}), features=[], config=config
+            )
+
+        self.assertEqual(mock_backtest.call_count, 1)
+        self.assertIsNone(bundles[0].extended_lookback_raw)
 
 
 if __name__ == "__main__":

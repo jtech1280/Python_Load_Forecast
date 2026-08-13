@@ -617,13 +617,23 @@ calibration:
   # None and the stage silently fell back to targeted_missing_slices rules for the whole
   # origin -- which is why that rule list keeps growing instead of the lookup generalizing.
   # null skips the extra backtest pass entirely (zero cost, zero behavior change).
-  # 2026-08-10: set to 730 (2 years) per explicit request to let the walk-forward lookup
-  # generalize hot-ramp/heat-persistence peak behavior from a much larger sample instead
-  # of leaning on the hand-typed targeted_missing_slices rules. Costs one extra
-  # XGB+LGB-only recursive backtest pass per origin/run over the full 730-day window
-  # (~16x the recursive-forecast length of the 45-day calibration_days window) -- if this
-  # makes the run too slow, drop toward 180-365 first rather than back to null.
-  rare_event_artifact_lookback_days: 730
+  #
+  # 2026-08-11: split into two independent knobs after weighing cost-per-use across the
+  # three callers. The extra backtest is expensive (one recursive XGB+LGB pass over the
+  # full lookback window, ~16x the recursive-forecast length of the 45-day
+  # calibration_days window at 730 days), and how well that cost amortizes differs a lot:
+  #   - calibration_search.py (--build-cache) pays it once per origin, then reuses that
+  #     cached data across potentially hundreds of cheap Optuna trials -- cheap per use.
+  #   - The live forecast pays the full cost every single day to correct one day's
+  #     forecast, and a replay pays it once per origin with no reuse -- expensive per use.
+  # rare_event_artifact_lookback_days (this key) feeds the live forecast and replay paths
+  # and defaults back to null (off) given that ratio; rare_event_artifact_lookback_days_search
+  # below is calibration_search.py's own, independent value.
+  rare_event_artifact_lookback_days: null
+  # Dedicated to calibration_search.py (forecasting.tuning.calibration_search /
+  # scripts/tune_calibration_optuna.py's --build-cache step) -- see the note above for why
+  # this carries its own value instead of sharing rare_event_artifact_lookback_days.
+  rare_event_artifact_lookback_days_search: 730
   stage_selector:
     # Full seasonal replay showed raw Day 1 and final peak-window selection leaving accuracy
     # on the table. Select the most robust stage by operational horizon and peak window.
