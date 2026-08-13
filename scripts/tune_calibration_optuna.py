@@ -46,6 +46,7 @@ import argparse
 import json
 import random
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -171,6 +172,30 @@ def pick_central_repeat(all_params: list[dict[str, float]]) -> int:
     return int(min(range(len(distances)), key=lambda i: distances[i]))
 
 
+def _trial_progress_callback(repeat_label: str, n_trials: int):
+    """Optuna study.optimize callback: prints one line per completed trial with a running
+    average trial duration and an ETA, since optuna's own logging only prints once per
+    study by default (or once per trial at INFO level, with no ETA) -- neither tells you
+    whether a "still on repeat 1/5" run is on trial 2 or trial 45 of that repeat."""
+    start = time.monotonic()
+
+    def _callback(study, trial) -> None:
+        completed = trial.number + 1
+        elapsed = time.monotonic() - start
+        avg_seconds = elapsed / completed
+        remaining_trials = max(0, n_trials - completed)
+        eta_minutes = avg_seconds * remaining_trials / 60.0
+        duration = trial.duration.total_seconds() if trial.duration else float("nan")
+        print(
+            f"{repeat_label}: trial {completed}/{n_trials} done in {duration:.1f}s "
+            f"(avg {avg_seconds:.1f}s/trial, ~{eta_minutes:.1f} min remaining this repeat) "
+            f"value={trial.value:.4f} best={study.best_value:.4f}",
+            flush=True,
+        )
+
+    return _callback
+
+
 def _run_one_repeat(
     config: dict,
     search_bundles: list[RawOriginBundle],
@@ -179,6 +204,8 @@ def _run_one_repeat(
     study_name: str,
     storage: str | None,
     objective_weights: dict[str, float] | None,
+    verbose: bool = False,
+    repeat_label: str = "",
 ) -> dict:
     import optuna
 
@@ -194,7 +221,8 @@ def _run_one_repeat(
         storage=storage,
         load_if_exists=bool(storage),
     )
-    study.optimize(objective, n_trials=n_trials)
+    callbacks = [_trial_progress_callback(repeat_label, n_trials)] if verbose else None
+    study.optimize(objective, n_trials=n_trials, callbacks=callbacks)
 
     best_params = dict(study.best_trial.params)
     search_score = float(study.best_value)
@@ -228,6 +256,7 @@ def run_multi_seed_search(
     study_name: str,
     storage: str | None,
     objective_weights: dict[str, float] | None,
+    verbose: bool = False,
 ) -> dict:
     try:
         import optuna
@@ -261,9 +290,10 @@ def run_multi_seed_search(
         search_bundles, repeat_holdout_bundles = split_bundles(
             pool_bundles, holdout_fraction, repeat_seed
         )
+        repeat_label = f"Repeat {i + 1}/{n_repeats} (seed={repeat_seed})"
         print(
-            f"Repeat {i + 1}/{n_repeats} (seed={repeat_seed}): "
-            f"{len(search_bundles)} search origins, {len(repeat_holdout_bundles)} repeat-holdout origins.",
+            f"{repeat_label}: {len(search_bundles)} search origins, "
+            f"{len(repeat_holdout_bundles)} repeat-holdout origins.",
             flush=True,
         )
         result = _run_one_repeat(
@@ -274,6 +304,8 @@ def run_multi_seed_search(
             study_name=f"{study_name}_r{i}_seed{repeat_seed}",
             storage=storage,
             objective_weights=objective_weights,
+            verbose=verbose,
+            repeat_label=repeat_label,
         )
         result["repeat_index"] = i
         result["seed"] = repeat_seed
@@ -428,6 +460,12 @@ def main() -> None:
         default=None,
         help="JSON dict overriding scorecard_objective's default weights",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print one line per completed Optuna trial (duration, running average, ETA for "
+        "the current repeat) instead of only printing once per repeat",
+    )
     args = parser.parse_args()
 
     config = load_forecast_config(args.config)
@@ -449,6 +487,7 @@ def main() -> None:
         study_name=args.study_name,
         storage=args.storage,
         objective_weights=weights,
+        verbose=args.verbose,
     )
 
 
