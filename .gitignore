@@ -21,7 +21,7 @@ forecasting/config.local.yaml
 .vscode/
 
 # Forecast runtime outputs and API caches
-# forecast_outputs/
+forecast_outputs/
 weather_cache/
 
 # Local logs/temp files
