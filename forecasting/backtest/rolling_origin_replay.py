@@ -3163,3 +3163,34 @@ def build_rolling_origin_replay_bundle(
     if not timing_df.empty:
         bundle["rolling_origin_replay_timing"] = timing_df
     return bundle
+
+
+def build_search_scorecard(replay_df: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """Lightweight equivalent of
+    ``build_rolling_origin_replay_bundle(replay_df, config)["rolling_origin_replay_scorecard"]``.
+
+    scorecard_objective() (see forecasting/tuning/optuna_tuning.py) only ever reads the
+    `rolling_origin_replay_scorecard` slice table -- its own docstring says so. But
+    build_rolling_origin_replay_bundle unconditionally also builds dozens of other diagnostic
+    tables (weather-sensitivity detail, stage metrics broken out by half a dozen groupings,
+    peak-window bias/expansion scorecards, hot-peak/extreme-heat candidate tables, daily-peak
+    miss tables, etc.) meant for human-facing replay reports. Real-scale profiling of an
+    Optuna trial showed build_rolling_origin_replay_bundle costing ~187s of a ~348s trial,
+    almost entirely on tables scorecard_objective() never looks at. This reproduces exactly
+    the same bt/event_slices construction (prep, origin context, weather-sensitivity columns,
+    excluded-interval filtering, multi-summer heat analog shadow, event slicing) and calls the
+    same `_seasonal_scorecard`, just skipping everything built after that in the full bundle.
+    """
+    if replay_df is None or replay_df.empty:
+        return pd.DataFrame()
+    replay_work = replay_df.copy(deep=False)
+    replay_work.attrs = {}
+    bt = _add_weather_input_sensitivity_columns(
+        _ensure_origin_context(prep_backtest(replay_work))
+    )
+    excluded_mask = excluded_interval_mask(bt, config)
+    if bool(excluded_mask.any()):
+        bt = bt.loc[~excluded_mask].copy()
+    bt = apply_multisummer_heat_analog_shadow(bt, config=config)
+    event_slices = _event_slices(bt)
+    return _seasonal_scorecard(bt, event_slices)

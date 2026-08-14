@@ -56,9 +56,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from forecasting.backtest.rolling_origin_replay import (
-    build_rolling_origin_replay_bundle,
-)
+from forecasting.backtest.rolling_origin_replay import build_search_scorecard
 from forecasting.config_utils import load_forecast_config
 from forecasting.tuning.calibration_search import (
     RawOriginBundle,
@@ -100,11 +98,18 @@ def split_bundles(
 
 
 def scorecard_for(bundles: list[RawOriginBundle], config: dict) -> pd.DataFrame:
+    """Score bundles and build just the scorecard table scorecard_objective() reads.
+
+    Uses build_search_scorecard() rather than the full build_rolling_origin_replay_bundle()
+    -- the latter also builds dozens of other diagnostic tables (peak-window bias, hot-peak
+    candidates, daily-peak miss, weather-sensitivity detail, ...) meant for human-facing
+    replay reports, none of which this search's objective ever reads. Profiling showed that
+    difference costing more than half of a trial's wall time.
+    """
     replay_df = score_bundles(bundles, config)
     if replay_df.empty:
         return pd.DataFrame()
-    bundle = build_rolling_origin_replay_bundle(replay_df, config)
-    return bundle.get("rolling_origin_replay_scorecard", pd.DataFrame())
+    return build_search_scorecard(replay_df, config)
 
 
 def build_cache(config: dict, cache_dir: Path, origin_limit: int | None) -> None:
