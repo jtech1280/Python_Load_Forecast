@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -256,6 +257,67 @@ class RunMultiSeedSearchEndToEndTests(unittest.TestCase):
             self.assertEqual(summary["recommended_repeat_index"], 0)
             for stats in summary["parameter_stability"].values():
                 self.assertEqual(stats["range_fraction_of_search_space"], 0.0)
+
+
+@unittest.skipUnless(OPTUNA_AVAILABLE, "optuna not installed")
+class ParallelRepeatsTests(unittest.TestCase):
+    """--parallel-repeats runs repeats in separate OS processes via multiprocessing's "spawn"
+    context (matching Windows/macOS, not just Linux's cheaper fork()), which means
+    _run_repeat_worker's arguments and the module itself must survive being pickled and
+    re-imported in a fresh interpreter. Testing that by importing tune_calibration_optuna
+    in-process (as the other tests in this file do) wouldn't actually exercise that path
+    faithfully, since this test file's own sys.path manipulation to make the script importable
+    doesn't propagate to a spawned child's fresh interpreter. Invoking the script via
+    subprocess, exactly as a real user would from the command line, is what actually proves
+    --parallel-repeats works end to end."""
+
+    def test_parallel_repeats_matches_sequential_shape(self):
+        bundles = [_minimal_bundle(i) for i in range(1, 9)]
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            output_dir = Path(tmp) / "out"
+            save_raw_origin_bundles(bundles, cache_dir)
+
+            cmd = [
+                sys.executable,
+                str(SCRIPTS_DIR / "tune_calibration_optuna.py"),
+                "--cache-dir",
+                str(cache_dir),
+                "--output-dir",
+                str(output_dir),
+                "--n-trials",
+                "2",
+                "--n-repeats",
+                "3",
+                "--holdout-fraction",
+                "0.25",
+                "--final-holdout-fraction",
+                "0.2",
+                "--parallel-repeats",
+                "2",
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}",
+            )
+
+            best_params_path = output_dir / "calibration_search_best_params.json"
+            self.assertTrue(best_params_path.exists())
+            summary = json.loads(best_params_path.read_text(encoding="utf-8"))
+            self.assertEqual(summary["n_repeats"], 3)
+            self.assertEqual(len(summary["repeats"]), 3)
+            self.assertEqual(
+                {r["repeat_index"] for r in summary["repeats"]}, {0, 1, 2}
+            )
+            for repeat in summary["repeats"]:
+                self.assertIsInstance(repeat["search_set_objective"], float)
+
+            self.assertTrue((output_dir / "calibration_search_trials.csv").exists())
+            trials_df = pd.read_csv(output_dir / "calibration_search_trials.csv")
+            self.assertEqual(len(trials_df), 3 * 2)
+            self.assertEqual(set(trials_df["repeat_index"].unique()), {0, 1, 2})
 
 
 if __name__ == "__main__":

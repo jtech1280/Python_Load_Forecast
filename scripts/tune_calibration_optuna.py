@@ -249,6 +249,62 @@ def _run_one_repeat(
     }
 
 
+def _run_repeat_worker(args: tuple) -> dict:
+    """Top-level (picklable) entry point for one repeat, run in its own OS process.
+
+    Repeats are independent -- different random search/holdout splits, separate Optuna
+    studies, no shared state until run_multi_seed_search aggregates results afterward -- so
+    this is safe to parallelize. Takes only picklable, lightweight arguments (a cache_dir
+    path, not the loaded bundles themselves) and reloads bundles from disk in-process rather
+    than receiving them via multiprocessing IPC, since pickling the cached origins' DataFrames
+    across a process boundary would itself be expensive at this cache's scale. Loading from
+    disk and re-deriving the deterministic seeded split is cheap by comparison.
+    """
+    (
+        cache_dir_str,
+        repeat_index,
+        n_repeats,
+        seed,
+        final_holdout_fraction,
+        holdout_fraction,
+        n_trials,
+        config,
+        study_name,
+        storage,
+        objective_weights,
+        verbose,
+    ) = args
+    bundles = load_raw_origin_bundles(Path(cache_dir_str))
+    final_holdout_seed = seed + 10_000
+    pool_bundles, _final_holdout_bundles = split_bundles(
+        bundles, final_holdout_fraction, final_holdout_seed
+    )
+    repeat_seed = seed + repeat_index
+    search_bundles, repeat_holdout_bundles = split_bundles(
+        pool_bundles, holdout_fraction, repeat_seed
+    )
+    repeat_label = f"Repeat {repeat_index + 1}/{n_repeats} (seed={repeat_seed})"
+    print(
+        f"{repeat_label}: {len(search_bundles)} search origins, "
+        f"{len(repeat_holdout_bundles)} repeat-holdout origins.",
+        flush=True,
+    )
+    result = _run_one_repeat(
+        config=config,
+        search_bundles=search_bundles,
+        repeat_holdout_bundles=repeat_holdout_bundles,
+        n_trials=n_trials,
+        study_name=f"{study_name}_r{repeat_index}_seed{repeat_seed}",
+        storage=storage,
+        objective_weights=objective_weights,
+        verbose=verbose,
+        repeat_label=repeat_label,
+    )
+    result["repeat_index"] = repeat_index
+    result["seed"] = repeat_seed
+    return result
+
+
 def run_multi_seed_search(
     config: dict,
     cache_dir: Path,
@@ -262,6 +318,7 @@ def run_multi_seed_search(
     storage: str | None,
     objective_weights: dict[str, float] | None,
     verbose: bool = False,
+    parallel_repeats: int = 1,
 ) -> dict:
     try:
         import optuna
@@ -289,32 +346,67 @@ def run_multi_seed_search(
         flush=True,
     )
 
-    repeats: list[dict] = []
-    for i in range(n_repeats):
-        repeat_seed = seed + i
-        search_bundles, repeat_holdout_bundles = split_bundles(
-            pool_bundles, holdout_fraction, repeat_seed
-        )
-        repeat_label = f"Repeat {i + 1}/{n_repeats} (seed={repeat_seed})"
+    if parallel_repeats > 1 and n_repeats > 1:
+        import multiprocessing
+
+        n_workers = min(parallel_repeats, n_repeats)
         print(
-            f"{repeat_label}: {len(search_bundles)} search origins, "
-            f"{len(repeat_holdout_bundles)} repeat-holdout origins.",
+            f"Running {n_repeats} repeats across {n_workers} parallel worker process(es)...",
             flush=True,
         )
-        result = _run_one_repeat(
-            config=config,
-            search_bundles=search_bundles,
-            repeat_holdout_bundles=repeat_holdout_bundles,
-            n_trials=n_trials,
-            study_name=f"{study_name}_r{i}_seed{repeat_seed}",
-            storage=storage,
-            objective_weights=objective_weights,
-            verbose=verbose,
-            repeat_label=repeat_label,
-        )
-        result["repeat_index"] = i
-        result["seed"] = repeat_seed
-        repeats.append(result)
+        worker_args = [
+            (
+                str(cache_dir),
+                i,
+                n_repeats,
+                seed,
+                final_holdout_fraction,
+                holdout_fraction,
+                n_trials,
+                config,
+                study_name,
+                storage,
+                objective_weights,
+                verbose,
+            )
+            for i in range(n_repeats)
+        ]
+        # Explicit "spawn" context (rather than whatever the platform default is) so behavior
+        # matches Windows/macOS in dev too, not just Linux's cheaper fork() -- spawn is what
+        # actually exercises pickling of _run_repeat_worker's arguments and re-import of this
+        # module in the child process, the failure mode that would otherwise only show up for
+        # users on Windows.
+        ctx = multiprocessing.get_context("spawn")
+        with ctx.Pool(processes=n_workers) as pool:
+            repeats = pool.map(_run_repeat_worker, worker_args)
+        repeats.sort(key=lambda r: r["repeat_index"])
+    else:
+        repeats = []
+        for i in range(n_repeats):
+            repeat_seed = seed + i
+            search_bundles, repeat_holdout_bundles = split_bundles(
+                pool_bundles, holdout_fraction, repeat_seed
+            )
+            repeat_label = f"Repeat {i + 1}/{n_repeats} (seed={repeat_seed})"
+            print(
+                f"{repeat_label}: {len(search_bundles)} search origins, "
+                f"{len(repeat_holdout_bundles)} repeat-holdout origins.",
+                flush=True,
+            )
+            result = _run_one_repeat(
+                config=config,
+                search_bundles=search_bundles,
+                repeat_holdout_bundles=repeat_holdout_bundles,
+                n_trials=n_trials,
+                study_name=f"{study_name}_r{i}_seed{repeat_seed}",
+                storage=storage,
+                objective_weights=objective_weights,
+                verbose=verbose,
+                repeat_label=repeat_label,
+            )
+            result["repeat_index"] = i
+            result["seed"] = repeat_seed
+            repeats.append(result)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     trials_frames = []
@@ -471,6 +563,17 @@ def main() -> None:
         help="Print one line per completed Optuna trial (duration, running average, ETA for "
         "the current repeat) instead of only printing once per repeat",
     )
+    parser.add_argument(
+        "--parallel-repeats",
+        type=int,
+        default=1,
+        help="Run this many repeats concurrently in separate worker processes (default 1 = "
+        "sequential, unchanged behavior). Repeats are fully independent (different random "
+        "search/holdout splits, separate Optuna studies), so this is safe up to min(this, "
+        "--n-repeats). Each worker independently reloads the cache from disk, and memory use "
+        "scales with how many you run at once -- start low if you're not sure your machine "
+        "has the RAM for N copies of the cache in memory simultaneously.",
+    )
     args = parser.parse_args()
 
     config = load_forecast_config(args.config)
@@ -493,6 +596,7 @@ def main() -> None:
         storage=args.storage,
         objective_weights=weights,
         verbose=args.verbose,
+        parallel_repeats=args.parallel_repeats,
     )
 
 
