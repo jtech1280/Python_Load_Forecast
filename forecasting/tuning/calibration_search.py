@@ -15,13 +15,16 @@ DataFrame shaped like `run_rolling_origin_replay`'s output, suitable for
 `build_rolling_origin_replay_bundle` / `scorecard_objective`.
 
 This intentionally reaches into rolling_origin_replay.py's private helpers
-(_origin_candidates, _origin_raw_forecasts, _replay_cfg, _as_int) to stay byte-for-byte
-consistent with the production origin-selection and raw-forecast logic rather than
-reimplementing it. If that module's internals move, update the imports here.
+(_origin_candidates, _origin_raw_forecasts, _replay_cfg, _as_int,
+_worker_config_for_parallel_replay) to stay byte-for-byte consistent with the production
+origin-selection and raw-forecast logic, and to reuse its already-proven per-origin
+multiprocessing pattern for build_raw_origin_bundles's parallel path, rather than
+reimplementing either. If that module's internals move, update the imports here.
 """
 
 import pickle
 from dataclasses import dataclass
+from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +36,7 @@ from forecasting.backtest.rolling_origin_replay import (
     _origin_candidates,
     _origin_raw_forecasts,
     _replay_cfg,
+    _worker_config_for_parallel_replay,
     apply_origin_correction_chain,
 )
 from forecasting.forecast.forecast_pipeline import (
@@ -67,6 +71,86 @@ class RawOriginBundle:
     extended_lookback_raw: pd.DataFrame | None = None
 
 
+def _build_one_origin_bundle(args: tuple) -> RawOriginBundle | None:
+    """Build one origin's raw bundle. Module-level (picklable) so it can run either inline
+    (sequential path) or as a multiprocessing.Pool worker (parallel path) -- see
+    build_raw_origin_bundles. Mirrors rolling_origin_replay.py's _run_single_origin_replay:
+    same idea (per-origin training is independent, so it's safe to parallelize across
+    origins), applied here instead of to the production replay path.
+    """
+    (
+        origin_number,
+        origin_dt,
+        n_origins,
+        work,
+        features,
+        config,
+        horizon_days,
+        calibration_days,
+        extended_lookback_days,
+        skip_catboost,
+        skip_calibration_prophet,
+    ) = args
+    print(
+        f"[calibration_search] building raw bundle for origin {origin_number}/{n_origins}: {origin_dt}",
+        flush=True,
+    )
+    pre_origin = work[work["DT"] < origin_dt].copy()
+    raw_calibration = run_rolling_backtest(
+        train_df=pre_origin,
+        features=features,
+        ensemble_weights=_production_ensemble_weights(config),
+        backtest_days=calibration_days,
+        config=config,
+        skip_catboost=skip_catboost,
+        skip_prophet=skip_calibration_prophet,
+    )
+    raw_calibration.attrs = {}
+    extended_lookback_raw = None
+    if extended_lookback_days is not None:
+        print(
+            f"[calibration_search] building rare-event lookback ({extended_lookback_days}d) "
+            f"for origin {origin_number}/{n_origins}: {origin_dt}",
+            flush=True,
+        )
+        extended_lookback_raw = run_rolling_backtest(
+            train_df=pre_origin,
+            features=features,
+            ensemble_weights=_production_ensemble_weights(config),
+            backtest_days=extended_lookback_days,
+            config=config,
+            skip_catboost=True,
+            skip_prophet=True,
+        )
+        extended_lookback_raw.attrs = {}
+    (
+        raw_origin,
+        raw_weather_realism,
+        raw_realized_scenarios,
+        raw_weather_scenarios,
+    ) = _origin_raw_forecasts(
+        work,
+        features,
+        config,
+        origin_dt,
+        horizon_days,
+        origin_number,
+    )
+    if raw_origin.empty:
+        return None
+    return RawOriginBundle(
+        origin_number=origin_number,
+        origin_dt=origin_dt,
+        calibration_days=calibration_days,
+        raw_calibration=raw_calibration,
+        raw_origin=raw_origin,
+        raw_weather_realism=raw_weather_realism,
+        raw_realized_scenarios=raw_realized_scenarios,
+        raw_weather_scenarios=raw_weather_scenarios,
+        extended_lookback_raw=extended_lookback_raw,
+    )
+
+
 def build_raw_origin_bundles(
     train_df: pd.DataFrame,
     features: list[str],
@@ -80,6 +164,14 @@ def build_raw_origin_bundles(
     settings, NOT on `calibration.*` settings. Build the cache once against the base config
     before starting a calibration-only search; do not rebuild it per trial, and do not reuse
     a cache across configs that change model/feature/training settings.
+
+    Each origin's three training passes (calibration backtest, rare-event extended lookback,
+    origin raw/weather-realism/scenario forecasts) are independent of every other origin, the
+    same property that already makes rolling_origin_replay.py's production replay path safe to
+    parallelize across origins. This reuses that same training.rolling_origin_replay.parallel.*
+    config (enabled/processes) and CPU-thread-division safeguard, so a cache build picks up
+    whatever parallelism you already have configured for replay -- e.g. the gpu_ram_part
+    setting that lets concurrent CatBoost GPU training share VRAM safely applies here too.
     """
     if train_df is None or train_df.empty:
         return []
@@ -101,69 +193,49 @@ def build_raw_origin_bundles(
         config_key="rare_event_artifact_lookback_days_search",
     )
 
-    bundles: list[RawOriginBundle] = []
-    for origin_number, origin_dt in enumerate(origins, start=1):
-        print(
-            f"[calibration_search] building raw bundle for origin {origin_number}/{len(origins)}: {origin_dt}",
-            flush=True,
-        )
-        pre_origin = work[work["DT"] < origin_dt].copy()
-        raw_calibration = run_rolling_backtest(
-            train_df=pre_origin,
-            features=features,
-            ensemble_weights=_production_ensemble_weights(config),
-            backtest_days=calibration_days,
-            config=config,
-            skip_catboost=skip_catboost,
-            skip_prophet=skip_calibration_prophet,
-        )
-        raw_calibration.attrs = {}
-        extended_lookback_raw = None
-        if extended_lookback_days is not None:
-            print(
-                f"[calibration_search] building rare-event lookback ({extended_lookback_days}d) "
-                f"for origin {origin_number}/{len(origins)}: {origin_dt}",
-                flush=True,
-            )
-            extended_lookback_raw = run_rolling_backtest(
-                train_df=pre_origin,
-                features=features,
-                ensemble_weights=_production_ensemble_weights(config),
-                backtest_days=extended_lookback_days,
-                config=config,
-                skip_catboost=True,
-                skip_prophet=True,
-            )
-            extended_lookback_raw.attrs = {}
+    parallel_cfg = (cfg.get("parallel", {}) or {}) if isinstance(cfg, dict) else {}
+    parallel_enabled = bool(parallel_cfg.get("enabled", True)) and len(origins) > 1
+    num_processes = parallel_cfg.get("processes")
+    if not isinstance(num_processes, int) or num_processes <= 0:
+        try:
+            num_processes = max(1, cpu_count() // 2)
+        except NotImplementedError:
+            num_processes = 2
+    num_processes = min(num_processes, max(1, len(origins)))
+
+    run_config = config
+    if parallel_enabled and num_processes > 1:
+        run_config = _worker_config_for_parallel_replay(config, num_processes)
+
+    pool_args = [
         (
-            raw_origin,
-            raw_weather_realism,
-            raw_realized_scenarios,
-            raw_weather_scenarios,
-        ) = _origin_raw_forecasts(
+            origin_number,
+            origin_dt,
+            len(origins),
             work,
             features,
-            config,
-            origin_dt,
+            run_config,
             horizon_days,
-            origin_number,
+            calibration_days,
+            extended_lookback_days,
+            skip_catboost,
+            skip_calibration_prophet,
         )
-        if raw_origin.empty:
-            continue
-        bundles.append(
-            RawOriginBundle(
-                origin_number=origin_number,
-                origin_dt=origin_dt,
-                calibration_days=calibration_days,
-                raw_calibration=raw_calibration,
-                raw_origin=raw_origin,
-                raw_weather_realism=raw_weather_realism,
-                raw_realized_scenarios=raw_realized_scenarios,
-                raw_weather_scenarios=raw_weather_scenarios,
-                extended_lookback_raw=extended_lookback_raw,
-            )
+        for origin_number, origin_dt in enumerate(origins, start=1)
+    ]
+
+    if not parallel_enabled or num_processes <= 1:
+        results = [_build_one_origin_bundle(arg) for arg in pool_args]
+    else:
+        print(
+            f"[calibration_search] building {len(origins)} raw origin bundles in parallel "
+            f"on {num_processes} processes...",
+            flush=True,
         )
-    return bundles
+        with Pool(processes=num_processes) as pool:
+            results = pool.map(_build_one_origin_bundle, pool_args)
+
+    return [bundle for bundle in results if bundle is not None]
 
 
 def _bundle_path(cache_dir: Path, bundle: RawOriginBundle) -> Path:

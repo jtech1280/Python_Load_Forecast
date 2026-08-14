@@ -270,5 +270,126 @@ class ExtendedLookbackWiringTests(unittest.TestCase):
         self.assertIsNone(bundles[0].extended_lookback_raw)
 
 
+class ParallelOriginBundleBuildTests(unittest.TestCase):
+    """build_raw_origin_bundles reuses rolling_origin_replay.py's already-proven per-origin
+    multiprocessing.Pool pattern (same training.rolling_origin_replay.parallel.* config,
+    same _worker_config_for_parallel_replay CPU-thread-division). These tests use the
+    default (fork, on Linux/CI) multiprocessing context, so a patched mock's *return value*
+    is correctly inherited by forked workers (fork duplicates the whole patched process
+    image) -- but each worker gets its own independent copy of the mock's internal call-
+    tracking state after fork, so mock_thing.call_count can't be asserted reliably across
+    the process boundary; only pool.map's actual returned bundles can be. Assertions here
+    check the returned bundles' shape/content, not call counts, for that reason."""
+
+    def test_runs_in_parallel_and_still_returns_every_origin(self):
+        dts = [
+            pd.Timestamp("2026-07-01"),
+            pd.Timestamp("2026-07-02"),
+            pd.Timestamp("2026-07-03"),
+        ]
+        config = {
+            "calibration": {},
+            "training": {
+                "rolling_origin_replay": {
+                    "parallel": {"enabled": True, "processes": 2},
+                }
+            },
+        }
+        with (
+            patch(
+                "forecasting.tuning.calibration_search._origin_candidates",
+                return_value=dts,
+            ),
+            patch(
+                "forecasting.tuning.calibration_search.run_rolling_backtest",
+                return_value=pd.DataFrame({"DT": [dts[0]]}),
+            ),
+            patch(
+                "forecasting.tuning.calibration_search._origin_raw_forecasts",
+                side_effect=lambda work, features, config, origin_dt, horizon_days, origin_number: (
+                    pd.DataFrame({"DT": [origin_dt]}),
+                    pd.DataFrame(),
+                    {},
+                    {},
+                ),
+            ),
+        ):
+            bundles = build_raw_origin_bundles(
+                pd.DataFrame({"DT": dts}), features=[], config=config
+            )
+
+        self.assertEqual(len(bundles), 3)
+        self.assertEqual(sorted(b.origin_number for b in bundles), [1, 2, 3])
+        self.assertEqual(sorted(bundles, key=lambda b: b.origin_number)[0].origin_dt, dts[0])
+        self.assertEqual(sorted(bundles, key=lambda b: b.origin_number)[2].origin_dt, dts[2])
+
+    def test_parallel_disabled_in_config_stays_sequential(self):
+        """parallel.enabled: False should behave exactly like the pre-existing sequential
+        tests above, just with multiple origins."""
+        dts = [pd.Timestamp("2026-07-01"), pd.Timestamp("2026-07-02")]
+        config = {
+            "calibration": {},
+            "training": {"rolling_origin_replay": {"parallel": {"enabled": False}}},
+        }
+        with (
+            patch(
+                "forecasting.tuning.calibration_search._origin_candidates",
+                return_value=dts,
+            ),
+            patch(
+                "forecasting.tuning.calibration_search.run_rolling_backtest",
+                return_value=pd.DataFrame({"DT": [dts[0]]}),
+            ) as mock_backtest,
+            patch(
+                "forecasting.tuning.calibration_search._origin_raw_forecasts",
+                side_effect=lambda work, features, config, origin_dt, horizon_days, origin_number: (
+                    pd.DataFrame({"DT": [origin_dt]}),
+                    pd.DataFrame(),
+                    {},
+                    {},
+                ),
+            ),
+        ):
+            bundles = build_raw_origin_bundles(
+                pd.DataFrame({"DT": dts}), features=[], config=config
+            )
+
+        # Sequential path runs inline in this process, so call_count IS reliable here.
+        self.assertEqual(mock_backtest.call_count, 2)
+        self.assertEqual(len(bundles), 2)
+        self.assertEqual(sorted(b.origin_number for b in bundles), [1, 2])
+
+    def test_single_origin_never_engages_the_pool_even_if_parallel_enabled(self):
+        dt = pd.Timestamp("2026-07-01")
+        config = {
+            "calibration": {},
+            "training": {
+                "rolling_origin_replay": {"parallel": {"enabled": True, "processes": 4}}
+            },
+        }
+        with (
+            patch(
+                "forecasting.tuning.calibration_search._origin_candidates",
+                return_value=[dt],
+            ),
+            patch(
+                "forecasting.tuning.calibration_search.run_rolling_backtest",
+                return_value=pd.DataFrame({"DT": [dt]}),
+            ) as mock_backtest,
+            patch(
+                "forecasting.tuning.calibration_search._origin_raw_forecasts",
+                return_value=(pd.DataFrame({"DT": [dt]}), pd.DataFrame(), {}, {}),
+            ),
+        ):
+            bundles = build_raw_origin_bundles(
+                pd.DataFrame({"DT": [dt]}), features=[], config=config
+            )
+
+        # A single origin runs the inline sequential path regardless of parallel config, so
+        # call_count is reliable here too.
+        self.assertEqual(mock_backtest.call_count, 1)
+        self.assertEqual(len(bundles), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
