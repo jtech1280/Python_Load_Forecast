@@ -44,7 +44,10 @@ different random search/holdout splits of a shared origin pool:
 
 import argparse
 import json
+import os
+import platform
 import random
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -305,6 +308,100 @@ def _run_repeat_worker(args: tuple) -> dict:
     return result
 
 
+def _system_available_memory_bytes() -> int | None:
+    """Best-effort, stdlib-only available-memory query (no psutil dependency in this project).
+    Returns None if the platform isn't recognized or the query fails, rather than guessing --
+    callers should skip the memory-based cap entirely in that case instead of acting on a made
+    up number."""
+    system = platform.system()
+    try:
+        if system == "Linux":
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        return int(line.split()[1]) * 1024
+        elif system == "Windows":
+            import ctypes
+
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = _MemoryStatusEx()
+            stat.dwLength = ctypes.sizeof(_MemoryStatusEx)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                return int(stat.ullAvailPhys)
+        elif system == "Darwin":
+            # macOS has no cheap "available" figure without extra tooling; hw.memsize is
+            # total physical memory, so this is intentionally conservative (treats "total" as
+            # the ceiling, understating what's actually free).
+            out = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                return int(out.stdout.strip())
+    except Exception:
+        return None
+    return None
+
+
+def _safe_parallel_repeats(requested: int, n_repeats: int, cache_dir: Path) -> int:
+    """Cap --parallel-repeats to something the machine can plausibly run without swapping
+    itself into the ground: never more than the CPU count or n_repeats, and -- when available
+    memory can be determined -- never more workers than fit in ~80% of it, estimated from the
+    cache's on-disk size. Each worker independently loads the full cache (see
+    _run_repeat_worker's docstring for why), so memory scales linearly with worker count."""
+    cap = max(1, min(requested, n_repeats, os.cpu_count() or 1))
+    if cap <= 1:
+        return cap
+
+    available = _system_available_memory_bytes()
+    if available is None:
+        print(
+            f"Could not determine available system memory on this platform -- proceeding "
+            f"with --parallel-repeats {cap} unchecked. Each worker loads the full cache "
+            f"independently, so if this machine doesn't have room for {cap} copies of it in "
+            f"memory at once, expect heavy swapping or a killed worker; re-run with a lower "
+            f"--parallel-repeats if that happens.",
+            flush=True,
+        )
+        return cap
+
+    on_disk_bytes = sum(
+        p.stat().st_size for p in Path(cache_dir).glob("origin_*.pkl")
+    )
+    # Unpickled pandas DataFrames (object-dtype columns, Python string/Timestamp overhead)
+    # commonly run 2-4x their on-disk pickle size in memory; 3x is a deliberately rough,
+    # conservative estimate, not a measurement.
+    per_worker_bytes = on_disk_bytes * 3
+    if per_worker_bytes <= 0:
+        return cap
+
+    budget_bytes = int(available * 0.8)  # leave headroom for the OS and everything else
+    safe_workers = max(1, budget_bytes // per_worker_bytes)
+    if safe_workers < cap:
+        print(
+            f"--parallel-repeats {cap} would need an estimated "
+            f"{cap * per_worker_bytes / 1e9:.1f} GB (~{per_worker_bytes / 1e9:.1f} GB/worker, "
+            f"a rough estimate from the cache's on-disk size), but only "
+            f"~{available / 1e9:.1f} GB is currently available. Reducing to "
+            f"--parallel-repeats {safe_workers} to leave headroom. Pass a lower "
+            f"--parallel-repeats explicitly to silence this, or free up memory and try again.",
+            flush=True,
+        )
+        cap = int(safe_workers)
+    return cap
+
+
 def run_multi_seed_search(
     config: dict,
     cache_dir: Path,
@@ -346,10 +443,10 @@ def run_multi_seed_search(
         flush=True,
     )
 
-    if parallel_repeats > 1 and n_repeats > 1:
+    n_workers = _safe_parallel_repeats(parallel_repeats, n_repeats, cache_dir)
+    if n_workers > 1:
         import multiprocessing
 
-        n_workers = min(parallel_repeats, n_repeats)
         print(
             f"Running {n_repeats} repeats across {n_workers} parallel worker process(es)...",
             flush=True,

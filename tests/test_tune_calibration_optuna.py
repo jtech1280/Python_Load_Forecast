@@ -260,6 +260,66 @@ class RunMultiSeedSearchEndToEndTests(unittest.TestCase):
 
 
 @unittest.skipUnless(OPTUNA_AVAILABLE, "optuna not installed")
+class SafeParallelRepeatsTests(unittest.TestCase):
+    """--parallel-repeats N spawns N worker processes, each independently loading the full
+    cache into its own memory -- these tests guard the caps that keep a user from
+    over-subscribing CPU or RAM by asking for more than their machine can hold."""
+
+    def test_never_exceeds_cpu_count(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = tune_calibration_optuna._safe_parallel_repeats(
+                requested=10_000, n_repeats=10_000, cache_dir=Path(tmp)
+            )
+        self.assertLessEqual(cap, os.cpu_count() or 1)
+
+    def test_never_exceeds_n_repeats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = tune_calibration_optuna._safe_parallel_repeats(
+                requested=10_000, n_repeats=2, cache_dir=Path(tmp)
+            )
+        self.assertLessEqual(cap, 2)
+
+    def test_requesting_one_is_a_pure_passthrough(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cap = tune_calibration_optuna._safe_parallel_repeats(
+                requested=1, n_repeats=5, cache_dir=Path(tmp)
+            )
+        self.assertEqual(cap, 1)
+
+    def test_reduces_worker_count_when_cache_is_too_large_for_available_memory(self):
+        available = tune_calibration_optuna._system_available_memory_bytes()
+        if available is None:
+            self.skipTest("cannot determine available memory on this platform")
+        with tempfile.TemporaryDirectory() as tmp:
+            # Fake per-origin pickle sized so the 3x in-memory estimate alone exceeds all
+            # available memory -- any requested worker count above 1 must get reduced.
+            big_path = Path(tmp) / "origin_0001.pkl"
+            with big_path.open("wb") as f:
+                f.seek(max(available, 1), 0)
+                f.write(b"\0")
+            cap = tune_calibration_optuna._safe_parallel_repeats(
+                requested=8, n_repeats=8, cache_dir=Path(tmp)
+            )
+        self.assertEqual(cap, 1)
+
+    def test_small_cache_does_not_get_memory_capped_below_cpu_count(self):
+        import os
+
+        available = tune_calibration_optuna._system_available_memory_bytes()
+        if available is None:
+            self.skipTest("cannot determine available memory on this platform")
+        with tempfile.TemporaryDirectory() as tmp:
+            small_path = Path(tmp) / "origin_0001.pkl"
+            small_path.write_bytes(b"0" * 1024)  # 1 KB -- trivially fits many times over
+            cap = tune_calibration_optuna._safe_parallel_repeats(
+                requested=os.cpu_count() or 1, n_repeats=100, cache_dir=Path(tmp)
+            )
+        self.assertEqual(cap, os.cpu_count() or 1)
+
+
+@unittest.skipUnless(OPTUNA_AVAILABLE, "optuna not installed")
 class ParallelRepeatsTests(unittest.TestCase):
     """--parallel-repeats runs repeats in separate OS processes via multiprocessing's "spawn"
     context (matching Windows/macOS, not just Linux's cheaper fork()), which means
