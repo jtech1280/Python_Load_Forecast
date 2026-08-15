@@ -1955,8 +1955,12 @@ calibration:
   warm_ramp_min_maxtemp_f: 75.0
   warm_ramp_max_maxtemp_f: 93.0
   warm_ramp_hours: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
-  warm_ramp_blend: 0.84
-  warm_ramp_cap_mwh: 15.0
+  # 2026-08-14: promoted from the Optuna calibration search's recommended_params (repeat 2/5,
+  # median-closest across 5 repeats). warm_ramp_blend/warm_ramp_cap_mwh were flagged stable
+  # (range_fraction_of_search_space 0.45/0.50 -- consistent across repeats, unlike the 5
+  # params flagged unstable in that same run, which were left at their prior values here).
+  warm_ramp_blend: 0.8541597388849738
+  warm_ramp_cap_mwh: 19.45042638312704
   warm_ramp_shrink_k: 8.0
   warm_ramp_weighted_fallback: true
   warm_ramp_cloud_split: true
@@ -2752,14 +2756,18 @@ calibration:
     weights:
       recent_mean: 0.35
       last24_mean: 0.20
-      same_hour: 0.16
+      # 2026-08-14: same_hour/temp_cloud_hourgroup promoted from the Optuna calibration
+      # search's recommended_params (repeat 2/5, median-closest across 5 repeats). Both
+      # flagged stable (range_fraction_of_search_space 0.46/0.39) unlike solar_loss_hourgroup
+      # (flagged unstable in that same run), which was left at its prior value here.
+      same_hour: 0.11187865767976685
       hourgroup: 0.06
       global: 0.03
       temp_hourgroup: 0.08
       cloud_hourgroup: 0.05
       solar_hourgroup: 0.03
       solar_loss_hourgroup: 0.08
-      temp_cloud_hourgroup: 0.05
+      temp_cloud_hourgroup: 0.09377899446551476
 
 diagnostics:
   enabled: true
