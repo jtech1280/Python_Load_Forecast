@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -12,7 +13,12 @@ from forecasting.data.weather_loader import (
 )
 
 
-def _config(*, enabled: bool = True, allow_previous_day_fallback: bool = True) -> dict:
+def _config(
+    *,
+    enabled: bool = True,
+    allow_previous_day_fallback: bool = True,
+    allow_standard_forecast_fallback: bool = False,
+) -> dict:
     return {
         "project": {"timezone": "America/Los_Angeles"},
         "openmeteo": {
@@ -31,9 +37,13 @@ def _config(*, enabled: bool = True, allow_previous_day_fallback: bool = True) -
             "ssl_use_os_truststore": False,
             "gfs_run_lock": {
                 "enabled": enabled,
-                "model": "gfs_global",
+                "single_runs_url": "https://single-runs-api.open-meteo.com/v1/forecast",
+                "model": "gfs_seamless",
                 "run_hour_utc": 6,
+                "latest_cache_stem": "forecast_weather_gfs_06z_latest",
+                "allow_import_outside_window": True,
                 "allow_previous_day_fallback": allow_previous_day_fallback,
+                "allow_standard_forecast_fallback": allow_standard_forecast_fallback,
             },
         },
         "quality": {
@@ -60,8 +70,13 @@ class FetchGfsLockedForecastTests(unittest.TestCase):
 
         self.assertFalse(df.empty)
         self.assertEqual(mock_fetch.call_count, 1)
+        called_url = mock_fetch.call_args[0][0]
         called_params = mock_fetch.call_args[0][1]
-        self.assertEqual(called_params["models"], "gfs_global")
+        self.assertEqual(
+            called_url, "https://single-runs-api.open-meteo.com/v1/forecast"
+        )
+        self.assertEqual(called_params["models"], "gfs_seamless")
+        self.assertEqual(called_params["forecast_days"], 16)
         today_utc = dt.datetime.now(dt.timezone.utc).date()
         self.assertEqual(called_params["run"], f"{today_utc.isoformat()}T06:00")
         self.assertTrue(run_tag.endswith("06Z"))
@@ -150,8 +165,43 @@ class FetchForecastWeatherGfsLockWiringTests(unittest.TestCase):
             out.attrs["weather_source"].startswith("open_meteo_gfs_run_locked_")
         )
 
-    def test_enabled_but_run_unavailable_falls_back_to_standard_endpoint(self):
-        config = _config(enabled=True, allow_previous_day_fallback=False)
+    def test_enabled_but_run_unavailable_does_not_use_standard_endpoint_by_default(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(enabled=True, allow_previous_day_fallback=False)
+            config["openmeteo"]["cache_dir"] = tmp
+            config["project"]["output_dir"] = tmp
+            config["openmeteo"]["forecast_import_policy"] = {"enabled": False}
+            pd.DataFrame(
+                {
+                    "DT": ["2026-08-19T00:00:00-07:00"],
+                    "Temperature": [77.0],
+                }
+            ).to_csv(f"{tmp}/forecast_results.csv", index=False)
+            with (
+                patch(
+                    "forecasting.data.weather_loader._fetch_json",
+                    return_value={"hourly": {}},
+                ) as mock_fetch,
+                patch(
+                    "forecasting.data.weather_loader._archive_forecast_weather",
+                    return_value=None,
+                ),
+            ):
+                with self.assertRaises(RuntimeError):
+                    fetch_forecast_weather(config)
+
+        self.assertEqual(mock_fetch.call_count, 1)
+
+    def test_enabled_but_run_unavailable_can_explicitly_fall_back_to_standard_endpoint(
+        self,
+    ):
+        config = _config(
+            enabled=True,
+            allow_previous_day_fallback=False,
+            allow_standard_forecast_fallback=True,
+        )
         config["openmeteo"]["forecast_import_policy"] = {"enabled": False}
         responses = [{"hourly": {}}, _payload(["2026-08-19T00:00"], [90.0])]
         with (

@@ -608,6 +608,20 @@ def _gfs_run_lock_cfg(config: dict) -> dict:
     return (config.get("openmeteo", {}) or {}).get("gfs_run_lock", {}) or {}
 
 
+def _gfs_run_lock_enabled(config: dict) -> bool:
+    return bool(_gfs_run_lock_cfg(config).get("enabled", False))
+
+
+def _forecast_weather_latest_cache_path(config: dict) -> Path:
+    lock_cfg = _gfs_run_lock_cfg(config)
+    if bool(lock_cfg.get("enabled", False)):
+        stem = str(
+            lock_cfg.get("latest_cache_stem") or "forecast_weather_gfs_06z_latest"
+        ).strip()
+        return _weather_cache_path(config, stem or "forecast_weather_gfs_06z_latest")
+    return _weather_cache_path(config, "forecast_weather_latest")
+
+
 def _fetch_single_run(
     config: dict, *, run_dt_utc: dt.datetime, model: str, single_runs_url: str
 ) -> pd.DataFrame:
@@ -645,11 +659,12 @@ def _fetch_gfs_locked_forecast(config: dict) -> tuple[pd.DataFrame, str]:
     comfortably after a 06Z run's typical ~10-11 UTC publication), so this should
     normally succeed on the first try. If it doesn't -- not yet published, a transient
     API issue, anything -- falls back to yesterday's same-hour run once, then gives up.
-    Returns (empty DataFrame, "") on total failure; never raises. Callers should fall
-    back to the standard forecast API in that case.
+    Returns (empty DataFrame, "") on total failure; never raises. Callers should use
+    cached weather or, only if explicitly configured, fall back to the standard forecast
+    API in that case.
     """
     lock_cfg = _gfs_run_lock_cfg(config)
-    model = str(lock_cfg.get("model", "gfs_global"))
+    model = str(lock_cfg.get("model", "gfs_seamless"))
     run_hour = int(lock_cfg.get("run_hour_utc", 6))
     single_runs_url = str(
         lock_cfg.get("single_runs_url")
@@ -688,6 +703,8 @@ def _fetch_gfs_locked_forecast(config: dict) -> tuple[pd.DataFrame, str]:
 
 
 def fetch_forecast_weather(config: dict) -> pd.DataFrame:
+    gfs_lock_enabled = _gfs_run_lock_enabled(config)
+    gfs_lock_cfg = _gfs_run_lock_cfg(config)
     params = _standard_params(config)
     params.update({"forecast_days": int(config["openmeteo"]["forecast_days"])})
     past_hours = config.get("openmeteo", {}).get("forecast_past_hours", 0)
@@ -699,7 +716,7 @@ def fetch_forecast_weather(config: dict) -> pd.DataFrame:
         params.update({"past_hours": past_hours_i})
     url = config["openmeteo"]["forecast_url"]
     verify = _weather_request_verify(config)
-    latest_cache_path = _weather_cache_path(config, "forecast_weather_latest")
+    latest_cache_path = _forecast_weather_latest_cache_path(config)
     policy = _forecast_import_policy(config)
     now_local = _now_local(config)
     daily_cache_path: Path | None = None
@@ -714,9 +731,14 @@ def fetch_forecast_weather(config: dict) -> pd.DataFrame:
             daily_cache_path, config, require_requested_cols=True
         )
         if not daily_cached.empty:
+            daily_cache_source = (
+                "forecast_weather_gfs_06z_daily_cache"
+                if gfs_lock_enabled
+                else "forecast_weather_morning_daily_cache"
+            )
             return _mark_forecast_weather_source(
                 daily_cached,
-                source="forecast_weather_morning_daily_cache",
+                source=daily_cache_source,
                 cache_path=latest_cache_path,
                 daily_cache_path=daily_cache_path,
                 import_window=import_window,
@@ -736,7 +758,13 @@ def fetch_forecast_weather(config: dict) -> pd.DataFrame:
                     import_window=import_window,
                 )
 
-        if not _inside_forecast_import_window(now_local, policy):
+        allow_locked_import_outside_window = gfs_lock_enabled and bool(
+            gfs_lock_cfg.get("allow_import_outside_window", True)
+        )
+        if (
+            not _inside_forecast_import_window(now_local, policy)
+            and not allow_locked_import_outside_window
+        ):
             cached = _read_weather_cache(
                 latest_cache_path, config, require_requested_cols=True
             )
@@ -785,16 +813,25 @@ def fetch_forecast_weather(config: dict) -> pd.DataFrame:
     try:
         df = pd.DataFrame()
         source_tag = "open_meteo_forecast"
-        if bool(_gfs_run_lock_cfg(config).get("enabled", False)):
+        if gfs_lock_enabled:
             df, gfs_run_tag = _fetch_gfs_locked_forecast(config)
             if not df.empty:
                 source_tag = f"open_meteo_gfs_run_locked_{gfs_run_tag}"
             else:
-                warnings.warn(
-                    "GFS run-locked fetch found no usable run; falling back to the "
-                    "standard Open-Meteo forecast (best_match) for this import.",
-                    RuntimeWarning,
-                )
+                message = "GFS run-locked fetch found no usable 06Z single run."
+                if bool(gfs_lock_cfg.get("allow_standard_forecast_fallback", False)):
+                    warnings.warn(
+                        message
+                        + " Falling back to the standard Open-Meteo forecast "
+                        "(best_match) for this import.",
+                        RuntimeWarning,
+                    )
+                else:
+                    raise RuntimeError(
+                        message
+                        + " Standard Open-Meteo best_match fallback is disabled by "
+                        "openmeteo.gfs_run_lock.allow_standard_forecast_fallback=false."
+                    )
 
         if df.empty:
             payload = _fetch_json(
@@ -837,28 +874,32 @@ def fetch_forecast_weather(config: dict) -> pd.DataFrame:
             return cached
 
         today = _today_local(config["project"]["timezone"])
-        fallback = _forecast_results_weather_fallback(
-            config,
-            start=today - dt.timedelta(days=2),
-            end=today
-            + dt.timedelta(days=int(config["openmeteo"]["forecast_days"]) + 1),
+        allow_forecast_results_fallback = (not gfs_lock_enabled) or bool(
+            gfs_lock_cfg.get("allow_forecast_results_fallback", False)
         )
-        if not fallback.empty:
-            _write_weather_cache(fallback, latest_cache_path)
-            if daily_cache_path is not None:
-                _write_weather_cache(fallback, daily_cache_path)
-            _mark_forecast_weather_source(
-                fallback,
-                source="forecast_results_fallback",
-                cache_path=latest_cache_path,
-                daily_cache_path=daily_cache_path,
-                import_window=import_window,
+        if allow_forecast_results_fallback:
+            fallback = _forecast_results_weather_fallback(
+                config,
+                start=today - dt.timedelta(days=2),
+                end=today
+                + dt.timedelta(days=int(config["openmeteo"]["forecast_days"]) + 1),
             )
-            warnings.warn(
-                f"Forecast weather API failed ({exc}); rebuilt weather from forecast_outputs/forecast_results.csv",
-                RuntimeWarning,
-            )
-            return fallback
+            if not fallback.empty:
+                _write_weather_cache(fallback, latest_cache_path)
+                if daily_cache_path is not None:
+                    _write_weather_cache(fallback, daily_cache_path)
+                _mark_forecast_weather_source(
+                    fallback,
+                    source="forecast_results_fallback",
+                    cache_path=latest_cache_path,
+                    daily_cache_path=daily_cache_path,
+                    import_window=import_window,
+                )
+                warnings.warn(
+                    f"Forecast weather API failed ({exc}); rebuilt weather from forecast_outputs/forecast_results.csv",
+                    RuntimeWarning,
+                )
+                return fallback
         raise
 
 

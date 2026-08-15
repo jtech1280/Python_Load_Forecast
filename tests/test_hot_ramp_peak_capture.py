@@ -67,6 +67,107 @@ class HotRampStrongCapTests(unittest.TestCase):
         self.assertTrue((out["Hot_Ramp_Peak_Correction_MWH"] <= 12.0 + 1e-9).all())
 
 
+class HotRampTimingAlignmentTests(unittest.TestCase):
+    def test_timing_override_caps_nonselected_rows_with_subset_index(self):
+        dt = pd.date_range("2026-07-22 15:00", periods=7, freq="h")
+        base_by_hour = {
+            15: 295.0,
+            16: 310.0,
+            17: 300.0,
+            18: 320.0,
+            19: 319.0,
+            20: 318.0,
+            21: 296.0,
+        }
+        timing_by_hour = {
+            15: 295.0,
+            16: 312.0,
+            17: 340.0,
+            18: 322.0,
+            19: 319.0,
+            20: 318.0,
+            21: 296.0,
+        }
+        df = pd.DataFrame(
+            [
+                {
+                    "DT": stamp,
+                    "Hour": stamp.hour,
+                    "Month": 7,
+                    "Forecast_Day": 2,
+                    "Final_Forecast_MWH": base_by_hour[stamp.hour],
+                    "Raw_Forecast_MWH": timing_by_hour[stamp.hour],
+                    "XGB_Pred_MWH": timing_by_hour[stamp.hour],
+                    "Temperature_DailyMax": 102.0,
+                    "DailyMaxTemp_Ramp_1Day": 2.5,
+                    "CloudCover_Norm": 0.05,
+                    "MWH_SameHour7DayMean": base_by_hour[stamp.hour] - 1.0,
+                    "MWH_Lag24": base_by_hour[stamp.hour] - 2.0,
+                }
+                for stamp in dt
+            ]
+        )
+        cfg = {
+            "enabled": True,
+            "shadow_mode": False,
+            "hours": [16, 17, 18, 19, 20],
+            "min_maxtemp_f": 100.0,
+            "min_dailymax_ramp_1day_f": 2.0,
+            "strong_ramp_min_dailymax_ramp_1day_f": 10.0,
+            "max_cloud_cover_norm": 0.40,
+            "cap_mwh": 40.0,
+            "strong_ramp_cap_mwh": 40.0,
+            "min_abs_correction_mwh": 0.1,
+            "ramp_floor_mwh": 0.0,
+            "strong_ramp_floor_mwh": 0.0,
+            "anchor_support_guard_enabled": False,
+            "spread_hours": 1.0,
+            "peak_timing_selector": {
+                "enabled": True,
+                "required_source": "xgb_component",
+                "timing_sources": [
+                    {"source": "xgb_component", "column": "XGB_Pred_MWH"},
+                    {"source": "raw_xgb_lgb", "column": "Raw_Forecast_MWH"},
+                ],
+                "source_priority": ["xgb_component", "raw_xgb_lgb"],
+                "consensus_required": 2,
+                "max_consensus_hour_spread": 0.0,
+                "min_peak_margin_mwh": 1.0,
+                "allowed_hours": [16, 17, 18, 19, 20],
+                "block_on_strong_hot_ramp": False,
+                "target_selected_hour_to_daily_peak": True,
+                "cap_nonselected_hours_to_target": True,
+            },
+        }
+        artifact = {
+            "lookups": {},
+            "metadata": {
+                "global_peak_residual_mwh": 10.0,
+                "global_samehour7_residual_mwh": 10.0,
+                "global_lag24_residual_mwh": 10.0,
+                "global_lag24_ramp_slope_mwh_per_f": 0.0,
+            },
+        }
+
+        out = apply_hot_ramp_peak_capture(
+            df,
+            artifact,
+            {"hot_ramp_peak_capture": cfg},
+            forecast_col="Final_Forecast_MWH",
+        )
+
+        selected = out.loc[out["Hour"].eq(17)].iloc[0]
+        base_peak = out.loc[out["Hour"].eq(18)].iloc[0]
+        self.assertEqual(selected["Hot_Ramp_Peak_Timing_Override_Flag"], 1)
+        self.assertEqual(selected["Hot_Ramp_Peak_Timing_Selected_PeakHour"], 17.0)
+        self.assertGreater(
+            selected["Hot_Ramp_Peak_Correction_MWH"],
+            base_peak["Hot_Ramp_Peak_Correction_MWH"],
+        )
+        self.assertAlmostEqual(base_peak["Hot_Ramp_Peak_Correction_MWH"], 10.0)
+        self.assertLessEqual(base_peak["Final_Forecast_MWH"], 330.0 + 1e-9)
+
+
 class HeatPersistenceNoAnchorGuardTests(unittest.TestCase):
     def _no_anchor_frame_and_config(
         self, floor_applies_without_positive_anchor: bool

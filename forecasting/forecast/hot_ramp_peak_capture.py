@@ -913,15 +913,16 @@ def _timed_peak_correction(
         return day_correction
 
     day_correction = selected_hour_correction * weights
-    adjusted = base.loc[adjustment_idx] + day_correction
+    base_adjustment = base.loc[adjustment_idx]
+    adjusted = base_adjustment + day_correction
     non_selected = ~selected_mask
     over_target = non_selected & adjusted.gt(target_peak).fillna(False)
     if over_target.any() and bool(
         selector_cfg.get("cap_nonselected_hours_to_target", True)
     ):
-        day_correction.loc[over_target] = (target_peak - base.loc[over_target]).clip(
-            lower=0.0
-        )
+        day_correction.loc[over_target] = (
+            target_peak - base_adjustment.loc[over_target]
+        ).clip(lower=0.0)
     return day_correction.clip(lower=0.0)
 
 

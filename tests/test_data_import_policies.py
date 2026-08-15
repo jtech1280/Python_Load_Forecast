@@ -132,6 +132,57 @@ class DataImportPolicyTests(unittest.TestCase):
             )
             self.assertEqual(out["TempF"].tolist(), [80.0, 81.0])
 
+    def test_gfs_run_lock_can_import_outside_window_when_daily_cache_is_missing(self):
+        tz = ZoneInfo("America/Los_Angeles")
+        payload = {
+            "hourly": {
+                "time": ["2026-08-01T00:00", "2026-08-01T01:00"],
+                "temperature_2m": [83.0, 84.0],
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            config = self._weather_config(cache_dir)
+            config["openmeteo"]["forecast_import_policy"][
+                "daily_cache_stem"
+            ] = "forecast_weather_gfs_06z"
+            config["openmeteo"]["gfs_run_lock"] = {
+                "enabled": True,
+                "single_runs_url": "https://single-runs-api.open-meteo.com/v1/forecast",
+                "model": "gfs_seamless",
+                "run_hour_utc": 6,
+                "latest_cache_stem": "forecast_weather_gfs_06z_latest",
+                "allow_import_outside_window": True,
+                "allow_previous_day_fallback": False,
+                "allow_standard_forecast_fallback": False,
+            }
+
+            with (
+                patch(
+                    "forecasting.data.weather_loader._now_local",
+                    return_value=pd.Timestamp("2026-08-01 13:00", tz=tz),
+                ),
+                patch(
+                    "forecasting.data.weather_loader._fetch_json", return_value=payload
+                ) as fetch_json,
+            ):
+                out = fetch_forecast_weather(config)
+
+            daily_cache = cache_dir / "forecast_weather_gfs_06z_2026-08-01.csv"
+            latest_cache = cache_dir / "forecast_weather_gfs_06z_latest.csv"
+            called_url = fetch_json.call_args[0][0]
+            called_params = fetch_json.call_args[0][1]
+            self.assertTrue(daily_cache.exists())
+            self.assertTrue(latest_cache.exists())
+            self.assertEqual(called_url, "https://single-runs-api.open-meteo.com/v1/forecast")
+            self.assertEqual(called_params["models"], "gfs_seamless")
+            self.assertEqual(called_params["forecast_days"], 16)
+            self.assertTrue(called_params["run"].endswith("T06:00"))
+            self.assertTrue(
+                out.attrs["weather_source"].startswith("open_meteo_gfs_run_locked_")
+            )
+            self.assertEqual(out["TempF"].tolist(), [83.0, 84.0])
+
     def test_actuals_import_cutoff_uses_prior_day_completed_hour_label(self):
         config = {
             "project": {"timezone": "America/Los_Angeles"},

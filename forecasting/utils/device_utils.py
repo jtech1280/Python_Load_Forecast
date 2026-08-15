@@ -97,7 +97,8 @@ def _move_to_device(data: Any, target_device: str) -> Any:
         except ImportError:
             logger.warning(
                 "CuPy not installed; cannot move data to GPU. Falling back to CPU prediction. "
-                "Install with: pip install cupy-cuda11x (replace 11x with your CUDA version)"
+                "Install the CUDA 12 environment with scripts\\rebuild_forecast_environment_cuda12.ps1 "
+                "or run: pip install cupy-cuda12x"
             )
             return data
         except Exception as e:
