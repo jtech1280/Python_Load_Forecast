@@ -3,8 +3,12 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+import pandas as pd
+
 from forecasting.backtest.rolling_origin_replay import (
+    _serial_replay_required_for_catboost_gpu,
     _worker_config_for_parallel_replay,
+    run_rolling_origin_replay,
 )
 
 
@@ -54,6 +58,145 @@ class WorkerConfigForParallelReplayTests(unittest.TestCase):
 
         self.assertEqual(worker_config["hardware"]["cpu_threads"], 4)
         self.assertEqual(config, {})
+
+
+class CatBoostGpuReplayParallelSafetyTests(unittest.TestCase):
+    def test_catboost_gpu_requires_serial_replay_by_default(self):
+        config = {
+            "hardware": {"use_gpu": True},
+            "model": {
+                "catboost": {
+                    "enabled": True,
+                    "task_type": "GPU",
+                    "require_gpu": True,
+                }
+            },
+        }
+
+        self.assertTrue(
+            _serial_replay_required_for_catboost_gpu(
+                config, skip_catboost=False, parallel_cfg={}
+            )
+        )
+
+    def test_require_gpu_overrides_stale_cpu_task_type_for_serial_replay_guard(self):
+        config = {
+            "hardware": {"use_gpu": True},
+            "model": {
+                "catboost": {
+                    "enabled": True,
+                    "task_type": "CPU",
+                    "require_gpu": True,
+                }
+            },
+        }
+
+        self.assertTrue(
+            _serial_replay_required_for_catboost_gpu(
+                config, skip_catboost=False, parallel_cfg={}
+            )
+        )
+
+    def test_cpu_catboost_does_not_force_serial_replay(self):
+        config = {
+            "hardware": {"use_gpu": True},
+            "model": {
+                "catboost": {
+                    "enabled": True,
+                    "task_type": "CPU",
+                    "require_gpu": False,
+                }
+            },
+        }
+
+        self.assertFalse(
+            _serial_replay_required_for_catboost_gpu(
+                config, skip_catboost=False, parallel_cfg={}
+            )
+        )
+
+    def test_skipped_catboost_does_not_force_serial_replay(self):
+        config = {
+            "hardware": {"use_gpu": True},
+            "model": {"catboost": {"enabled": True, "task_type": "GPU"}},
+        }
+
+        self.assertFalse(
+            _serial_replay_required_for_catboost_gpu(
+                config, skip_catboost=True, parallel_cfg={}
+            )
+        )
+
+    def test_explicit_opt_out_allows_parallel_catboost_gpu(self):
+        config = {
+            "hardware": {"use_gpu": True},
+            "model": {"catboost": {"enabled": True, "task_type": "GPU"}},
+        }
+
+        self.assertFalse(
+            _serial_replay_required_for_catboost_gpu(
+                config,
+                skip_catboost=False,
+                parallel_cfg={"serial_when_catboost_gpu": False},
+            )
+        )
+
+
+class RollingOriginReplayCatBoostGpuExecutionTests(unittest.TestCase):
+    def test_catboost_gpu_guard_runs_replay_without_multiprocessing_pool(self):
+        train_df = pd.DataFrame(
+            {
+                "DT": pd.date_range("2026-01-01", periods=48, freq="h"),
+                "MWH": range(48),
+            }
+        )
+        config = {
+            "hardware": {"use_gpu": True},
+            "model": {
+                "catboost": {
+                    "enabled": True,
+                    "task_type": "GPU",
+                    "require_gpu": True,
+                }
+            },
+            "training": {
+                "rolling_origin_replay": {
+                    "parallel": {
+                        "enabled": True,
+                        "processes": 4,
+                        "serial_when_catboost_gpu": True,
+                    },
+                    "skip_catboost": False,
+                    "horizon_days": 1,
+                    "calibration_days": 1,
+                }
+            },
+        }
+        fake_origins = [
+            pd.Timestamp("2026-01-02 00:00:00"),
+            pd.Timestamp("2026-01-03 00:00:00"),
+        ]
+
+        def fake_single_origin(args):
+            origin_number = args[0]
+            return pd.DataFrame({"origin_number": [origin_number]}), []
+
+        with (
+            patch(
+                "forecasting.backtest.rolling_origin_replay._origin_candidates",
+                return_value=fake_origins,
+            ),
+            patch(
+                "forecasting.backtest.rolling_origin_replay._run_single_origin_replay",
+                side_effect=fake_single_origin,
+            ) as run_single,
+            patch("forecasting.backtest.rolling_origin_replay.Pool") as pool_cls,
+        ):
+            result = run_rolling_origin_replay(train_df, features=["MWH"], config=config)
+
+        pool_cls.assert_not_called()
+        self.assertEqual(run_single.call_count, 2)
+        self.assertEqual(result["origin_number"].tolist(), [1, 2])
 
 
 if __name__ == "__main__":

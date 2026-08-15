@@ -150,6 +150,10 @@ def _gpu_requested(config: dict | None) -> bool:
     return hw_use_gpu and (_require_gpu(config) or task == "GPU")
 
 
+def catboost_gpu_requested(config: dict | None) -> bool:
+    return _gpu_requested(config)
+
+
 def _gpu_requirement_error(config: dict | None) -> str | None:
     if not _require_gpu(config):
         return None

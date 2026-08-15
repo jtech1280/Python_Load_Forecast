@@ -268,6 +268,10 @@ training:
     parallel:
       enabled: true
       processes: 4  # null to default to cpu_count() // 2
+      # CatBoost's GPU backend can terminate the native worker process on small GPUs
+      # when multiple replay origins train concurrently. Keep origin replay serial
+      # whenever CatBoost GPU is active; set false only on a larger dedicated GPU.
+      serial_when_catboost_gpu: true
     horizon_days: 16
     calibration_days: 45
     origin_selection: "fixed" # Fixed set keeps tuning passes apples-to-apples; remove fixed_origins to rebalance.
@@ -446,12 +450,10 @@ model:
     # "MAE is not implemented for GPU" warning and CPU-side metric throttling.
     gpu_eval_metric: "RMSE"
     thread_count: -1
-    # PENDING REPLAY VALIDATION (added 2026-08-10): CatBoost's own default (0.95) grabs
-    # ~95% of free VRAM on startup, which is fine for one process but causes a CUDA
-    # out-of-memory/bad-allocation failure when replay.parallel.processes runs multiple
-    # origins concurrently against the same GPU. Sized for parallel.processes: 4 with
-    # headroom for driver/context overhead and concurrent XGB GPU usage; retune if that
-    # process count changes (roughly 1 / (processes + 1)).
+    # CatBoost's own default (0.95) grabs nearly all free VRAM on startup. Keep a cap
+    # because this workstation has a 5 GB GPU and XGBoost/display contexts may already
+    # be resident. Rolling replay serializes CatBoost GPU training separately via
+    # training.rolling_origin_replay.parallel.serial_when_catboost_gpu.
     gpu_ram_part: 0.20
 
   prophet:

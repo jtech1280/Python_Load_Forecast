@@ -73,7 +73,11 @@ from forecasting.forecast.recursive_engine import recursive_forecast
 from forecasting.data.weather_loader import fetch_previous_run_weather
 from forecasting.features.feature_builder import build_forecast_frame
 from forecasting.features.intraday_load_features import zero_intraday_load_features
-from forecasting.model.catboost_model import catboost_enabled, train_catboost
+from forecasting.model.catboost_model import (
+    catboost_enabled,
+    catboost_gpu_requested,
+    train_catboost,
+)
 from forecasting.model.prophet_model import (
     DEFAULT_PROPHET_REGRESSORS,
     prophet_enabled,
@@ -1605,6 +1609,16 @@ def _worker_config_for_parallel_replay(config: dict, num_processes: int) -> dict
     return worker_config
 
 
+def _serial_replay_required_for_catboost_gpu(
+    config: dict | None, skip_catboost: bool, parallel_cfg: dict | None
+) -> bool:
+    if skip_catboost:
+        return False
+    if not bool((parallel_cfg or {}).get("serial_when_catboost_gpu", True)):
+        return False
+    return catboost_enabled(config) and catboost_gpu_requested(config)
+
+
 def run_rolling_origin_replay(
     train_df: pd.DataFrame, features: list[str], config: dict
 ) -> pd.DataFrame:
@@ -1635,6 +1649,21 @@ def run_rolling_origin_replay(
         except NotImplementedError:
             num_processes = 2
     num_processes = min(num_processes, max(1, len(origins)))
+
+    if (
+        parallel_enabled
+        and num_processes > 1
+        and _serial_replay_required_for_catboost_gpu(
+            config, skip_catboost, parallel_cfg
+        )
+    ):
+        print(
+            "CatBoost GPU is enabled; running rolling-origin replay sequentially "
+            "to avoid native CatBoost GPU memory aborts from concurrent workers.",
+            flush=True,
+        )
+        parallel_enabled = False
+        num_processes = 1
 
     run_config = config
     if parallel_enabled and num_processes > 1:
