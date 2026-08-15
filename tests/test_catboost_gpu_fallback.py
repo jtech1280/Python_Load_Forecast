@@ -44,6 +44,14 @@ class CatBoostAttemptOrderingTests(unittest.TestCase):
         backends = [name for name, _ in _attempts(config)]
         self.assertEqual(backends, ["gpu"])
 
+    def test_require_gpu_disables_cpu_fallback_even_when_global_fallback_enabled(self):
+        config = {
+            "hardware": {"use_gpu": True, "fallback_to_cpu": True},
+            "model": {"catboost": {"task_type": "GPU", "require_gpu": True}},
+        }
+        backends = [name for name, _ in _attempts(config)]
+        self.assertEqual(backends, ["gpu"])
+
     def test_hardware_use_gpu_false_skips_gpu_even_if_task_type_gpu(self):
         config = {
             "hardware": {"use_gpu": False, "fallback_to_cpu": True},
@@ -59,6 +67,14 @@ class CatBoostAttemptOrderingTests(unittest.TestCase):
         }
         backends = [name for name, _ in _attempts(config)]
         self.assertEqual(backends, ["cpu"])
+
+    def test_require_gpu_overrides_cpu_task_type(self):
+        config = {
+            "hardware": {"use_gpu": True, "fallback_to_cpu": True},
+            "model": {"catboost": {"task_type": "CPU", "require_gpu": True}},
+        }
+        backends = [name for name, _ in _attempts(config)]
+        self.assertEqual(backends, ["gpu"])
 
 
 class CatBoostGpuRamPartTests(unittest.TestCase):
@@ -145,6 +161,60 @@ class TrainCatboostRuntimeFallbackTests(unittest.TestCase):
         self.assertEqual(len(info["failed_attempts"]), 1)
         self.assertIn("gpu", info["failed_attempts"][0])
 
+    def test_train_catboost_require_gpu_raises_when_gpu_attempt_raises(self):
+        df = _synthetic_frame()
+        config = {
+            "hardware": {"use_gpu": True, "fallback_to_cpu": True},
+            "model": {
+                "early_stopping": {"enabled": False},
+                "monotonic_constraints": {"enabled": False},
+                "catboost": {
+                    "enabled": True,
+                    "iterations": 10,
+                    "depth": 2,
+                    "task_type": "GPU",
+                    "require_gpu": True,
+                },
+            },
+        }
+        with patch(
+            "forecasting.model.catboost_model._import_catboost",
+            return_value=(FakeCatBoostRegressor, None),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "CatBoost GPU is required"):
+                train_catboost(df, features=["Temperature", "Hour"], config=config)
+
+        info = get_last_catboost_training_info()
+        self.assertIsNone(info["selected_backend"])
+        self.assertTrue(info["requested_gpu"])
+        self.assertTrue(info["require_gpu"])
+        self.assertFalse(info["cpu_fallback_allowed"])
+        self.assertEqual(len(info["failed_attempts"]), 1)
+        self.assertIn("gpu", info["failed_attempts"][0])
+
+    def test_train_catboost_require_gpu_rejects_cpu_only_config(self):
+        df = _synthetic_frame()
+        config = {
+            "hardware": {"use_gpu": False, "fallback_to_cpu": True},
+            "model": {
+                "early_stopping": {"enabled": False},
+                "catboost": {
+                    "enabled": True,
+                    "iterations": 10,
+                    "depth": 2,
+                    "task_type": "GPU",
+                    "require_gpu": True,
+                },
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "hardware.use_gpu=false"):
+            train_catboost(df, features=["Temperature", "Hour"], config=config)
+
+        info = get_last_catboost_training_info()
+        self.assertIsNone(info["selected_backend"])
+        self.assertTrue(info["require_gpu"])
+        self.assertIn("hardware.use_gpu=false", info["reason"])
+
 
 class AlwaysSucceedsCatBoostRegressor:
     """Stand-in that succeeds on whichever backend it's given, so the GPU attempt is
@@ -162,6 +232,85 @@ class AlwaysSucceedsCatBoostRegressor:
 
     def get_best_iteration(self):
         return 4
+
+
+class CatBoostEvalMetricSelectionTests(unittest.TestCase):
+    def _config(
+        self,
+        *,
+        task_type: str,
+        require_gpu: bool = False,
+        gpu_eval_metric: str | None = None,
+    ) -> dict:
+        catboost_cfg = {
+            "enabled": True,
+            "iterations": 10,
+            "depth": 2,
+            "task_type": task_type,
+            "require_gpu": require_gpu,
+        }
+        if gpu_eval_metric is not None:
+            catboost_cfg["gpu_eval_metric"] = gpu_eval_metric
+        return {
+            "hardware": {"use_gpu": True, "fallback_to_cpu": True},
+            "model": {
+                "early_stopping": {
+                    "enabled": True,
+                    "validation_days": 3,
+                    "min_train_rows": 100,
+                    "rounds": 5,
+                    "metric": "mae",
+                },
+                "monotonic_constraints": {"enabled": False},
+                "catboost": catboost_cfg,
+            },
+        }
+
+    def test_gpu_attempt_uses_configured_gpu_eval_metric_for_mae_early_stopping(
+        self,
+    ):
+        df = _synthetic_frame()
+        with patch(
+            "forecasting.model.catboost_model._import_catboost",
+            return_value=(AlwaysSucceedsCatBoostRegressor, None),
+        ):
+            model, feats = train_catboost(
+                df,
+                features=["Temperature", "Hour"],
+                config=self._config(
+                    task_type="GPU", require_gpu=True, gpu_eval_metric="RMSE"
+                ),
+            )
+
+        self.assertIsNotNone(model)
+        info = get_last_catboost_training_info()
+        self.assertEqual(info["selected_backend"], "gpu")
+        self.assertEqual(info["params"]["eval_metric"], "RMSE")
+        self.assertNotIn("_eval_metric_note", info["params"])
+        self.assertEqual(info["early_stopping"]["metric"], "mae")
+        self.assertEqual(info["early_stopping"]["actual_eval_metric"], "RMSE")
+        self.assertEqual(
+            info["early_stopping"]["eval_metric_note"], "configured_gpu_eval_metric"
+        )
+
+    def test_cpu_attempt_keeps_requested_mae_eval_metric(self):
+        df = _synthetic_frame()
+        with patch(
+            "forecasting.model.catboost_model._import_catboost",
+            return_value=(AlwaysSucceedsCatBoostRegressor, None),
+        ):
+            model, feats = train_catboost(
+                df,
+                features=["Temperature", "Hour"],
+                config=self._config(task_type="CPU"),
+            )
+
+        self.assertIsNotNone(model)
+        info = get_last_catboost_training_info()
+        self.assertEqual(info["selected_backend"], "cpu")
+        self.assertEqual(info["params"]["eval_metric"], "MAE")
+        self.assertEqual(info["early_stopping"]["actual_eval_metric"], "MAE")
+        self.assertIsNone(info["early_stopping"]["eval_metric_note"])
 
 
 class CatBoostGpuMonotonicConstraintTests(unittest.TestCase):

@@ -89,6 +89,27 @@ def _early_stopping_cfg(config: dict | None) -> dict[str, Any]:
     }
 
 
+def _catboost_eval_metric(
+    config: dict | None, backend_name: str, requested_metric: object
+) -> tuple[str, str | None]:
+    requested = str(requested_metric or "mae").strip().upper() or "MAE"
+    if backend_name != "gpu":
+        return requested, None
+
+    p = _cfg(config, "model", "catboost", default={}) or {}
+    configured = p.get("gpu_eval_metric")
+    if configured not in {None, ""}:
+        metric = str(configured).strip().upper()
+        return metric, "configured_gpu_eval_metric" if metric != requested else None
+
+    if requested == "MAE":
+        fallback = str(p.get("loss_function", "RMSE")).strip().upper() or "RMSE"
+        if fallback == "MAE":
+            fallback = "RMSE"
+        return fallback, "mae_not_gpu_native"
+    return requested, None
+
+
 def _import_catboost():
     try:
         from catboost import CatBoostRegressor
@@ -115,19 +136,44 @@ def _base_params(config: dict | None) -> dict[str, Any]:
     }
 
 
+def _require_gpu(config: dict | None) -> bool:
+    p = _cfg(config, "model", "catboost", default={}) or {}
+    return _as_bool(p.get("require_gpu", False), default=False)
+
+
 def _gpu_requested(config: dict | None) -> bool:
     hw_use_gpu = _as_bool(
         _cfg(config, "hardware", "use_gpu", default=True), default=True
     )
     p = _cfg(config, "model", "catboost", default={}) or {}
     task = str(p.get("task_type", "GPU")).upper()
-    return hw_use_gpu and task == "GPU"
+    return hw_use_gpu and (_require_gpu(config) or task == "GPU")
+
+
+def _gpu_requirement_error(config: dict | None) -> str | None:
+    if not _require_gpu(config):
+        return None
+    hw_use_gpu = _as_bool(
+        _cfg(config, "hardware", "use_gpu", default=True), default=True
+    )
+    if not hw_use_gpu:
+        return "model.catboost.require_gpu=true but hardware.use_gpu=false"
+    return None
+
+
+def _cpu_fallback_allowed(config: dict | None) -> bool:
+    if _require_gpu(config):
+        return False
+    p = _cfg(config, "model", "catboost", default={}) or {}
+    hw = _cfg(config, "hardware", default={}) or {}
+    return _as_bool(
+        p.get("fallback_to_cpu", hw.get("fallback_to_cpu", True)), default=True
+    )
 
 
 def _attempts(config: dict | None) -> list[tuple[str, dict[str, Any]]]:
     p = _cfg(config, "model", "catboost", default={}) or {}
-    hw = _cfg(config, "hardware", default={}) or {}
-    fallback_to_cpu = _as_bool(hw.get("fallback_to_cpu", True), default=True)
+    fallback_to_cpu = _cpu_fallback_allowed(config)
     base = _base_params(config)
     attempts: list[tuple[str, dict[str, Any]]] = []
     if _gpu_requested(config):
@@ -146,7 +192,7 @@ def _attempts(config: dict | None) -> list[tuple[str, dict[str, Any]]]:
         attempts.append(("gpu", gp))
     cp = dict(base)
     cp["task_type"] = "CPU"
-    if not _gpu_requested(config) or fallback_to_cpu:
+    if not _require_gpu(config) and (not _gpu_requested(config) or fallback_to_cpu):
         attempts.append(("cpu", cp))
     return attempts
 
@@ -158,16 +204,35 @@ def train_catboost(
     global _LAST_CATBOOST_TRAINING_INFO
     cfg = config or {}
     features = _available_features(df, features or DEFAULT_FEATURES)
-    CatBoostRegressor, import_error = _import_catboost()
-    if CatBoostRegressor is None:
+    requirement_error = _gpu_requirement_error(cfg)
+    if requirement_error is not None:
         _LAST_CATBOOST_TRAINING_INFO = {
             "enabled": catboost_enabled(cfg),
+            "requested_gpu": _gpu_requested(cfg),
+            "require_gpu": _require_gpu(cfg),
             "selected_backend": None,
             "skipped": True,
-            "reason": f"catboost is not installed or could not be imported: {import_error}",
+            "reason": requirement_error,
             "n_rows": int(len(df)),
             "n_features": int(len(features)),
         }
+        raise ValueError(requirement_error)
+
+    CatBoostRegressor, import_error = _import_catboost()
+    if CatBoostRegressor is None:
+        reason = f"catboost is not installed or could not be imported: {import_error}"
+        _LAST_CATBOOST_TRAINING_INFO = {
+            "enabled": catboost_enabled(cfg),
+            "requested_gpu": _gpu_requested(cfg),
+            "require_gpu": _require_gpu(cfg),
+            "selected_backend": None,
+            "skipped": True,
+            "reason": reason,
+            "n_rows": int(len(df)),
+            "n_features": int(len(features)),
+        }
+        if _require_gpu(cfg):
+            raise RuntimeError(f"CatBoost GPU is required, but {reason}")
         print(
             "WARNING: CatBoost benchmark skipped because catboost is not installed or failed to import."
         )
@@ -209,15 +274,20 @@ def train_catboost(
                 continue
             attempt_params["monotone_constraints"] = mono_vector
     if has_eval_set:
-        for _, attempt_params in attempts:
-            attempt_params["eval_metric"] = (
-                str(es_cfg.get("metric", "mae")).strip().upper()
+        for backend_name, attempt_params in attempts:
+            eval_metric, metric_note = _catboost_eval_metric(
+                cfg, backend_name, es_cfg.get("metric", "mae")
             )
+            attempt_params["eval_metric"] = eval_metric
+            if metric_note is not None:
+                attempt_params["_eval_metric_note"] = metric_note
 
     for backend_name, params in attempts:
         try:
             print(f"Training CatBoost benchmark with {backend_name.upper()} backend...")
-            model = CatBoostRegressor(**params)
+            model_params = dict(params)
+            eval_metric_note = model_params.pop("_eval_metric_note", None)
+            model = CatBoostRegressor(**model_params)
             fit_kwargs: dict[str, Any] = {"sample_weight": sample_weight}
             if has_eval_set:
                 fit_kwargs["eval_set"] = (X_valid, y_valid)
@@ -235,14 +305,18 @@ def train_catboost(
             _LAST_CATBOOST_TRAINING_INFO = {
                 "enabled": catboost_enabled(cfg),
                 "requested_gpu": _gpu_requested(cfg),
+                "require_gpu": _require_gpu(cfg),
+                "cpu_fallback_allowed": _cpu_fallback_allowed(cfg),
                 "selected_backend": backend_name,
-                "params": params,
+                "params": model_params,
                 "monotonic_constraints_requested": mono_vector is not None,
-                "monotonic_constraints_applied": "monotone_constraints" in params,
+                "monotonic_constraints_applied": "monotone_constraints" in model_params,
                 "failed_attempts": errors,
                 "early_stopping": {
                     "enabled": bool(has_eval_set),
                     "metric": str(es_cfg.get("metric", "mae")),
+                    "actual_eval_metric": model_params.get("eval_metric"),
+                    "eval_metric_note": eval_metric_note,
                     "rounds": int(es_cfg.get("rounds", 75)),
                     "validation_days": float(es_cfg.get("validation_days", 45)),
                     "best_iteration": best_iteration,
@@ -264,12 +338,20 @@ def train_catboost(
     _LAST_CATBOOST_TRAINING_INFO = {
         "enabled": catboost_enabled(cfg),
         "requested_gpu": _gpu_requested(cfg),
+        "require_gpu": _require_gpu(cfg),
+        "cpu_fallback_allowed": _cpu_fallback_allowed(cfg),
         "selected_backend": None,
         "skipped": True,
         "failed_attempts": errors,
         "n_rows": int(len(df)),
         "n_features": int(len(features)),
     }
+    if _require_gpu(cfg):
+        details = "; ".join(errors) if errors else "no CatBoost GPU attempt was made"
+        raise RuntimeError(
+            "CatBoost GPU is required, but GPU training did not complete. "
+            f"Details: {details}"
+        )
     print("WARNING: CatBoost benchmark skipped after all training attempts failed.")
     return None, features
 

@@ -433,14 +433,18 @@ model:
     l2_leaf_reg: 4.0
     loss_function: "RMSE"
     random_seed: 42
-    # GPU first when hardware.use_gpu=true; CPU fallback is automatic. Some machines
-    # sharing this same repo checkout (moved by zip copy, not git, so a machine-local
-    # config.local.yaml would get carried along too) run CatBoost on a much smaller GPU
-    # than others -- override with a real OS environment variable on that machine only
-    # (e.g. Windows: setx FORECAST_CATBOOST_TASK_TYPE CPU, then open a new terminal) to
-    # force CPU there without touching this file or anything that gets zipped/copied.
+    # GPU first when hardware.use_gpu=true. In this production config CatBoost GPU is
+    # required, so CPU fallback is disabled for CatBoost even though hardware.fallback_to_cpu
+    # stays available for XGBoost/LightGBM. To force CPU on a smaller machine, set both
+    # FORECAST_CATBOOST_REQUIRE_GPU=false and FORECAST_CATBOOST_TASK_TYPE=CPU in the OS
+    # environment, then open a new terminal.
+    require_gpu: "${FORECAST_CATBOOST_REQUIRE_GPU:-true}"
     task_type: "${FORECAST_CATBOOST_TASK_TYPE:-GPU}"
     devices: "0"
+    # CatBoost GPU does not implement MAE as a native eval metric; scorecards still
+    # evaluate MAE after prediction, but GPU early stopping uses RMSE to avoid the
+    # "MAE is not implemented for GPU" warning and CPU-side metric throttling.
+    gpu_eval_metric: "RMSE"
     thread_count: -1
     # PENDING REPLAY VALIDATION (added 2026-08-10): CatBoost's own default (0.95) grabs
     # ~95% of free VRAM on startup, which is fine for one process but causes a CUDA
