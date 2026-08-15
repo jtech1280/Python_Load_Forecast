@@ -2487,13 +2487,15 @@ calibration:
         correction_mwh: 8.0
 
   heat_persistence_peak_capture:
-    # Shadow-only companion to hot_ramp_peak_capture for Aug-3-style heat
+    # Guarded companion to hot_ramp_peak_capture for Aug-3-style heat
     # persistence peaks where daily max stays extreme but the 1-day ramp is
-    # below the hot-ramp threshold. Promotion should be stratified, not global.
+    # below the hot-ramp threshold. Promoted after the 2026-08-15 replay showed
+    # only 16 touched rows, all Aug day-6/7 peak rows, improving touched-row MAE
+    # from 9.92 to 6.43 MWh and seasonal MAE from 4.636 to 4.631.
     enabled: true
-    shadow_mode: true
-    model_version: "heat_persistence_peak_capture_shadow_v1"
-    source: "heat_persistence_peak_shadow"
+    shadow_mode: false
+    model_version: "heat_persistence_peak_capture_guarded_prod_v1"
+    source: "heat_persistence_peak_guarded_prod"
     min_training_days: 3
     min_lookup_days: 2
     train_enforce_forecast_day: false
