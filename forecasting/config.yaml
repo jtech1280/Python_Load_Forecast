@@ -2524,6 +2524,10 @@ calibration:
     strong_cap_mwh: 9.0
     min_abs_correction_mwh: 0.25
     floor_applies_without_positive_anchor: true
+    # Production-safe fallback for the same strict scope when the per-origin lookup
+    # is starved. The replay promotion benefit comes mostly from this floor-based
+    # fallback on Aug day-6/7 heat-persistence peaks.
+    allow_anchorless_fallback: true
     allow_anchorless_shadow_fallback: true
     recent_anchor_days: 3
     warmer_scenario_fraction: 0.25

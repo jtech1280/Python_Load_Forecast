@@ -96,6 +96,7 @@ def _default_solar_weather_cache_dir() -> Path:
 
 DEFAULT_SOLAR_WEATHER_CACHE_DIR = _default_solar_weather_cache_dir()
 DEFAULT_FORECAST_WEATHER_CACHE_MAX_AGE_HOURS = 6.0
+DEFAULT_HOURLY_WEATHER_FETCH_CHUNK_DAYS = 16
 INDEX_CACHE_ROOT = Path("_shape_analysis_cache") / "spid_file_index"
 CATALOG_COLUMNS = [
     "FileID",
@@ -541,6 +542,65 @@ def _solar_weather_cache_is_fresh(path: Path, max_age_hours: float) -> bool:
     except OSError:
         return False
     return age_seconds <= max(0.0, float(max_age_hours)) * 3600.0
+
+
+def _read_overlapping_solar_weather_caches(
+    *,
+    cache_dir: str | Path | None,
+    kind: str,
+    source_name: str,
+    start_date: date,
+    end_date: date,
+    sites: pd.DataFrame,
+    timezone_name: str,
+    variables: Optional[list[str]],
+    timestamp_col: str,
+    forecast_cache_max_age_hours: float = DEFAULT_FORECAST_WEATHER_CACHE_MAX_AGE_HOURS,
+) -> pd.DataFrame:
+    root = _solar_weather_cache_root(cache_dir)
+    if not root.exists():
+        return pd.DataFrame()
+
+    site_hash = _solar_weather_site_signature(sites)
+    suffix_parts = [_safe_cache_token(timezone_name), site_hash]
+    if variables:
+        suffix_parts.append(_weather_variables_signature(variables))
+    expected_suffix = "_" + "_".join(suffix_parts)
+
+    frames: list[pd.DataFrame] = []
+    for path in root.glob(f"solar_{kind}_{source_name}_*.csv"):
+        stem = path.stem
+        if not stem.endswith(expected_suffix):
+            continue
+        parts = stem.split("_")
+        if len(parts) < 7:
+            continue
+        try:
+            cache_start = date.fromisoformat(parts[3])
+            cache_end = date.fromisoformat(parts[4])
+        except ValueError:
+            continue
+        if cache_end < start_date or cache_start > end_date:
+            continue
+        if source_name == "forecast" and not _solar_weather_cache_is_fresh(
+            path, forecast_cache_max_age_hours
+        ):
+            continue
+
+        overlap_start = max(start_date, cache_start)
+        overlap_end = min(end_date, cache_end)
+        cached = _read_solar_weather_cache(
+            path,
+            start_date=overlap_start,
+            end_date=overlap_end,
+            timestamp_col=timestamp_col,
+        )
+        if not cached.empty:
+            frames.append(cached)
+
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
 
 
 def _archive_solar_forecast_weather(
@@ -2193,6 +2253,24 @@ def contiguous_date_ranges(dates: list[date]) -> list[tuple[date, date]]:
     return ranges
 
 
+def chunk_date_range(
+    range_start: date, range_end: date, max_days: int
+) -> list[tuple[date, date]]:
+    """
+    Split an inclusive date range into smaller inclusive ranges.
+    """
+    if range_start > range_end:
+        return []
+    chunk_days = max(1, int(max_days))
+    chunks: list[tuple[date, date]] = []
+    current = range_start
+    while current <= range_end:
+        chunk_end = min(range_end, current + timedelta(days=chunk_days - 1))
+        chunks.append((current, chunk_end))
+        current = chunk_end + timedelta(days=1)
+    return chunks
+
+
 def missing_hourly_weather_ranges(
     reusable_weather: pd.DataFrame,
     start_date: date,
@@ -2689,6 +2767,7 @@ def fetch_hourly_weather_for_date_range(
     array_azimuth_degrees: float = DEFAULT_ARRAY_AZIMUTH_DEGREES,
     weather_locations_per_request: int = DEFAULT_WEATHER_LOCATIONS_PER_REQUEST,
     cache_dir: str | Path | None = DEFAULT_SOLAR_WEATHER_CACHE_DIR,
+    forecast_cache_max_age_hours: float = DEFAULT_FORECAST_WEATHER_CACHE_MAX_AGE_HOURS,
     reusable_weather_frames: Optional[list[pd.DataFrame]] = None,
 ) -> pd.DataFrame:
     """
@@ -2716,32 +2795,67 @@ def fetch_hourly_weather_for_date_range(
         range_end: date,
         use_forecast: bool,
     ) -> None:
-        reusable_subset = reusable_weather[
-            (reusable_weather["date"] >= range_start)
-            & (reusable_weather["date"] <= range_end)
-        ].copy()
-        if not reusable_subset.empty:
-            frames.append(reusable_subset)
+        source_name = "forecast" if use_forecast else "historical"
+        if reusable_weather.empty or "date" not in reusable_weather.columns:
+            reusable_subset = pd.DataFrame()
+        else:
+            reusable_subset = reusable_weather[
+                (reusable_weather["date"] >= range_start)
+                & (reusable_weather["date"] <= range_end)
+            ].copy()
+        cached_subset = _read_overlapping_solar_weather_caches(
+            cache_dir=cache_dir,
+            kind="hourly",
+            source_name=source_name,
+            start_date=range_start,
+            end_date=range_end,
+            sites=sites,
+            timezone_name=timezone_name,
+            variables=HOURLY_WEATHER_VARIABLES,
+            timestamp_col="IntervalStartDT",
+            forecast_cache_max_age_hours=forecast_cache_max_age_hours,
+        )
+        available_subset = collect_reusable_hourly_weather(
+            [reusable_subset, cached_subset],
+            range_start,
+            range_end,
+            expected_site_keys,
+        )
+        if not available_subset.empty:
+            logging.info(
+                "Reusing %s %s hourly solar weather rows from memory/cache for %s to %s",
+                f"{len(available_subset):,}",
+                source_name,
+                range_start,
+                range_end,
+            )
+            frames.append(available_subset)
 
         for missing_start, missing_end in missing_hourly_weather_ranges(
-            reusable_subset,
+            available_subset,
             range_start,
             range_end,
             expected_site_keys,
         ):
-            frames.append(
-                fetch_open_meteo_hourly_weather(
-                    sites,
-                    missing_start,
-                    missing_end,
-                    use_forecast,
-                    timezone_name,
-                    array_tilt_degrees=array_tilt_degrees,
-                    array_azimuth_degrees=array_azimuth_degrees,
-                    weather_locations_per_request=weather_locations_per_request,
-                    cache_dir=cache_dir,
+            for fetch_start, fetch_end in chunk_date_range(
+                missing_start,
+                missing_end,
+                DEFAULT_HOURLY_WEATHER_FETCH_CHUNK_DAYS,
+            ):
+                frames.append(
+                    fetch_open_meteo_hourly_weather(
+                        sites,
+                        fetch_start,
+                        fetch_end,
+                        use_forecast,
+                        timezone_name,
+                        array_tilt_degrees=array_tilt_degrees,
+                        array_azimuth_degrees=array_azimuth_degrees,
+                        weather_locations_per_request=weather_locations_per_request,
+                        cache_dir=cache_dir,
+                        forecast_cache_max_age_hours=forecast_cache_max_age_hours,
+                    )
                 )
-            )
 
     archive_end = min(end_date, today - timedelta(days=1))
     if start_date <= archive_end:

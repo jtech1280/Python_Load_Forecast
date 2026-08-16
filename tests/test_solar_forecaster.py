@@ -161,6 +161,124 @@ class SolarForecasterRetryTests(unittest.TestCase):
             self.assertEqual(len(cached), 1)
             self.assertEqual(float(cached.loc[0, "GHI_kWh_per_m2"]), 0.05)
 
+    def test_hourly_weather_range_reuses_overlapping_disk_caches_without_api_call(self):
+        sites = pd.DataFrame(
+            [{"SolarSiteKey": 1, "Latitude": 38.7522, "Longitude": -121.2880}]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            first_path = solar_forecaster._solar_weather_cache_path(
+                cache_dir=tmp,
+                kind="hourly",
+                source_name="historical",
+                start_date=date(2026, 6, 1),
+                end_date=date(2026, 6, 2),
+                sites=sites,
+                timezone_name="America/Los_Angeles",
+                variables=solar_forecaster.HOURLY_WEATHER_VARIABLES,
+            )
+            second_path = solar_forecaster._solar_weather_cache_path(
+                cache_dir=tmp,
+                kind="hourly",
+                source_name="historical",
+                start_date=date(2026, 6, 3),
+                end_date=date(2026, 6, 3),
+                sites=sites,
+                timezone_name="America/Los_Angeles",
+                variables=solar_forecaster.HOURLY_WEATHER_VARIABLES,
+            )
+            solar_forecaster._write_solar_weather_cache(
+                pd.DataFrame(
+                    {
+                        "SolarSiteKey": [1, 1],
+                        "IntervalStartDT": [
+                            "2026-06-01 12:00:00",
+                            "2026-06-02 12:00:00",
+                        ],
+                        "GHI_kWh_per_m2": [0.80, 0.85],
+                    }
+                ),
+                first_path,
+            )
+            solar_forecaster._write_solar_weather_cache(
+                pd.DataFrame(
+                    {
+                        "SolarSiteKey": [1],
+                        "IntervalStartDT": ["2026-06-03 12:00:00"],
+                        "GHI_kWh_per_m2": [0.90],
+                    }
+                ),
+                second_path,
+            )
+
+            with patch.object(
+                solar_forecaster,
+                "_open_meteo_get_json",
+                side_effect=AssertionError("API should not be called"),
+            ):
+                out = solar_forecaster.fetch_hourly_weather_for_date_range(
+                    sites,
+                    date(2026, 6, 1),
+                    date(2026, 6, 3),
+                    timezone_name="America/Los_Angeles",
+                    cache_dir=tmp,
+                )
+
+        self.assertEqual(len(out), 3)
+        self.assertEqual(
+            set(out["date"]),
+            {date(2026, 6, 1), date(2026, 6, 2), date(2026, 6, 3)},
+        )
+        self.assertAlmostEqual(float(out["GHI_kWh_per_m2"].max()), 0.90)
+
+    def test_hourly_weather_range_chunks_missing_api_fetches(self):
+        sites = pd.DataFrame(
+            [{"SolarSiteKey": 1, "Latitude": 38.7522, "Longitude": -121.2880}]
+        )
+        calls = []
+
+        def fake_fetch(
+            _sites,
+            start_date,
+            end_date,
+            use_forecast,
+            _timezone_name,
+            **_kwargs,
+        ):
+            calls.append((start_date, end_date, use_forecast))
+            return pd.DataFrame(
+                {
+                    "SolarSiteKey": [1 for _ in pd.date_range(start_date, end_date)],
+                    "IntervalStartDT": [
+                        pd.Timestamp(day) + pd.Timedelta(hours=12)
+                        for day in pd.date_range(start_date, end_date)
+                    ],
+                    "GHI_kWh_per_m2": [0.8 for _ in pd.date_range(start_date, end_date)],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            solar_forecaster,
+            "fetch_open_meteo_hourly_weather",
+            side_effect=fake_fetch,
+        ):
+            out = solar_forecaster.fetch_hourly_weather_for_date_range(
+                sites,
+                date(2026, 6, 1),
+                date(2026, 6, 17),
+                timezone_name="America/Los_Angeles",
+                cache_dir=tmp,
+            )
+
+        self.assertEqual(
+            calls,
+            [
+                (date(2026, 6, 1), date(2026, 6, 16), False),
+                (date(2026, 6, 17), date(2026, 6, 17), False),
+            ],
+        )
+        self.assertEqual(len(out), 17)
+
     def test_interval_forecast_preserves_hourly_output_contract_with_model_columns(
         self,
     ):

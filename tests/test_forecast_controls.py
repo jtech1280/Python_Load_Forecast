@@ -1716,6 +1716,71 @@ class ForecastControlTests(unittest.TestCase):
         self.assertEqual(peak["Final_Forecast_MWH"], 340.0)
         self.assertAlmostEqual(peak["Heat_Persistence_Peak_Shadow_Forecast_MWH"], 349.0)
 
+    def test_heat_persistence_peak_capture_anchorless_production_fallback_updates_final(
+        self,
+    ):
+        shape = {16: 332.0, 17: 340.0, 18: 335.0, 19: 325.0, 20: 305.0}
+        future = pd.DataFrame(
+            [
+                {
+                    "DT": pd.Timestamp("2026-08-03") + pd.Timedelta(hours=hour),
+                    "Hour": hour,
+                    "Month": 8,
+                    "Forecast_Day": 6,
+                    "Actual_MWH": base + (12.0 if hour == 17 else 4.0),
+                    "Final_Forecast_MWH": base,
+                    "Stage_Selected_Forecast_MWH": base,
+                    "Temperature": 104.0,
+                    "Temperature_DailyMax": 104.0,
+                    "DailyMaxTemp_Ramp_1Day": 1.0,
+                    "DailyMaxTemp_3DayMean": 103.0,
+                    "ConsecutiveExtremeHotDays100": 3.0,
+                    "CloudCover_Norm": 0.0,
+                }
+                for hour, base in shape.items()
+            ]
+        )
+        config = {
+            "calibration": {
+                "heat_persistence_peak_capture": {
+                    "enabled": True,
+                    "shadow_mode": False,
+                    "source": "unit_heat_persistence_peak_prod",
+                    "allow_anchorless_fallback": True,
+                    "allow_anchorless_shadow_fallback": True,
+                    "min_maxtemp_f": 100.0,
+                    "min_consecutive_extreme_days100": 3.0,
+                    "min_dailymax_3day_mean_f": 100.0,
+                    "max_dailymax_ramp_1day_f": 2.0,
+                    "strong_min_consecutive_extreme_days100": 3.0,
+                    "hours": [16, 17, 18, 19, 20],
+                    "max_cloud_cover_norm": 0.40,
+                    "spread_hours": 1.0,
+                    "strong_persistence_floor_mwh": 9.0,
+                    "cap_mwh": 9.0,
+                    "strong_cap_mwh": 9.0,
+                    "floor_applies_without_positive_anchor": True,
+                }
+            }
+        }
+
+        out = apply_heat_persistence_peak_capture(
+            future,
+            None,
+            config,
+            forecast_col="Final_Forecast_MWH",
+            also_update_cols=("Stage_Selected_Forecast_MWH",),
+        )
+
+        peak = out.loc[out["Hour"].eq(17)].iloc[0]
+        self.assertEqual(peak["Heat_Persistence_Peak_Shadow_Mode"], 0)
+        self.assertEqual(
+            peak["Heat_Persistence_Peak_Source"], "unit_heat_persistence_peak_prod"
+        )
+        self.assertAlmostEqual(peak["Heat_Persistence_Peak_Correction_MWH"], 9.0)
+        self.assertAlmostEqual(peak["Final_Forecast_MWH"], 349.0)
+        self.assertAlmostEqual(peak["Stage_Selected_Forecast_MWH"], 349.0)
+
     def test_heat_persistence_peak_candidate_scorecard_uses_consecutive_heat_stratum(
         self,
     ):

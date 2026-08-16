@@ -2113,7 +2113,12 @@ def apply_heat_persistence_peak_capture(
     if out.empty or not bool(cfg.get("enabled", False)):
         return out
     if not artifact or not artifact.get("metadata"):
-        if shadow_mode and bool(cfg.get("allow_anchorless_shadow_fallback", False)):
+        allow_anchorless_fallback = bool(
+            cfg.get("allow_anchorless_fallback", False)
+        ) or (
+            shadow_mode and bool(cfg.get("allow_anchorless_shadow_fallback", False))
+        )
+        if allow_anchorless_fallback:
             artifact = _heat_persistence_anchorless_shadow_artifact(cfg, forecast_col)
         else:
             out["Heat_Persistence_Peak_Source"] = "insufficient_history"
