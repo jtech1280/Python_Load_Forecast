@@ -222,9 +222,9 @@ class ForecastControlTests(unittest.TestCase):
         self.assertTrue(
             stage_selector.get("daily_peak_shadow_model", {}).get("shadow_mode", False)
         )
-        self.assertTrue(
-            cal.get("heat_persistence_peak_capture", {}).get("shadow_mode", False)
-        )
+        heat_persistence = cal.get("heat_persistence_peak_capture", {})
+        self.assertFalse(heat_persistence.get("shadow_mode", True))
+        self.assertTrue(heat_persistence.get("allow_anchorless_fallback", False))
 
         orl = cal.get("operational_residual_learner", {})
         self.assertEqual(orl.get("production_scope"), "capped_full_shadow")
