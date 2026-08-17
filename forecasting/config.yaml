@@ -2524,10 +2524,16 @@ calibration:
     strong_cap_mwh: 9.0
     min_abs_correction_mwh: 0.25
     floor_applies_without_positive_anchor: true
-    # Production-safe fallback for the same strict scope when the per-origin lookup
-    # is starved. The replay promotion benefit comes mostly from this floor-based
-    # fallback on Aug day-6/7 heat-persistence peaks.
-    allow_anchorless_fallback: true
+    # Reverted to shadow-only on 2026-08-17: strong_min_maxtemp_f/strong_min_consecutive_
+    # extreme_days100 equal the base scope thresholds, so every in-scope row is "strong",
+    # and strong_persistence_floor_mwh == strong_cap_mwh (9.0) makes the anchorless
+    # fallback a flat +9 MWh correction across the entire strong scope whenever the
+    # per-origin lookup is starved -- not just the narrow Aug day-6/7 pattern it was
+    # validated on. The 2026-08-16 4:44 PM full replay showed Hot peak days (+0.223 MAE)
+    # and Peak window 14-18 (+0.079 MAE) both got worse after this went live in
+    # production, so it stays shadow-only (diagnostics only) until validated against the
+    # full hot-peak/peak-window gate population, not just the 16-row touched slice.
+    allow_anchorless_fallback: false
     allow_anchorless_shadow_fallback: true
     recent_anchor_days: 3
     warmer_scenario_fraction: 0.25
