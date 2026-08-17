@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
 from typing import Callable, Optional
@@ -115,6 +117,9 @@ from forecasting.forecast.weather_scenarios import (
 )
 from forecasting.backtest.rolling_backtest import run_rolling_backtest
 from forecasting.diagnostics import build_diagnostics_bundle
+from forecasting.diagnostics.training_weight_diagnostics import (
+    build_training_weight_diagnostic,
+)
 
 ProgressCallback = Callable[[str, int, int | None], None]
 
@@ -1546,6 +1551,16 @@ def run_pipeline(
         solar_df=solar_df,
     )
     _progress(progress_callback, "Built training frame", advance=1)
+
+    if bool(
+        (config.get("diagnostics", {}) or {}).get("training_weight_diagnostic", False)
+    ):
+        weight_report = build_training_weight_diagnostic(train_df, config)
+        out_dir = Path(config.get("project", {}).get("output_dir", "forecast_outputs"))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        weight_report.to_csv(
+            out_dir / "training_weight_by_temp_bucket.csv", index=False
+        )
 
     features = [c for c in XGB_FEATURES if c in train_df.columns]
     ensemble_weights = _production_ensemble_weights(config)
