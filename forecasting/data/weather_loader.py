@@ -622,6 +622,33 @@ def _forecast_weather_latest_cache_path(config: dict) -> Path:
     return _weather_cache_path(config, "forecast_weather_latest")
 
 
+def _require_complete_forecast_weather(
+    df: pd.DataFrame, config: dict, *, context: str
+) -> None:
+    """Raise if TempF still has missing values after _finalize_weather_frame's bounded
+    interpolation. Open-Meteo can return a payload with a full 'hourly.time' array but
+    null values for a large stretch of it (e.g. a model run that hasn't fully
+    propagated) -- that passes an empty-check but silently breaks every downstream
+    feature that depends on TempF. A gap that size exceeds what limited interpolation
+    is meant to paper over, so treat it as a failed fetch rather than caching/using it.
+    """
+    if df.empty or "TempF" not in df.columns:
+        return
+    missing = df["TempF"].isna()
+    if not missing.any():
+        return
+    missing_dts = df.loc[missing, "DT"]
+    max_gap = int(
+        (config.get("quality", {}) or {}).get("max_interpolation_gap_hours", 0) or 0
+    )
+    raise RuntimeError(
+        f"{context}: TempF is null for {int(missing.sum())} of {len(df)} hourly rows "
+        f"({missing_dts.min()} to {missing_dts.max()}) after limited interpolation "
+        f"(max_interpolation_gap_hours={max_gap}); treating this fetch as incomplete "
+        "rather than forecasting on missing temperature."
+    )
+
+
 def _fetch_single_run(
     config: dict, *, run_dt_utc: dt.datetime, model: str, single_runs_url: str
 ) -> pd.DataFrame:
@@ -643,9 +670,13 @@ def _fetch_single_run(
         retries=2,
         backoff_seconds=4.0,
     )
-    return _finalize_weather_frame(
+    df = _finalize_weather_frame(
         _normalize_hourly(payload, pd.Timestamp.now("UTC")), config
     )
+    _require_complete_forecast_weather(
+        df, config, context=f"GFS single run {model}@{run_dt_utc.isoformat()}"
+    )
+    return df
 
 
 def _fetch_gfs_locked_forecast(config: dict) -> tuple[pd.DataFrame, str]:
@@ -839,6 +870,9 @@ def fetch_forecast_weather(config: dict) -> pd.DataFrame:
             )
             df = _finalize_weather_frame(
                 _normalize_hourly(payload, pd.Timestamp.now("UTC")), config
+            )
+            _require_complete_forecast_weather(
+                df, config, context="Standard Open-Meteo forecast (best_match)"
             )
 
         df = _apply_ensemble_outlier_guard(df, config)

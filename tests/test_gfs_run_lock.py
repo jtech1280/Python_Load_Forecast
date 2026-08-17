@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
@@ -218,6 +219,106 @@ class FetchForecastWeatherGfsLockWiringTests(unittest.TestCase):
                 out = fetch_forecast_weather(config)
 
         self.assertEqual(out.attrs["weather_source"], "open_meteo_forecast")
+
+
+def _payload_with_trailing_null_gap(
+    *, start: str, total_hours: int, populated_hours: int
+) -> dict:
+    """A payload with a full 'hourly.time' array (so an empty-check alone won't catch
+    it) but TempF null for every hour after `populated_hours` -- the shape of the
+    2026-08-17 incident where Open-Meteo's 06Z single run returned 384 hourly rows
+    through 2026-09-01 but temperature_2m was only populated through 2026-08-19.
+    """
+    times = [
+        t.strftime("%Y-%m-%dT%H:%M")
+        for t in pd.date_range(start, periods=total_hours, freq="h")
+    ]
+    temps = [70.0] * populated_hours + [None] * (total_hours - populated_hours)
+    return _payload(times, temps)
+
+
+class PartialNullForecastPayloadTests(unittest.TestCase):
+    def test_fetch_gfs_locked_forecast_rejects_large_temp_gap_and_falls_back(self):
+        config = _config()
+        incomplete = _payload_with_trailing_null_gap(
+            start="2026-08-17T00:00", total_hours=384, populated_hours=72
+        )
+        complete = _payload(["2026-08-16T00:00"], [90.0])
+        with patch(
+            "forecasting.data.weather_loader._fetch_json",
+            side_effect=[incomplete, complete],
+        ) as mock_fetch:
+            with self.assertWarns(RuntimeWarning):
+                df, run_tag = _fetch_gfs_locked_forecast(config)
+
+        self.assertFalse(df.empty)
+        self.assertFalse(df["TempF"].isna().any())
+        self.assertEqual(mock_fetch.call_count, 2)
+        today_utc = dt.datetime.now(dt.timezone.utc).date()
+        yesterday_utc = today_utc - dt.timedelta(days=1)
+        second_call_params = mock_fetch.call_args_list[1][0][1]
+        self.assertEqual(
+            second_call_params["run"], f"{yesterday_utc.isoformat()}T06:00"
+        )
+
+    def test_gfs_lock_never_caches_a_partially_null_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(allow_previous_day_fallback=False)
+            config["openmeteo"]["cache_dir"] = tmp
+            config["project"]["output_dir"] = tmp
+            config["openmeteo"]["forecast_import_policy"] = {"enabled": False}
+            incomplete = _payload_with_trailing_null_gap(
+                start="2026-08-17T00:00", total_hours=384, populated_hours=72
+            )
+            with (
+                patch(
+                    "forecasting.data.weather_loader._fetch_json",
+                    return_value=incomplete,
+                ),
+                patch(
+                    "forecasting.data.weather_loader._archive_forecast_weather",
+                    return_value=None,
+                ),
+            ):
+                with self.assertRaises(RuntimeError):
+                    fetch_forecast_weather(config)
+
+            # No good prior cache and standard/forecast_results fallback both disabled
+            # by this config, so it must raise rather than write the null-laden frame
+            # to the daily/latest cache where a later run would silently reuse it.
+            self.assertFalse((Path(tmp) / "forecast_weather_gfs_06z_latest.csv").exists())
+
+    def test_standard_forecast_with_large_temp_gap_falls_back_to_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _config(enabled=False)
+            config["openmeteo"]["cache_dir"] = tmp
+            config["project"]["output_dir"] = tmp
+            config["openmeteo"]["forecast_import_policy"] = {"enabled": False}
+            good_cache = pd.DataFrame(
+                {
+                    "DT": ["2026-08-16T00:00:00-07:00"],
+                    "TempF": [88.0],
+                }
+            )
+            good_cache.to_csv(f"{tmp}/forecast_weather_latest.csv", index=False)
+            incomplete = _payload_with_trailing_null_gap(
+                start="2026-08-17T00:00", total_hours=384, populated_hours=72
+            )
+            with (
+                patch(
+                    "forecasting.data.weather_loader._fetch_json",
+                    return_value=incomplete,
+                ),
+                patch(
+                    "forecasting.data.weather_loader._archive_forecast_weather",
+                    return_value=None,
+                ),
+            ):
+                with self.assertWarns(RuntimeWarning):
+                    out = fetch_forecast_weather(config)
+
+        self.assertEqual(out.attrs["weather_source"], "forecast_weather_latest_cache")
+        self.assertFalse(out["TempF"].isna().any())
 
 
 if __name__ == "__main__":
