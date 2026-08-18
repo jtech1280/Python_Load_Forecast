@@ -1,7 +1,8 @@
 import os
 import platform
+import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 with patch.object(platform, "machine", return_value="AMD64"):
     import pandas as pd
@@ -105,8 +106,54 @@ class OutputSqlStoreTests(unittest.TestCase):
             output_sql_store._infer_sql_type(
                 "Production_Risk_Code", df["Production_Risk_Code"]
             ),
-            "NVARCHAR(MAX)",
+            "NVARCHAR(100)",
         )
+
+    def test_infer_sql_type_bounds_string_columns_with_headroom(self):
+        # "normal" is 6 chars; bound is max(100, 6*3)=100 rounded up to a multiple of
+        # 50 -- comfortably fits future values without needing NVARCHAR(MAX), which
+        # pyodbc's fast_executemany bulk-insert path can't bind to.
+        short = pd.Series(["normal", "elevated", None])
+        self.assertEqual(
+            output_sql_store._infer_sql_type("Source", short), "NVARCHAR(100)"
+        )
+
+        longer = pd.Series(
+            ["hot_ramp_peak_targeted_july_days4to7_90_92_overcast_deep_low_state_he14_15"]
+        )
+        # 77 chars * 3 = 231, rounded up to 250.
+        self.assertEqual(
+            output_sql_store._infer_sql_type("Source", longer), "NVARCHAR(250)"
+        )
+
+        all_null = pd.Series([None, None], dtype="object")
+        self.assertEqual(
+            output_sql_store._infer_sql_type("Source", all_null), "NVARCHAR(100)"
+        )
+
+        genuinely_long = pd.Series(["x" * 5000])
+        self.assertEqual(
+            output_sql_store._infer_sql_type("Notes", genuinely_long), "NVARCHAR(MAX)"
+        )
+
+    def test_nvarchar_bound_for_observed_length(self):
+        self.assertEqual(output_sql_store.nvarchar_bound_for_observed_length(0), 100)
+        self.assertEqual(output_sql_store.nvarchar_bound_for_observed_length(6), 100)
+        self.assertEqual(output_sql_store.nvarchar_bound_for_observed_length(40), 150)
+        self.assertEqual(
+            output_sql_store.nvarchar_bound_for_observed_length(4000), 4000
+        )
+        self.assertIsNone(output_sql_store.nvarchar_bound_for_observed_length(4001))
+
+    def test_make_sql_engine_enables_fast_executemany(self):
+        # pyodbc isn't installed in this sandbox (Windows/ODBC-only dependency);
+        # stub it just enough for SQLAlchemy's mssql+pyodbc dialect to initialize.
+        mock_pyodbc = MagicMock()
+        mock_pyodbc.version = "5.1.0"
+        mock_pyodbc.paramstyle = "qmark"
+        with patch.dict(sys.modules, {"pyodbc": mock_pyodbc}):
+            engine = output_sql_store._make_sql_engine({"dsn_name": "Forecast_DB"})
+            self.assertTrue(engine.dialect.fast_executemany)
 
     def test_replay_diagnostic_frames_extracts_summary_results_and_scorecard(self):
         replay_tables = output_sql_store.output_sql_config({})["replay_tables"]

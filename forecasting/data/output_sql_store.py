@@ -116,7 +116,7 @@ def _make_sql_engine(sql_cfg: dict):
     odbc = ";".join(parts) + ";"
     return create_engine(
         f"mssql+pyodbc:///?odbc_connect={quote_plus(odbc)}",
-        fast_executemany=False,
+        fast_executemany=True,
     )
 
 
@@ -214,6 +214,27 @@ def _prepare_frame_for_sql(
     return out
 
 
+MAX_SAFE_NVARCHAR_LENGTH = 4000
+
+
+def nvarchar_bound_for_observed_length(observed_max: int) -> int | None:
+    """Smallest safe NVARCHAR(n) for a column whose longest observed value is
+    `observed_max` chars, with headroom for future rows to run somewhat longer than
+    anything seen so far. Returns None if `observed_max` already exceeds what's safe
+    to bound (caller should fall back to NVARCHAR(MAX) in that case).
+
+    fast_executemany (pyodbc's bulk-insert path -- 10-100x faster than the default
+    row-by-row executemany for the multi-thousand-row tables this pipeline writes)
+    does not support binding to NVARCHAR(MAX)/LOB columns, which is why every string
+    column needs a bounded size instead of the previous blanket NVARCHAR(MAX).
+    """
+    if observed_max > MAX_SAFE_NVARCHAR_LENGTH:
+        return None
+    bound = max(100, observed_max * 3)
+    bound = int(math.ceil(bound / 50.0) * 50)  # round up to a tidy multiple of 50
+    return min(bound, MAX_SAFE_NVARCHAR_LENGTH)
+
+
 def _infer_sql_type(column: str, series: pd.Series) -> str:
     if column == "RunID":
         return "UNIQUEIDENTIFIER"
@@ -227,7 +248,12 @@ def _infer_sql_type(column: str, series: pd.Series) -> str:
         return "BIGINT"
     if pd.api.types.is_float_dtype(series) or pd.api.types.is_numeric_dtype(series):
         return "FLOAT"
-    return "NVARCHAR(MAX)"
+    lengths = series.dropna().astype(str).map(len)
+    observed_max = int(lengths.max()) if len(lengths) else 0
+    bound = nvarchar_bound_for_observed_length(observed_max)
+    if bound is None:
+        return "NVARCHAR(MAX)"
+    return f"NVARCHAR({bound})"
 
 
 def _frame_hash(df: pd.DataFrame) -> str:
