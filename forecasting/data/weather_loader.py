@@ -438,49 +438,139 @@ def _forecast_results_weather_fallback(
     )
 
 
-def fetch_historical_weather(config: dict) -> pd.DataFrame:
+def _historical_revision_window_days(config: dict) -> int:
+    return int(
+        (config.get("openmeteo", {}) or {}).get("historical_revision_window_days", 8)
+        or 0
+    )
+
+
+def _historical_weather_stable_cache_path(config: dict, start: dt.date) -> Path:
+    return _weather_cache_path(
+        config, f"historical_weather_stable_from_{start.isoformat()}"
+    )
+
+
+def _fetch_historical_weather_range(
+    config: dict, *, start: dt.date, end: dt.date, url: str, verify: bool | str
+) -> pd.DataFrame:
+    """One archive-API call for [start, end] inclusive, normalized/finalized."""
     params = _standard_params(config)
+    payload = _fetch_json(
+        url,
+        {**params, "start_date": start.isoformat(), "end_date": end.isoformat()},
+        verify,
+        timeout_seconds=90,
+        retries=4,
+        backoff_seconds=6.0,
+    )
+    return _finalize_weather_frame(
+        _normalize_hourly(payload, pd.Timestamp.now("UTC")), config
+    )
+
+
+def _load_stable_historical_weather(
+    config: dict, *, start: dt.date, stable_cutoff: dt.date, url: str, verify: bool | str
+) -> pd.DataFrame:
+    """Settled historical weather for [start, stable_cutoff], persisted permanently
+    and grown incrementally -- only the missing tail is ever fetched.
+    """
+    stable_cache_path = _historical_weather_stable_cache_path(config, start)
+    cached = _read_weather_cache(
+        stable_cache_path,
+        config,
+        start=start,
+        end=stable_cutoff,
+        require_requested_cols=True,
+    )
+    cached_through = cached["DT"].dt.date.max() if not cached.empty else None
+    if cached_through is not None and cached_through >= stable_cutoff:
+        return cached
+
+    gap_start = start if cached_through is None else cached_through + dt.timedelta(days=1)
+    fresh = _fetch_historical_weather_range(
+        config, start=gap_start, end=stable_cutoff, url=url, verify=verify
+    )
+    combined = pd.concat(
+        [d for d in (cached, fresh) if not d.empty], ignore_index=True
+    )
+    combined = (
+        combined.sort_values("DT")
+        .drop_duplicates(subset=["DT"], keep="last")
+        .reset_index(drop=True)
+    )
+    _write_weather_cache(combined, stable_cache_path)
+    return combined
+
+
+def fetch_historical_weather(config: dict) -> pd.DataFrame:
+    """Fetch training-window historical weather from Open-Meteo's archive API.
+
+    Open-Meteo's historical archive is ERA5-based and revises the most recent
+    ~5-7 days of data as better observations come in; only that tail is genuinely
+    volatile (openmeteo.historical_revision_window_days, default 8, is the assumed
+    revision window). The previous implementation cached by a date range that
+    included `end`, which shifts forward every day -- so the cache never actually
+    hit and the *entire* multi-year archive was re-fetched fresh on every run,
+    silently re-pulling revised values for old, already-settled dates. That made
+    training non-reproducible day to day (large per-row prediction churn between
+    otherwise-identical runs) for no benefit, since 99%+ of the archive doesn't
+    change. Now the settled portion (start..stable_cutoff) is cached permanently
+    and grown incrementally; only the small volatile tail (stable_cutoff+1..end)
+    is fetched fresh every run.
+    """
     start = dt.date.fromisoformat(config["openmeteo"]["historical_start"])
     end = _historical_end(config)
     url = config["openmeteo"]["historical_url"]
     verify = _weather_request_verify(config)
-    cache_stem = f"historical_weather_{start.isoformat()}_{end.isoformat()}"
-    cache_path = _weather_cache_path(config, cache_stem)
     latest_cache_path = _weather_cache_path(config, "historical_weather_latest")
-    exact_cached = _read_weather_cache(
-        cache_path, config, start=start, end=end, require_requested_cols=True
-    )
-    if not exact_cached.empty:
-        return exact_cached
+
+    revision_window_days = _historical_revision_window_days(config)
+    stable_cutoff = min(end, end - dt.timedelta(days=revision_window_days))
+    stable_cutoff = max(stable_cutoff, start - dt.timedelta(days=1))
 
     try:
-        payload = _fetch_json(
-            url,
-            {**params, "start_date": start.isoformat(), "end_date": end.isoformat()},
-            verify,
-            timeout_seconds=90,
-            retries=4,
-            backoff_seconds=6.0,
+        stable_df = pd.DataFrame()
+        if stable_cutoff >= start:
+            stable_df = _load_stable_historical_weather(
+                config,
+                start=start,
+                stable_cutoff=stable_cutoff,
+                url=url,
+                verify=verify,
+            )
+
+        tail_df = pd.DataFrame()
+        if stable_cutoff < end:
+            tail_df = _fetch_historical_weather_range(
+                config,
+                start=stable_cutoff + dt.timedelta(days=1),
+                end=end,
+                url=url,
+                verify=verify,
+            )
+
+        df = pd.concat(
+            [d for d in (stable_df, tail_df) if not d.empty], ignore_index=True
         )
-        df = _finalize_weather_frame(
-            _normalize_hourly(payload, pd.Timestamp.now("UTC")), config
+        if df.empty:
+            raise RuntimeError("Historical weather fetch returned no rows.")
+        df = df.sort_values("DT").drop_duplicates(subset=["DT"], keep="last").reset_index(
+            drop=True
         )
-        _write_weather_cache(df, cache_path)
         _write_weather_cache(df, latest_cache_path)
         return df
     except Exception as exc:
-        for path in [cache_path, latest_cache_path]:
-            cached = _read_weather_cache(path, config, start=start, end=end)
-            if not cached.empty:
-                warnings.warn(
-                    f"Historical weather API failed ({exc}); using cached weather: {path}",
-                    RuntimeWarning,
-                )
-                return cached
+        cached = _read_weather_cache(latest_cache_path, config, start=start, end=end)
+        if not cached.empty:
+            warnings.warn(
+                f"Historical weather API failed ({exc}); using cached weather: {latest_cache_path}",
+                RuntimeWarning,
+            )
+            return cached
 
         fallback = _forecast_results_weather_fallback(config, start=start, end=end)
         if not fallback.empty:
-            _write_weather_cache(fallback, cache_path)
             _write_weather_cache(fallback, latest_cache_path)
             warnings.warn(
                 f"Historical weather API failed ({exc}); rebuilt weather from forecast_outputs/forecast_results.csv",

@@ -175,6 +175,12 @@ openmeteo:
   previous_runs_url: "https://previous-runs-api.open-meteo.com/v1/forecast"
   historical_start: "2020-01-01"     # training start date
   historical_end: null                # null => yesterday local
+  # Open-Meteo's ERA5-based historical archive revises the most recent ~5-7 days of
+  # data as better observations come in. Only that tail is re-fetched fresh every
+  # run; everything older is cached permanently and grown incrementally so training
+  # isn't silently re-pulling revised values (and re-downloading years of settled
+  # history) on every run.
+  historical_revision_window_days: 8
   forecast_days: 16
   cache_dir: "${FORECAST_WEATHER_CACHE_DIR:-weather_cache}"
   forecast_import_policy:
