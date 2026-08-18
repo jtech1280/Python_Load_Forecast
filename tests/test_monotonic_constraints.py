@@ -126,7 +126,7 @@ class TreeTrainingMonotonicityTests(unittest.TestCase):
             }
         }
         model, feats = train_xgb(self.df, self.features, config=config)
-        preds = model.predict(self.hot_hours[feats].to_numpy(dtype=float))
+        preds = model.predict(self.hot_hours[feats])
         self.assertTrue(self._is_monotone_nondecreasing(preds))
 
     def test_xgb_training_info_logs_real_hyperparameters(self):
@@ -159,7 +159,7 @@ class TreeTrainingMonotonicityTests(unittest.TestCase):
             }
         }
         model, feats = train_lgb(self.df, self.features, config=config)
-        preds = model.predict(self.hot_hours[feats].to_numpy(dtype=float))
+        preds = model.predict(self.hot_hours[feats])
         self.assertTrue(self._is_monotone_nondecreasing(preds))
 
     def test_lgb_training_info_logs_real_hyperparameters(self):
@@ -196,7 +196,7 @@ class TreeTrainingMonotonicityTests(unittest.TestCase):
         }
         model, feats = train_catboost(self.df, self.features, config=config)
         self.assertIsNotNone(model)
-        preds = model.predict(self.hot_hours[feats].to_numpy(dtype=float))
+        preds = model.predict(self.hot_hours[feats])
         self.assertTrue(self._is_monotone_nondecreasing(preds))
 
 
