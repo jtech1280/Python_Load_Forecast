@@ -189,24 +189,39 @@ def add_load_decay_shape_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_basic_lags(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy().sort_values("DT")
-    y = out["MWH"].astype(float)
+    out = df.copy().sort_values("DT").reset_index(drop=True)
+
+    dt_index = pd.DatetimeIndex(out["DT"])
+    y_by_dt = pd.Series(out["MWH"].astype(float).to_numpy(), index=dt_index)
+    y_by_dt = y_by_dt[~y_by_dt.index.duplicated(keep="last")]
+
+    # Compute against a complete, gapless hourly grid rather than plain positional
+    # .shift() on `out` directly. A missing hour anywhere in history -- DST
+    # spring-forward guarantees at least one a year, and missing/estimated source
+    # data can add more -- would otherwise silently shift every later row's "N
+    # hours/days ago" lookup by one position instead of producing a real NaN at
+    # just the affected row, quietly corrupting same-hour/rolling features for the
+    # entire remainder of the dataset.
+    full_index = pd.date_range(y_by_dt.index.min(), y_by_dt.index.max(), freq="h")
+    y_full = y_by_dt.reindex(full_index)
 
     # Shift first so training does not leak the current target into rolling statistics.
-    shifted = y.shift(1)
-    for lag in [1, 2, 3, 24, 48, 72, 168]:
-        out[f"MWH_Lag{lag}"] = y.shift(lag)
+    shifted_full = y_full.shift(1)
+    lag_cols = {f"MWH_Lag{lag}": y_full.shift(lag) for lag in [1, 2, 3, 24, 48, 72, 168]}
 
     for window in [3, 6, 12, 24, 48, 168]:
         min_periods = max(2, min(window, int(window * 0.5)))
-        out[f"MWH_Rolling{window}"] = shifted.rolling(
+        lag_cols[f"MWH_Rolling{window}"] = shifted_full.rolling(
             window=window, min_periods=min_periods
         ).mean()
 
-    out["MWH_Rolling24Std"] = (
-        shifted.rolling(window=24, min_periods=12).std().fillna(0.0)
+    lag_cols["MWH_Rolling24Std"] = (
+        shifted_full.rolling(window=24, min_periods=12).std().fillna(0.0)
     )
-    same_hour_lags = [y.shift(24 * i) for i in range(1, 8)]
-    out["MWH_SameHour7DayMean"] = pd.concat(same_hour_lags, axis=1).mean(axis=1)
+    same_hour_lags = [y_full.shift(24 * i) for i in range(1, 8)]
+    lag_cols["MWH_SameHour7DayMean"] = pd.concat(same_hour_lags, axis=1).mean(axis=1)
+
+    lag_frame = pd.DataFrame(lag_cols).reindex(dt_index).reset_index(drop=True)
+    out = pd.concat([out, lag_frame], axis=1)
     out = add_load_decay_shape_features(out)
     return out
