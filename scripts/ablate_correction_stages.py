@@ -68,6 +68,7 @@ import argparse
 import copy
 import json
 import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -316,6 +317,9 @@ def run_ablation(
             )
             error = f"{type(exc).__name__}: {exc}"
             print(f"ERROR scoring stage '{name}' with it disabled: {error}", flush=True)
+            print(f"--- full traceback for '{name}' ---", flush=True)
+            traceback.print_exc()
+            print(f"--- end traceback for '{name}' ---", flush=True)
 
         for test_name in baseline_by_test.index:
             before = baseline_by_test.loc[test_name]

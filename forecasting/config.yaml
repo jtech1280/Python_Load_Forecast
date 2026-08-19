@@ -798,7 +798,16 @@ calibration:
       # still learns residual shape against the pre-focused-guard baseline, but
       # applies additively to the current guarded forecast with bounded peak/hot
       # deltas so it does not replace the hand guard or create a blanket hot uplift.
-      enabled: true
+      #
+      # Disabled 2026-08-19 after scripts/ablate_correction_stages.py showed this
+      # stage net-harmful on both peak-relevant gates, by real per-origin majorities
+      # (not a pooled artifact): removing it improved Hot peak days MAE 8.61->8.38
+      # (12 of 17 origins better, 4 worse) and Peak window hours 14-18 MAE 7.16->6.95
+      # (19 of 27 origins better, 5 worse). Both gates were failing their threshold
+      # either way, so this alone doesn't pass them -- see forecast_outputs/
+      # ablation_results.csv from that run for the full per-stage breakdown before
+      # re-enabling this.
+      enabled: false
       shadow_mode: false
       model_version: focused_shape_residual_guarded_promotion_v2
       min_rows: 168
