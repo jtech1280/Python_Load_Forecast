@@ -371,6 +371,93 @@ def _early_stopping_cfg(config: dict | None) -> dict[str, Any]:
     }
 
 
+def hot_peak_scope_mask(df: pd.DataFrame, config: dict | None = None) -> pd.Series:
+    """The same "hot peak hours" scope build_sample_weights() upweights, factored
+    out so anything else that needs to target exactly that scope (e.g. the
+    asymmetric hot-peak objective below) can't drift out of sync with it.
+
+    Falls back to IsLikelySystemPeakHour if the primary daily-max-temp/Hour scope
+    matches nothing (e.g. missing Hour column), matching build_sample_weights.
+    Returns an all-False Series (safe no-op for callers) if Temperature_DailyMax
+    isn't present at all.
+    """
+    sw_cfg = _cfg(config, "model", "sample_weight", default={}) or {}
+    if "Temperature_DailyMax" not in df.columns:
+        return pd.Series(False, index=df.index)
+
+    daily_max = pd.to_numeric(df["Temperature_DailyMax"], errors="coerce")
+    hour = pd.to_numeric(
+        df.get("Hour", pd.Series(np.nan, index=df.index)), errors="coerce"
+    )
+    likely_peak = (
+        pd.to_numeric(
+            df.get("IsLikelySystemPeakHour", pd.Series(0, index=df.index)),
+            errors="coerce",
+        )
+        .fillna(0)
+        .astype(int)
+        .eq(1)
+    )
+    hot_min = float(sw_cfg.get("hot_day_min_f", 90.0))
+    hot_hours = {int(h) for h in sw_cfg.get("hot_peak_hours", [16, 17, 18, 19, 20])}
+
+    scope = daily_max.ge(hot_min) & hour.astype("Int64").isin(hot_hours)
+    if not scope.any():
+        scope = daily_max.ge(hot_min) & likely_peak
+    return scope.fillna(False)
+
+
+def make_asymmetric_hot_peak_objective(
+    hot_peak_mask: np.ndarray, under_forecast_penalty: float
+):
+    """Custom objective (grad, hess callable) for XGBoost's sklearn API: plain
+    squared-error everywhere, except rows in `hot_peak_mask` get
+    `under_forecast_penalty`x the gradient/hessian magnitude specifically when
+    the current prediction is UNDER the actual value. Targets hot-peak-hour
+    under-forecast bias directly (the raw model systematically under-forecasts
+    these hours -- see training_weight_by_temp_bucket.csv analysis) rather than
+    working around it with sample weights, which only change how much a row
+    counts, not which direction of error costs more.
+
+    Must use the sklearn-API objective signature -- `(y_true, y_pred,
+    sample_weight=None)` -- not the native-API `(preds, dmatrix)` convention:
+    XGBRegressor.fit() inspects the objective's signature and, only if it finds
+    a `sample_weight` parameter, calls it directly with the fit-time
+    sample_weight instead of applying that weight itself. A signature without
+    that parameter makes XGBoost raise outright once sample_weight is passed (as
+    train_xgb always does, via build_sample_weights); accepting the parameter
+    but not folding it into the returned grad/hess would be worse -- no error,
+    but every row's recency/peak/hot-day weighting from build_sample_weights
+    would silently stop affecting training whenever this objective is active.
+
+    Reduces exactly to plain sample-weighted squared-error (grad = sample_weight
+    * (pred - y), hess = sample_weight) when under_forecast_penalty == 1.0 or
+    hot_peak_mask is all-False -- this is the mechanism that makes
+    model.asymmetric_loss.enabled: false a true no-op.
+    """
+    mask = np.asarray(hot_peak_mask, dtype=bool)
+    penalty = float(under_forecast_penalty)
+
+    def objective(
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        sample_weight: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        y_true = np.asarray(y_true, dtype=float)
+        y_pred = np.asarray(y_pred, dtype=float)
+        error = y_pred - y_true  # positive = over-forecast, negative = under-forecast
+        penalty_weight = np.ones_like(error)
+        underforecast = mask & (error < 0)
+        penalty_weight[underforecast] = penalty
+        if sample_weight is not None:
+            penalty_weight = penalty_weight * np.asarray(sample_weight, dtype=float)
+        grad = penalty_weight * error
+        hess = penalty_weight
+        return grad, hess
+
+    return objective
+
+
 def build_sample_weights(df: pd.DataFrame, config: dict | None = None) -> np.ndarray:
     """Emphasize recent observations and summer/peak/high-load hours without overfitting one event."""
     sw_cfg = _cfg(config, "model", "sample_weight", default={}) or {}
@@ -396,17 +483,11 @@ def build_sample_weights(df: pd.DataFrame, config: dict | None = None) -> np.nda
             .astype(int)
             .eq(1)
         )
-        hot_min = float(sw_cfg.get("hot_day_min_f", 90.0))
-        hot_hours = {int(h) for h in sw_cfg.get("hot_peak_hours", [16, 17, 18, 19, 20])}
         peak_hours = {
             int(h) for h in sw_cfg.get("peak_window_hours", [14, 15, 16, 17, 18])
         }
 
-        scorecard_hot_peak = daily_max.ge(hot_min) & hour.astype("Int64").isin(
-            hot_hours
-        )
-        if not scorecard_hot_peak.any():
-            scorecard_hot_peak = daily_max.ge(hot_min) & likely_peak
+        scorecard_hot_peak = hot_peak_scope_mask(df, config)
         business_hot_peak = scorecard_hot_peak & likely_peak
         non_business_hot_peak = scorecard_hot_peak & ~likely_peak
 
@@ -579,6 +660,20 @@ def train_xgb(
     if mono_vector is not None:
         for _, attempt_params in attempts:
             attempt_params["monotone_constraints"] = mono_vector
+
+    asym_cfg = _cfg(cfg, "model", "asymmetric_loss", default={}) or {}
+    if bool(asym_cfg.get("enabled", False)):
+        hot_peak_mask = hot_peak_scope_mask(
+            train_df.reset_index(drop=True), cfg
+        ).to_numpy()
+        objective = make_asymmetric_hot_peak_objective(
+            hot_peak_mask,
+            under_forecast_penalty=float(
+                asym_cfg.get("under_forecast_penalty_multiplier", 2.0)
+            ),
+        )
+        for _, attempt_params in attempts:
+            attempt_params["objective"] = objective
 
     for backend_name, params in attempts:
         model = make_xgb_model(cfg, params_override=params)

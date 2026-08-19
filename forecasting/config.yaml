@@ -416,6 +416,23 @@ model:
     recency_end_weight: 1.35
     max_weight: 9.0
 
+  asymmetric_loss:
+    # PROTOTYPE, off by default -- no behavior change unless explicitly enabled.
+    # Sample weighting only changes how much a row counts, not which direction of
+    # error the model is penalized for; the raw model's hot-peak-hour bias is
+    # systematically one-directional (under-forecast), which a symmetric loss has
+    # no reason to prefer against. This targets that directly: within the same
+    # hot-peak scope sample_weight already upweights (hot_day_min_f/hot_peak_hours
+    # above), under-forecasting a row is penalized under_forecast_penalty_multiplier
+    # times as much as over-forecasting it; every other row is untouched, and the
+    # objective is mathematically identical to plain reg:squarederror when this is
+    # disabled or the multiplier is 1.0. XGBoost only for now (Raw_Forecast_MWH is
+    # XGB+LGB; LightGBM support would follow the same pattern if this proves out).
+    # Needs a full rolling-origin replay before being considered for promotion --
+    # see forecasting/model/xgb_model.py:make_asymmetric_hot_peak_objective.
+    enabled: false
+    under_forecast_penalty_multiplier: 2.0
+
   lgb:
     # Keep CPU by default. Set hardware.use_lgb_gpu=true only if your LightGBM build supports GPU.
     use_gpu: false
