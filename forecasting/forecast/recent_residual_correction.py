@@ -157,7 +157,12 @@ def _season_from_month(month: int) -> str:
 def _recent_hot_peak_scale(row: pd.Series, recent_cfg: dict) -> float:
     hot_cfg = recent_cfg.get("hot_peak", {}) or {}
     hours = [int(hour) for hour in hot_cfg.get("hours", [16, 17, 18, 19, 20])]
-    hour = int(row.get("Hour", pd.to_datetime(row.get("DT")).hour))
+    raw_hour = row.get("Hour")
+    hour = (
+        int(raw_hour)
+        if pd.notna(raw_hour)
+        else int(pd.to_datetime(row.get("DT")).hour)
+    )
     daily_max = pd.to_numeric(
         pd.Series([row.get("Temperature_DailyMax")]), errors="coerce"
     ).iloc[0]
@@ -518,7 +523,12 @@ def _ar_residual_correction(
 
     raw = phi * latest_residual
     source = "ar1_latest_residual"
-    hour = int(row.get("Hour", pd.to_datetime(row.get("DT")).hour))
+    raw_hour = row.get("Hour")
+    hour = (
+        int(raw_hour)
+        if pd.notna(raw_hour)
+        else int(pd.to_datetime(row.get("DT")).hour)
+    )
     same_lookup = state.get("same_hour_mean", {}) or {}
     same_hour_value = same_lookup.get(hour, same_lookup.get(str(hour)))
     same_hour_blend = float(
@@ -795,7 +805,12 @@ def _origin_day_residual_correction(
 
     raw = state_mwh
     source_parts = [str(state.get("source", "origin_day_state"))]
-    hour = int(row.get("Hour", pd.to_datetime(row.get("DT")).hour))
+    raw_hour = row.get("Hour")
+    hour = (
+        int(raw_hour)
+        if pd.notna(raw_hour)
+        else int(pd.to_datetime(row.get("DT")).hour)
+    )
     hourgroup = str(row.get("HourGroup", _hour_group(hour)))
 
     hourgroup_blend = float(
@@ -1025,7 +1040,12 @@ def _weighted_recent_correction(
     w_loss_hg = float(weights.get("solar_loss_hourgroup", 0.03))
     w_temp_cloud_hg = float(weights.get("temp_cloud_hourgroup", 0.01))
 
-    hour = int(row.get("Hour", pd.to_datetime(row.get("DT")).hour))
+    raw_hour = row.get("Hour")
+    hour = (
+        int(raw_hour)
+        if pd.notna(raw_hour)
+        else int(pd.to_datetime(row.get("DT")).hour)
+    )
     hourgroup = str(row.get("HourGroup", _hour_group(hour)))
     temp_bucket = (
         str(row.get("DailyMaxTempBucket"))
@@ -1149,8 +1169,18 @@ def apply_recent_residual_correction(
     out = future_df.copy().sort_values("DT").reset_index(drop=True)
     if base_col not in out.columns:
         base_col = "Raw_Forecast_MWH"
-    if "Hour" not in out.columns:
-        out["Hour"] = pd.to_datetime(out["DT"]).dt.hour.astype(int)
+    # Backfill from DT whenever an existing Hour value is missing/NaN, not just when the
+    # whole column is absent -- some upstream frames (e.g. weather-realism scenario rows fed
+    # through apply_origin_available_correction_chain with cloud_solar_shape_enabled: false)
+    # carry a Hour column with individual NaNs. `if "Hour" not in out.columns` alone left those
+    # NaNs in place, and _weighted_recent_correction's `int(row.get("Hour", ...))` below crashes
+    # on int(nan) since .get()'s default only fires when the key itself is missing, not when its
+    # value is NaN.
+    out["Hour"] = (
+        _as_num(_col_or_nan(out, "Hour"))
+        .fillna(pd.to_datetime(out["DT"], errors="coerce").dt.hour)
+        .astype(int)
+    )
     if "HourGroup" not in out.columns:
         out["HourGroup"] = out["Hour"].map(_hour_group)
     out = _add_weather_residual_buckets(out)
