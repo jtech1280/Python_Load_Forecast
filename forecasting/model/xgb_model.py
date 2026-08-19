@@ -410,25 +410,38 @@ def hot_peak_scope_mask(df: pd.DataFrame, config: dict | None = None) -> pd.Seri
 def make_asymmetric_hot_peak_objective(
     hot_peak_mask: np.ndarray, under_forecast_penalty: float
 ):
-    """Custom objective (grad, hess callable) for XGBoost's sklearn API: plain
-    squared-error everywhere, except rows in `hot_peak_mask` get
-    `under_forecast_penalty`x the gradient/hessian magnitude specifically when
-    the current prediction is UNDER the actual value. Targets hot-peak-hour
-    under-forecast bias directly (the raw model systematically under-forecasts
-    these hours -- see training_weight_by_temp_bucket.csv analysis) rather than
-    working around it with sample weights, which only change how much a row
-    counts, not which direction of error costs more.
+    """Custom objective (grad, hess callable): plain squared-error everywhere,
+    except rows in `hot_peak_mask` get `under_forecast_penalty`x the
+    gradient/hessian magnitude specifically when the current prediction is
+    UNDER the actual value. Targets hot-peak-hour under-forecast bias directly
+    (the raw model systematically under-forecasts these hours -- see
+    training_weight_by_temp_bucket.csv analysis) rather than working around it
+    with sample weights, which only change how much a row counts, not which
+    direction of error costs more.
 
-    Must use the sklearn-API objective signature -- `(y_true, y_pred,
-    sample_weight=None)` -- not the native-API `(preds, dmatrix)` convention:
-    XGBRegressor.fit() inspects the objective's signature and, only if it finds
-    a `sample_weight` parameter, calls it directly with the fit-time
-    sample_weight instead of applying that weight itself. A signature without
-    that parameter makes XGBoost raise outright once sample_weight is passed (as
-    train_xgb always does, via build_sample_weights); accepting the parameter
-    but not folding it into the returned grad/hess would be worse -- no error,
-    but every row's recency/peak/hot-day weighting from build_sample_weights
-    would silently stop affecting training whenever this objective is active.
+    Shared by both train_xgb (XGBRegressor) and train_lgb (LGBMRegressor) --
+    the `(y_true, y_pred, sample_weight=None)` signature satisfies both APIs'
+    custom-objective contracts, but for two different reasons that both matter:
+
+    - XGBRegressor.fit() checks the objective's signature *by name* (looks for
+      a parameter literally called `sample_weight`) and, only if found, calls
+      it directly with the fit-time sample_weight instead of applying that
+      weight itself. Without that parameter, XGBoost raises outright once
+      sample_weight is passed (as train_xgb/train_lgb always do, via
+      build_sample_weights).
+    - LGBMRegressor's wrapper instead counts positional parameters (`len(
+      signature(func).parameters)`) to decide whether to call `func(y_true,
+      y_pred)`, `func(y_true, y_pred, weight)`, or a 4-arg ranking variant --
+      the third parameter's *name* is irrelevant to LightGBM, only its
+      position. A 2-parameter objective is accepted silently (no error) and
+      LightGBM simply never passes it the weight.
+
+    Either way, accepting the parameter but not folding it into the returned
+    grad/hess would be worse than a crash -- no error, but every row's
+    recency/peak/hot-day weighting from build_sample_weights would silently
+    stop affecting training whenever this objective is active. Neither XGBoost
+    nor LightGBM applies sample_weight to a custom objective's grad/hess on
+    their own; the objective always has to do it.
 
     Reduces exactly to plain sample-weighted squared-error (grad = sample_weight
     * (pred - y), hess = sample_weight) when under_forecast_penalty == 1.0 or

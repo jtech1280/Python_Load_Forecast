@@ -12,6 +12,7 @@ from forecasting.model.xgb_model import (
     make_asymmetric_hot_peak_objective,
     train_xgb,
 )
+from forecasting.model.lgb_model import train_lgb
 
 
 class HotPeakScopeMaskTests(unittest.TestCase):
@@ -198,6 +199,21 @@ class MakeAsymmetricHotPeakObjectiveTests(unittest.TestCase):
         # closure should have captured its own copy, unaffected by the later mutation
         np.testing.assert_allclose(grad, [2.0 * -4.0, 1.0 * -4.0, 2.0 * -4.0])
 
+    def test_lightgbm_wrapper_dispatches_weight_by_positional_argument_count(self):
+        """LightGBM's _ObjectiveFunctionWrapper decides how to call a custom
+        objective purely by counting its parameters (argc == 2/3/4), not by
+        name, unlike XGBoost which looks for a parameter literally named
+        `sample_weight`. This objective needs to sit at exactly argc == 3 to
+        receive the weight array as the 3rd positional argument -- 2 would
+        silently never receive it (no error), 4 would be read by LightGBM as
+        a ranking `group` argument. Regression-pin the parameter count itself
+        since that's the entire contract on the LightGBM side.
+        """
+        objective = make_asymmetric_hot_peak_objective(
+            np.array([True, False]), under_forecast_penalty=2.0
+        )
+        self.assertEqual(len(inspect.signature(objective).parameters), 3)
+
 
 def _synthetic_frame_with_underfit_hot_peak_regime(n_days: int = 60) -> pd.DataFrame:
     """Hourly synthetic load where a minority "hot peak" regime (hot days, hours
@@ -304,6 +320,87 @@ class AsymmetricObjectiveTrainingIntegrationTests(unittest.TestCase):
         bias_off_rest = self._bias(model_off, feats_off, unscoped)
         bias_on_rest = self._bias(model_on, feats_on, unscoped)
         # Rows outside the targeted scope shouldn't be pushed around materially.
+        self.assertLess(abs(bias_on_rest - bias_off_rest), 3.0)
+
+
+class LightGbmAsymmetricObjectiveTrainingIntegrationTests(unittest.TestCase):
+    """Mirrors AsymmetricObjectiveTrainingIntegrationTests above but drives
+    train_lgb -- LightGBM is the largest single component of the
+    Raw_Forecast_MWH blend (model.ensemble_weights.lgb), and its custom-objective
+    calling convention differs from XGBoost's in exactly the place a bug already
+    slipped through once (see the LightGBM-specific tests in
+    MakeAsymmetricHotPeakObjectiveTests above), so this needs its own
+    end-to-end proof, not just an assumption that the XGBoost result transfers.
+    """
+
+    def setUp(self):
+        self.df, self.hot_peak_scope = _synthetic_frame_with_underfit_hot_peak_regime()
+        self.features = ["Temperature", "Temperature_DailyMax", "CDD", "Hour"]
+        self.base_model_cfg = {
+            "early_stopping": {"enabled": False},
+            "monotonic_constraints": {"enabled": False},
+            "lgb": {
+                "n_estimators": 50,
+                "num_leaves": 15,
+                "min_child_samples": 5,
+                "learning_rate": 0.15,
+            },
+        }
+
+    def _bias(self, model, feats, scope_mask) -> float:
+        X = self.df.loc[scope_mask, feats]
+        preds = model.predict(X)
+        actual = self.df.loc[scope_mask, "MWH"].to_numpy()
+        return float(np.mean(preds - actual))
+
+    def test_disabled_by_default_is_a_true_no_op(self):
+        config_without_key = {"model": dict(self.base_model_cfg)}
+        config_with_disabled_key = {
+            "model": {
+                **self.base_model_cfg,
+                "asymmetric_loss": {
+                    "enabled": False,
+                    "under_forecast_penalty_multiplier": 9.0,
+                },
+            }
+        }
+        model_a, feats_a = train_lgb(self.df, self.features, config=config_without_key)
+        model_b, feats_b = train_lgb(
+            self.df, self.features, config=config_with_disabled_key
+        )
+        self.assertEqual(feats_a, feats_b)
+        preds_a = model_a.predict(self.df[feats_a])
+        preds_b = model_b.predict(self.df[feats_b])
+        np.testing.assert_allclose(preds_a, preds_b)
+
+    def test_enabled_reduces_underforecast_bias_in_scope_without_disturbing_rest(self):
+        disabled_cfg = {
+            "model": {
+                **self.base_model_cfg,
+                "asymmetric_loss": {"enabled": False},
+            }
+        }
+        enabled_cfg = {
+            "model": {
+                **self.base_model_cfg,
+                "asymmetric_loss": {
+                    "enabled": True,
+                    "under_forecast_penalty_multiplier": 4.0,
+                },
+            }
+        }
+        model_off, feats_off = train_lgb(self.df, self.features, config=disabled_cfg)
+        model_on, feats_on = train_lgb(self.df, self.features, config=enabled_cfg)
+
+        bias_off_scope = self._bias(model_off, feats_off, self.hot_peak_scope)
+        bias_on_scope = self._bias(model_on, feats_on, self.hot_peak_scope)
+
+        self.assertLess(bias_off_scope, -1.0)
+        self.assertGreater(bias_on_scope, bias_off_scope + 1.0)
+
+        unscoped = ~self.hot_peak_scope
+        bias_off_rest = self._bias(model_off, feats_off, unscoped)
+        bias_on_rest = self._bias(model_on, feats_on, unscoped)
         self.assertLess(abs(bias_on_rest - bias_off_rest), 3.0)
 
 

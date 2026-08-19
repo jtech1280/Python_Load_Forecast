@@ -426,8 +426,12 @@ model:
     # above), under-forecasting a row is penalized under_forecast_penalty_multiplier
     # times as much as over-forecasting it; every other row is untouched, and the
     # objective is mathematically identical to plain reg:squarederror when this is
-    # disabled or the multiplier is 1.0. XGBoost only for now (Raw_Forecast_MWH is
-    # XGB+LGB; LightGBM support would follow the same pattern if this proves out).
+    # disabled or the multiplier is 1.0. Applied to both XGBoost and LightGBM (see
+    # train_xgb/train_lgb) -- together model.ensemble_weights.xgb + .lgb is 65% of
+    # the Raw_Forecast_MWH blend below. CatBoost (the remaining 35%) doesn't have
+    # this yet -- its sklearn API needs a class-based loss (calc_ders_range), not a
+    # simple (y_true, y_pred) -> grad, hess callable, so it isn't a drop-in. See
+    # model.ensemble_weights above for the current blend split.
     # Needs a full rolling-origin replay before being considered for promotion --
     # see forecasting/model/xgb_model.py:make_asymmetric_hot_peak_objective.
     enabled: false

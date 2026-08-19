@@ -15,7 +15,12 @@ except Exception as exc:
         "LightGBM is required. Install with `pip install lightgbm`."
     ) from exc
 
-from forecasting.model.xgb_model import DEFAULT_FEATURES, build_sample_weights
+from forecasting.model.xgb_model import (
+    DEFAULT_FEATURES,
+    build_sample_weights,
+    hot_peak_scope_mask,
+    make_asymmetric_hot_peak_objective,
+)
 from forecasting.utils.performance import resolve_n_jobs
 from forecasting.model.monotonic_constraints import lgb_monotone_param
 
@@ -211,6 +216,20 @@ def train_lgb(
     if mono_vector is not None:
         for _, attempt_params in attempts:
             attempt_params["monotone_constraints"] = mono_vector
+
+    asym_cfg = _cfg(cfg, "model", "asymmetric_loss", default={}) or {}
+    if bool(asym_cfg.get("enabled", False)):
+        hot_peak_mask = hot_peak_scope_mask(
+            train_df.reset_index(drop=True), cfg
+        ).to_numpy()
+        objective = make_asymmetric_hot_peak_objective(
+            hot_peak_mask,
+            under_forecast_penalty=float(
+                asym_cfg.get("under_forecast_penalty_multiplier", 2.0)
+            ),
+        )
+        for _, attempt_params in attempts:
+            attempt_params["objective"] = objective
 
     for backend_name, params in attempts:
         model = make_lgb_model(cfg, params_override=params)
