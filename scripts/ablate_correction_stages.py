@@ -428,6 +428,14 @@ def main() -> int:
         f"Valid names: {', '.join(s[0] for s in STAGES)}",
     )
     parser.add_argument(
+        "--baseline-only",
+        action="store_true",
+        help="Skip the per-stage ablation entirely and just print/save the gate scorecard for "
+        "this cache+config as-is (no stage forced off). Useful for comparing two different "
+        "caches -- e.g. one built with model.asymmetric_loss.enabled: true vs the normal one --  "
+        "under the same correction-chain config, without ablating anything.",
+    )
+    parser.add_argument(
         "--output-csv",
         type=Path,
         default=Path("forecast_outputs/ablation_results.csv"),
@@ -446,14 +454,25 @@ def main() -> int:
             "(expensive, one-time) before running the ablation."
         )
 
+    bundles = load_raw_origin_bundles(args.cache_dir)
+    print(f"Loaded {len(bundles)} cached raw origin bundles from {args.cache_dir}", flush=True)
+
+    if args.baseline_only:
+        gates = gate_scorecard(bundles, config)
+        args.output_csv.parent.mkdir(parents=True, exist_ok=True)
+        gates.to_csv(args.output_csv, index=False)
+        print(f"\nSaved baseline gate scorecard to {args.output_csv}\n")
+        cols = ["Test", "N", "MAE_MWH", "Bias_MWH", "Pass"]
+        print(gates[[c for c in cols if c in gates.columns]].to_string(
+            index=False, float_format=lambda x: f"{x:.3f}"
+        ))
+        return 0
+
     stage_filter = set(args.stages) if args.stages else None
     if stage_filter:
         unknown = stage_filter - {s[0] for s in STAGES}
         if unknown:
             raise SystemExit(f"Unknown stage name(s): {sorted(unknown)}")
-
-    bundles = load_raw_origin_bundles(args.cache_dir)
-    print(f"Loaded {len(bundles)} cached raw origin bundles from {args.cache_dir}", flush=True)
 
     results = run_ablation(bundles, config, stage_filter)
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)

@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import importlib
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+import yaml
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 ablate = importlib.import_module("ablate_correction_stages")
+
+from forecasting.tuning.calibration_search import save_raw_origin_bundles
 
 from forecasting.tuning.calibration_search import RawOriginBundle
 
@@ -182,6 +187,50 @@ class RunAblationSmokeTests(unittest.TestCase):
     def test_all_stages_run_end_to_end_without_error(self):
         results = ablate.run_ablation(self.bundles, self.config, None)
         self.assertEqual(set(results["Stage"]), {s[0] for s in ablate.STAGES})
+
+
+class BaselineOnlyCliTests(unittest.TestCase):
+    """--baseline-only exists to compare two caches (e.g. standard training vs a cache built
+    with model.asymmetric_loss.enabled: true) under the same config, without ablating any
+    correction stage -- confirms the CLI wiring produces the same numbers gate_scorecard()
+    would, not a parallel/duplicated computation that could drift from it."""
+
+    def test_baseline_only_writes_gate_scorecard_matching_gate_scorecard_function(self):
+        rng = np.random.default_rng(3)
+        bundles = [
+            _synthetic_bundle(1, hot=True, rng=rng),
+            _synthetic_bundle(2, hot=False, rng=rng),
+        ]
+        config = _config()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cache_dir = tmp_path / "cache"
+            save_raw_origin_bundles(bundles, cache_dir)
+            config_path = tmp_path / "config.yaml"
+            config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+            output_csv = tmp_path / "baseline.csv"
+
+            argv = [
+                "ablate_correction_stages.py",
+                "--config",
+                str(config_path),
+                "--cache-dir",
+                str(cache_dir),
+                "--baseline-only",
+                "--output-csv",
+                str(output_csv),
+            ]
+            with patch.object(sys, "argv", argv):
+                exit_code = ablate.main()
+            self.assertEqual(exit_code, 0)
+
+            written = pd.read_csv(output_csv)
+            expected = ablate.gate_scorecard(bundles, config)
+            self.assertEqual(
+                written[["Test", "N"]].to_dict("records"),
+                expected[["Test", "N"]].to_dict("records"),
+            )
 
 
 if __name__ == "__main__":
