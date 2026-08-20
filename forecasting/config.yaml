@@ -2081,7 +2081,16 @@ calibration:
     cap_mwh: 14.0
     max_target_mwh: 365.0
 
-  cloud_solar_shape_enabled: true
+  # Disabled 2026-08-19 after scripts/ablate_correction_stages.py showed this stage moving
+  # every gate by a negligible amount, including its own target (Cloud/solar midday MAE
+  # 6.233->6.234). Checked scripts/describe_cloud_solar_midday_coverage.py before disabling
+  # in case the null result was just this replay window lacking cloudy events to act on --
+  # it wasn't: 1795 of 3024 hour-10-16 rows qualified (59.4%), 92.5% of those robustly over
+  # threshold (not marginal), spread across all 27 origins with the top 3 carrying only
+  # 17.4% of qualifying rows. Abundant, well-distributed, genuinely cloudy data and still no
+  # measurable effect -- a real null result, not an under-sampled one. See
+  # forecast_outputs/ablation_results.csv from that run before re-enabling this.
+  cloud_solar_shape_enabled: false
   cloud_solar_shape_hours: [10, 11, 12, 13, 14, 15, 16]
   # V12.8: learned from pre-cloud residuals, with refined event classes for weekday core
   # solar-loss uplift and load-aware weekend dampening.
