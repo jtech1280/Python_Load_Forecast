@@ -447,6 +447,13 @@ def make_asymmetric_hot_peak_objective(
     * (pred - y), hess = sample_weight) when under_forecast_penalty == 1.0 or
     hot_peak_mask is all-False -- this is the mechanism that makes
     model.asymmetric_loss.enabled: false a true no-op.
+
+    Tested 2026-08-20 via a full rolling-origin replay and NOT recommended for
+    promotion -- see the model.asymmetric_loss comment in config.yaml for the
+    full result (raw model improved, final corrected forecast got worse because
+    recent_residual_correction wasn't retuned for the new residual pattern; the
+    August 2026 extreme-heat cluster was untouched either way). Read that before
+    re-enabling this or re-running the same experiment.
     """
     mask = np.asarray(hot_peak_mask, dtype=bool)
     penalty = float(under_forecast_penalty)

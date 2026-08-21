@@ -417,23 +417,48 @@ model:
     max_weight: 9.0
 
   asymmetric_loss:
-    # PROTOTYPE, off by default -- no behavior change unless explicitly enabled.
-    # Sample weighting only changes how much a row counts, not which direction of
-    # error the model is penalized for; the raw model's hot-peak-hour bias is
-    # systematically one-directional (under-forecast), which a symmetric loss has
-    # no reason to prefer against. This targets that directly: within the same
-    # hot-peak scope sample_weight already upweights (hot_day_min_f/hot_peak_hours
-    # above), under-forecasting a row is penalized under_forecast_penalty_multiplier
-    # times as much as over-forecasting it; every other row is untouched, and the
-    # objective is mathematically identical to plain reg:squarederror when this is
-    # disabled or the multiplier is 1.0. Applied to both XGBoost and LightGBM (see
+    # TESTED 2026-08-20 and NOT recommended -- keep off. Full rolling-origin replay
+    # (config.yaml copy with enabled: true, under_forecast_penalty_multiplier: 2.0,
+    # 27 origins, identical to the standard run otherwise) showed this doing exactly
+    # what it was designed to do at the raw-model level -- Hot peak days raw MAE
+    # 9.675->9.574, raw Bias 5.881->5.521, a real if modest reduction in under-
+    # forecast bias -- but the FINAL (fully corrected) forecast got WORSE, not
+    # better: Hot peak days MAE 8.097->8.309, Peak window hours 14-18 MAE
+    # 6.785->6.882. Root cause: recent_residual_correction (the single most
+    # load-bearing correction stage -- see scripts/ablate_correction_stages.py
+    # results) is an online bias-tracker tuned to respond to the *current* raw
+    # model's typical residual pattern. Changing that pattern without re-tuning
+    # recent_residual_correction to match doesn't transfer the raw-model gain to
+    # the delivered forecast -- it actively overcorrects. Re-tuning that stage to
+    # work with an asymmetric-loss raw model is real additional work this hasn't
+    # had, for a marginal raw-model gain that didn't even touch the worst failures
+    # (see below) -- not a good trade as of this test.
+    #
+    # It also does not help the actual worst-case failure mode: on the August
+    # 5-10 2026 heat-wave cluster (95-105F six days running), mean underforecast-
+    # at-peak was statistically unchanged (6.52 -> 6.44 MWh) and the single worst
+    # miss got worse (29.5 -> 34.7 MWh). This is the fourth independent tested
+    # approach to hot-peak accuracy this project has tried (two pooled post-hoc
+    # corrections, this raw-model objective, and a separately-tested extended
+    # training-history window) -- none moved the extreme-event failure mode.
+    # Treat that as a real ceiling, not a reason to keep trying variations of the
+    # same idea. Do not re-enable without addressing recent_residual_correction's
+    # tuning first, and don't expect it to fix the extreme-event case either way.
+    #
+    # Mechanism doc (still accurate): sample weighting only changes how much a row
+    # counts, not which direction of error the model is penalized for. This
+    # targets that directly -- within the same hot-peak scope sample_weight
+    # already upweights (hot_day_min_f/hot_peak_hours above), under-forecasting a
+    # row is penalized under_forecast_penalty_multiplier times as much as
+    # over-forecasting it; every other row is untouched, and the objective is
+    # mathematically identical to plain reg:squarederror when this is disabled or
+    # the multiplier is 1.0. Applied to both XGBoost and LightGBM (see
     # train_xgb/train_lgb) -- together model.ensemble_weights.xgb + .lgb is 65% of
-    # the Raw_Forecast_MWH blend below. CatBoost (the remaining 35%) doesn't have
-    # this yet -- its sklearn API needs a class-based loss (calc_ders_range), not a
-    # simple (y_true, y_pred) -> grad, hess callable, so it isn't a drop-in. See
-    # model.ensemble_weights above for the current blend split.
-    # Needs a full rolling-origin replay before being considered for promotion --
-    # see forecasting/model/xgb_model.py:make_asymmetric_hot_peak_objective.
+    # the Raw_Forecast_MWH blend below. CatBoost (the remaining 35%) was never
+    # wired up -- its sklearn API needs a class-based loss (calc_ders_range), not
+    # a simple (y_true, y_pred) -> grad, hess callable, so it isn't a drop-in, and
+    # there's no reason to build it now given the above.
+    # See forecasting/model/xgb_model.py:make_asymmetric_hot_peak_objective.
     enabled: false
     under_forecast_penalty_multiplier: 2.0
 
