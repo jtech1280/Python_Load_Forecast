@@ -138,6 +138,19 @@ class ComputeClimatologyLookupTests(unittest.TestCase):
         row_2018 = lookup[lookup["Date"] == pd.Timestamp("2018-07-15")].iloc[0]
         self.assertTrue(np.isnan(row_2018["Climatology_Temp_PXX_F"]))  # no prior years
 
+    def test_tz_aware_dates_input_produces_a_tz_naive_date_column(self):
+        """A real pipeline passes a tz-aware DT column (e.g. train_df["DT"] in
+        America/Los_Angeles) as `dates`. The resulting lookup's Date column must
+        come out tz-naive so it merges cleanly downstream."""
+        reference = build_daily_max_temp_reference(
+            _hourly_weather(["2018-07-15", "2019-07-15"], {"2018-07-15": 90.0, "2019-07-15": 92.0})
+        )
+        dates = pd.Series(pd.to_datetime(["2021-07-15"])).dt.tz_localize("America/Los_Angeles")
+        lookup = compute_climatology_lookup(
+            reference, dates, {"features": {"record_breaking_heat": {"min_reference_years": 2}}}
+        )
+        self.assertIsNone(lookup["Date"].dt.tz)
+
 
 class AddRecordBreakingHeatFeaturesTests(unittest.TestCase):
     def _df(self) -> pd.DataFrame:
@@ -182,6 +195,30 @@ class AddRecordBreakingHeatFeaturesTests(unittest.TestCase):
             df, self._lookup(), {"features": {"record_breaking_heat": {"enabled": True}}}
         )
         self.assertNotIn("Temp_Excess_Over_Climatology_F", out.columns)
+
+    def test_tz_aware_dt_merges_cleanly_against_a_naive_lookup(self):
+        """Regression test: a real pipeline's train_df["DT"] is tz-aware
+        (America/Los_Angeles), which previously blew up the merge with
+        'ValueError: You are trying to merge on datetime64[us] and
+        datetime64[us, America/Los_Angeles] columns' because only one side of the
+        merge had its tz stripped."""
+        df = self._df()
+        df["DT"] = df["DT"].dt.tz_localize("America/Los_Angeles")
+        out = add_record_breaking_heat_features(
+            df, self._lookup(), {"features": {"record_breaking_heat": {"enabled": True}}}
+        )
+        self.assertTrue((out["Temp_Excess_Over_Climatology_F"] == 4.0).all())
+
+    def test_tz_aware_lookup_merges_cleanly_against_a_naive_dt(self):
+        """The reverse mismatch: a climatology lookup built from a tz-aware `dates`
+        series (e.g. compute_climatology_lookup(reference, train_df["DT"])) must
+        still merge cleanly against a naive DT column."""
+        lookup = self._lookup()
+        lookup["Date"] = lookup["Date"].dt.tz_localize("America/Los_Angeles")
+        out = add_record_breaking_heat_features(
+            self._df(), lookup, {"features": {"record_breaking_heat": {"enabled": True}}}
+        )
+        self.assertTrue((out["Temp_Excess_Over_Climatology_F"] == 4.0).all())
 
 
 if __name__ == "__main__":

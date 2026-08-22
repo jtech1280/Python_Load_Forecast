@@ -41,6 +41,19 @@ def _cfg(config: dict | None) -> dict:
     return (raw.get("features", {}) or {}).get("record_breaking_heat", {}) or {}
 
 
+def _normalize_to_naive_date(series: pd.Series) -> pd.Series:
+    """Coerce to midnight-normalized, tz-naive timestamps regardless of whether the
+    input is tz-aware or tz-naive. `Date` columns in this module represent a
+    calendar date, not an instant, so the tz must always be dropped -- but
+    `.dt.tz_localize(None)` raises on an already-naive series, so a plain
+    unconditional call here would crash for callers whose DT column happens not to
+    carry a tz (e.g. cached weather that was stored naive)."""
+    dt = pd.to_datetime(series, errors="coerce")
+    if dt.dt.tz is not None:
+        dt = dt.dt.tz_localize(None)
+    return dt.dt.normalize()
+
+
 def build_daily_max_temp_reference(weather_df: pd.DataFrame) -> pd.DataFrame:
     """Collapse an hourly weather frame (DT, TempF) to one row per date with that
     date's max temperature. This is the raw material the climatology lookup is
@@ -112,7 +125,7 @@ def compute_climatology_lookup(
     # (e.g. train_df["DT"]), and looping per hourly timestamp instead of per day is a
     # ~24x blowup in iteration count for no benefit, since the result only ever varies
     # by calendar date.
-    unique_dates = pd.to_datetime(pd.Series(dates).dropna()).dt.normalize().unique()
+    unique_dates = _normalize_to_naive_date(pd.Series(dates).dropna()).unique()
     unique_dates = pd.DatetimeIndex(unique_dates)
     if len(unique_dates) == 0 or reference.empty:
         return pd.DataFrame(
@@ -187,9 +200,9 @@ def add_record_breaking_heat_features(
     if "DT" not in out.columns or "Temperature_DailyMax" not in out.columns:
         return out
 
-    out["Date"] = pd.to_datetime(out["DT"], errors="coerce").dt.normalize().dt.tz_localize(None)
+    out["Date"] = _normalize_to_naive_date(out["DT"])
     lookup = climatology_lookup.copy()
-    lookup["Date"] = pd.to_datetime(lookup["Date"]).dt.normalize()
+    lookup["Date"] = _normalize_to_naive_date(lookup["Date"])
     out = out.merge(lookup, on="Date", how="left")
     out.drop(columns=["Date"], inplace=True)
 
