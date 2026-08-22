@@ -30,6 +30,11 @@ from forecasting.features.feature_builder import (
     build_training_frame,
     build_forecast_frame,
 )
+from forecasting.features.record_breaking_heat import (
+    add_record_breaking_heat_features,
+    build_daily_max_temp_reference,
+    compute_climatology_lookup,
+)
 from forecasting.features.intraday_load_features import (
     append_recent_five_min_hourly_load,
     build_hourly_load_from_five_min,
@@ -1457,6 +1462,8 @@ def run_pipeline(
     hist_wx = fetch_historical_weather(config)
     _progress(progress_callback, "Fetched historical weather", advance=1)
 
+    daily_max_temp_reference = build_daily_max_temp_reference(hist_wx)
+
     _progress(progress_callback, "Fetching forecast weather")
     fut_wx = fetch_forecast_weather(config)
     _progress(progress_callback, "Fetched forecast weather", advance=1)
@@ -1551,6 +1558,13 @@ def run_pipeline(
         solar_df=solar_df,
     )
     _progress(progress_callback, "Built training frame", advance=1)
+
+    train_climatology_lookup = compute_climatology_lookup(
+        daily_max_temp_reference, train_df["DT"], config
+    )
+    train_df = add_record_breaking_heat_features(
+        train_df, train_climatology_lookup, config
+    )
 
     if bool(
         (config.get("diagnostics", {}) or {}).get("training_weight_diagnostic", False)
@@ -1684,6 +1698,12 @@ def run_pipeline(
         end_dt = latest_hist_dt + pd.Timedelta(days=int(override_horizon_days))
         future_frame = future_frame[future_frame["DT"] <= end_dt].copy()
     future_frame = _trim_incomplete_future_weather(future_frame)
+    future_climatology_lookup = compute_climatology_lookup(
+        daily_max_temp_reference, future_frame["DT"], config
+    )
+    future_frame = add_record_breaking_heat_features(
+        future_frame, future_climatology_lookup, config
+    )
     _progress(progress_callback, "Built future feature frame", advance=1)
 
     historical_seed = train_df[["DT", "MWH"]].copy().sort_values("DT")

@@ -38,6 +38,12 @@ BASE_FEATURES = [
     "Extreme_Heat_100",
     "Temp_Bin",
     "DailyMaxTempBin",
+    # Record-breaking-ness (features.record_breaking_heat in config.yaml, off by
+    # default): how far today's daily max sits above a trailing, leakage-safe
+    # climatological reference for this time of year. Listed here unconditionally --
+    # _available_features() silently drops it when the config flag is off and the
+    # column was never added, same as every other optional feature.
+    "Temp_Excess_Over_Climatology_F",
     "HeatIndexF",
     "HeatIndex_CDD",
     "DailyMax_x_PeakHour",

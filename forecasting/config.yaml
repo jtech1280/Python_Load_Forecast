@@ -333,6 +333,30 @@ training:
       enabled: true
       max_previous_days: 7
 
+features:
+  record_breaking_heat:
+    # PROTOTYPE, off by default -- no behavior change unless explicitly enabled.
+    # A prior version of this idea (temp_excess_over_month_p95) was prototyped earlier
+    # this project and came out degenerate -- zero for most origins -- because its
+    # reference percentile was computed from the ~27-origin rolling-origin replay
+    # sample, far too sparse to estimate a 90th/95th percentile. This version computes
+    # the reference from the full historical weather archive already fetched for
+    # training (thousands of daily observations, not 27), and only from years
+    # strictly before the row being featurized -- see
+    # forecasting/features/record_breaking_heat.py for the leakage-safety reasoning.
+    # Adds Temp_Excess_Over_Climatology_F (Temperature_DailyMax minus that date's
+    # trailing Pxx reference for the same time of year) and
+    # Temp_Climatology_Reference_Years (how many distinct prior years supported the
+    # reference, so a thin-reference row is auditable rather than silently wrong).
+    # Rows with fewer than min_reference_years of prior history get NaN, not zero --
+    # a silent zero is exactly what made the first attempt look fine until someone
+    # checked the per-origin breakdown by hand.
+    # Needs a full rolling-origin replay before being considered for promotion.
+    enabled: false
+    percentile: 95.0
+    day_of_year_window_days: 10
+    min_reference_years: 3
+
 hardware:
   # V12.8 keeps V12.3/V12.4 max performance mode. Use all visible CPU cores and XGBoost GPU when available.
   # CPU threads: -1 means all visible logical cores. Override with --cpu-threads N.
