@@ -68,6 +68,7 @@ import argparse
 import copy
 import json
 import sys
+import time
 import traceback
 from pathlib import Path
 from typing import Any
@@ -206,16 +207,36 @@ def _set_path(config: dict, dotted_path: str, value: Any) -> dict:
     return out
 
 
+def _print_progress(label: str, advance: int = 0, total: int | None = None) -> None:
+    """A plain-print progress callback for run_pipeline(). Without passing *some*
+    callback here, run_pipeline's internal _progress() calls are all no-ops --
+    _build_cache used to call run_pipeline(config) with no callback at all, which
+    meant this entire step (data loading, training every model) printed nothing,
+    start to finish. That's indistinguishable from a genuine hang: if this step
+    ever takes far longer than expected again, this is what tells you it's still
+    working (and roughly where), instead of leaving you to guess whether to kill it."""
+    stamp = time.strftime("%H:%M:%S")
+    print(f"[{stamp}] {label}", flush=True)
+
+
 def build_cache(config: dict, cache_dir: Path, origin_limit: int | None) -> None:
     from forecasting.forecast.forecast_pipeline import run_pipeline
 
     print(
-        "Running the full pipeline once to build train_df/features for the raw-forecast cache...",
+        "Running the full pipeline once to build train_df/features for the raw-forecast cache "
+        "(this step trains the production XGB/LGB/CatBoost models on the full history and was "
+        "previously silent end-to-end -- now prints each pipeline stage as it starts)...",
         flush=True,
     )
-    results = run_pipeline(config)
+    results = run_pipeline(config, progress_callback=_print_progress)
     train_df = results["historical_fit_df"]
     features = results.get("features", [])
+    print(
+        f"[{time.strftime('%H:%M:%S')}] Pipeline done: {len(train_df)} training rows "
+        f"({train_df['DT'].min()} to {train_df['DT'].max()}), {len(features)} features. "
+        f"Starting per-origin replay-bundle build (prints per origin as it goes)...",
+        flush=True,
+    )
     bundles = build_raw_origin_bundles(
         train_df, features, config, origin_limit=origin_limit
     )

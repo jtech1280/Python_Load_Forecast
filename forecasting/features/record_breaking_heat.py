@@ -108,24 +108,62 @@ def compute_climatology_lookup(
     window_days = int(cfg.get("day_of_year_window_days", DEFAULT_DAY_OF_YEAR_WINDOW_DAYS))
     min_reference_years = int(cfg.get("min_reference_years", DEFAULT_MIN_REFERENCE_YEARS))
 
-    unique_dates = pd.to_datetime(pd.Series(dates).dropna().unique())
+    # Dedup to whole dates before looping -- `dates` is frequently an hourly DT column
+    # (e.g. train_df["DT"]), and looping per hourly timestamp instead of per day is a
+    # ~24x blowup in iteration count for no benefit, since the result only ever varies
+    # by calendar date.
+    unique_dates = pd.to_datetime(pd.Series(dates).dropna()).dt.normalize().unique()
+    unique_dates = pd.DatetimeIndex(unique_dates)
+    if len(unique_dates) == 0 or reference.empty:
+        return pd.DataFrame(
+            columns=["Date", "Climatology_Temp_PXX_F", "Temp_Climatology_Reference_Years"]
+        )
+
+    print(
+        f"[record_breaking_heat] computing climatology for {len(unique_dates)} unique "
+        f"date(s) against a {len(reference)}-row reference "
+        f"({int(reference['Year'].min())}-{int(reference['Year'].max())})...",
+        flush=True,
+    )
+
+    target = pd.DataFrame(
+        {"Date": unique_dates, "Year": unique_dates.year, "DOY": unique_dates.dayofyear}
+    )
+
     rows = []
-    for date in unique_dates:
-        value, n_years = _trailing_percentile_for_date(
-            reference,
-            target_year=int(date.year),
-            target_doy=int(date.dayofyear),
-            percentile=percentile,
-            window_days=window_days,
-            min_reference_years=min_reference_years,
-        )
-        rows.append(
-            {
-                "Date": pd.Timestamp(date.date()),
-                "Climatology_Temp_PXX_F": value,
-                "Temp_Climatology_Reference_Years": n_years,
-            }
-        )
+    # Group by target year so the (usually expensive-looking, actually just
+    # not-worth-repeating) "years strictly before this row's year" filter runs once
+    # per distinct target year -- a handful of times -- instead of once per date.
+    for target_year, year_group in target.groupby("Year", sort=True):
+        prior = reference[reference["Year"] < target_year]
+        if prior.empty:
+            rows.extend(
+                {
+                    "Date": pd.Timestamp(row.Date),
+                    "Climatology_Temp_PXX_F": float("nan"),
+                    "Temp_Climatology_Reference_Years": 0,
+                }
+                for row in year_group.itertuples()
+            )
+            continue
+        prior_doy = prior["DOY"].to_numpy()
+        prior_year = prior["Year"].to_numpy()
+        prior_temp = prior["Temperature_DailyMax"].to_numpy()
+        for row in year_group.itertuples():
+            distance = _circular_doy_distance(prior_doy, int(row.DOY))
+            within_window = distance <= window_days
+            n_years = int(np.unique(prior_year[within_window]).size)
+            if n_years < min_reference_years:
+                value = float("nan")
+            else:
+                value = float(np.percentile(prior_temp[within_window], percentile))
+            rows.append(
+                {
+                    "Date": pd.Timestamp(row.Date),
+                    "Climatology_Temp_PXX_F": value,
+                    "Temp_Climatology_Reference_Years": n_years,
+                }
+            )
     return pd.DataFrame(
         rows, columns=["Date", "Climatology_Temp_PXX_F", "Temp_Climatology_Reference_Years"]
     )
