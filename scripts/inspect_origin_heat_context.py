@@ -1,9 +1,18 @@
 from __future__ import annotations
 
 """Prints the weather context (daily max temp trend into the origin day, consecutive
-100F+ day count, and -- when the cache was built with record_breaking_heat enabled --
-the climatology reference/excess columns) for specific origins in a raw-forecast cache
-built by ablate_correction_stages.py --build-cache.
+100F+ day count, and -- when present in the cache's raw_origin frame -- the climatology
+reference/excess columns) for specific origins in a raw-forecast cache built by
+ablate_correction_stages.py --build-cache.
+
+Note on the climatology columns specifically: raw_origin/raw_calibration are curated
+forecast/actuals/context frames (see rolling_origin_replay.py's _origin_raw_forecasts and
+run_rolling_backtest), not a dump of every training input feature. Temp_Excess_Over_
+Climatology_F can be genuinely absent from them even when record_breaking_heat was
+enabled and the feature was used to train the underlying model -- so their absence here
+is NOT proof the feature was off for this cache. If you need to know whether it was
+actually enabled, check features.record_breaking_heat.enabled in the config that was
+active when --build-cache ran for this cache dir.
 
 Motivation: comparing per-origin bias between two caches (see
 compare_origin_bias_across_caches.py) can surface a handful of origins where a feature
@@ -102,8 +111,16 @@ def main() -> int:
                     print(f"{col} on origin day: {origin_rows[col].iloc[0]}")
         else:
             print(
-                "record_breaking_heat climatology columns not present in this cache "
-                "(feature was off when this cache was built, or was pruned as unused features)."
+                "record_breaking_heat climatology columns not present in raw_origin -- this is "
+                "NOT evidence the feature was off. raw_origin/raw_calibration are curated "
+                "forecast/actuals/context frames (see rolling_origin_replay.py's "
+                "_origin_raw_forecasts and run_rolling_backtest), not a dump of every training "
+                "input feature, so a model-input column like Temp_Excess_Over_Climatology_F can "
+                "be absent here even when it was used to train the underlying model. To check "
+                "whether the feature was actually enabled for this cache, look at "
+                "features.record_breaking_heat.enabled in whatever config was active when "
+                "--build-cache ran for this cache dir -- that's the source of truth, not this "
+                "column check."
             )
 
     return 0

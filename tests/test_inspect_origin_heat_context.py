@@ -69,6 +69,7 @@ class MainSmokeTests(unittest.TestCase):
             self.assertIn("origin_25", out)
             self.assertIn("Origin-day Temperature_DailyMax: 101.0", out)
             self.assertIn("climatology columns not present", out)
+            self.assertIn("NOT evidence the feature was off", out)
 
     def test_prints_climatology_columns_when_present(self):
         with tempfile.TemporaryDirectory() as tmp:
