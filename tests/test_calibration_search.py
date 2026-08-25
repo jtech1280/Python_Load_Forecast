@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,7 @@ import pandas as pd
 
 from forecasting.tuning.calibration_search import (
     RawOriginBundle,
+    build_raw_origin_bundle_cache,
     build_raw_origin_bundles,
     load_raw_origin_bundles,
     save_raw_origin_bundles,
@@ -269,6 +271,46 @@ class ExtendedLookbackWiringTests(unittest.TestCase):
         self.assertEqual(mock_backtest.call_count, 1)
         self.assertIsNone(bundles[0].extended_lookback_raw)
 
+    def test_build_raw_origin_bundle_cache_writes_completed_bundles(self):
+        dts = [pd.Timestamp("2026-07-01"), pd.Timestamp("2026-07-02")]
+        config = {
+            "calibration": {},
+            "training": {"rolling_origin_replay": {"parallel": {"enabled": False}}},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            with (
+                patch(
+                    "forecasting.tuning.calibration_search._origin_candidates",
+                    return_value=dts,
+                ),
+                patch(
+                    "forecasting.tuning.calibration_search.run_rolling_backtest",
+                    return_value=pd.DataFrame({"DT": [dts[0]]}),
+                ) as mock_backtest,
+                patch(
+                    "forecasting.tuning.calibration_search._origin_raw_forecasts",
+                    side_effect=lambda work, features, config, origin_dt, horizon_days, origin_number: (
+                        pd.DataFrame({"DT": [origin_dt]}),
+                        pd.DataFrame(),
+                        {},
+                        {},
+                    ),
+                ),
+            ):
+                paths = build_raw_origin_bundle_cache(
+                    pd.DataFrame({"DT": dts}),
+                    features=[],
+                    config=config,
+                    cache_dir=cache_dir,
+                )
+
+            self.assertEqual(mock_backtest.call_count, 2)
+            self.assertEqual(len(paths), 2)
+            self.assertTrue(all(path.exists() for path in paths))
+            loaded = load_raw_origin_bundles(cache_dir)
+            self.assertEqual(sorted(b.origin_number for b in loaded), [1, 2])
+
 
 class ParallelOriginBundleBuildTests(unittest.TestCase):
     """build_raw_origin_bundles reuses rolling_origin_replay.py's already-proven per-origin
@@ -281,6 +323,10 @@ class ParallelOriginBundleBuildTests(unittest.TestCase):
     the process boundary; only pool.map's actual returned bundles can be. Assertions here
     check the returned bundles' shape/content, not call counts, for that reason."""
 
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "Windows multiprocessing uses spawn, so patched mocks are not inherited by workers.",
+    )
     def test_runs_in_parallel_and_still_returns_every_origin(self):
         dts = [
             pd.Timestamp("2026-07-01"),
@@ -355,6 +401,52 @@ class ParallelOriginBundleBuildTests(unittest.TestCase):
             )
 
         # Sequential path runs inline in this process, so call_count IS reliable here.
+        self.assertEqual(mock_backtest.call_count, 2)
+        self.assertEqual(len(bundles), 2)
+        self.assertEqual(sorted(b.origin_number for b in bundles), [1, 2])
+
+    def test_catboost_gpu_guard_forces_sequential_bundle_build(self):
+        dts = [pd.Timestamp("2026-07-01"), pd.Timestamp("2026-07-02")]
+        config = {
+            "calibration": {},
+            "training": {
+                "rolling_origin_replay": {
+                    "parallel": {
+                        "enabled": True,
+                        "processes": 4,
+                        "serial_when_catboost_gpu": True,
+                    }
+                }
+            },
+        }
+        with (
+            patch(
+                "forecasting.tuning.calibration_search._origin_candidates",
+                return_value=dts,
+            ),
+            patch(
+                "forecasting.tuning.calibration_search._serial_replay_required_for_catboost_gpu",
+                return_value=True,
+            ),
+            patch(
+                "forecasting.tuning.calibration_search.run_rolling_backtest",
+                return_value=pd.DataFrame({"DT": [dts[0]]}),
+            ) as mock_backtest,
+            patch(
+                "forecasting.tuning.calibration_search._origin_raw_forecasts",
+                side_effect=lambda work, features, config, origin_dt, horizon_days, origin_number: (
+                    pd.DataFrame({"DT": [origin_dt]}),
+                    pd.DataFrame(),
+                    {},
+                    {},
+                ),
+            ),
+        ):
+            bundles = build_raw_origin_bundles(
+                pd.DataFrame({"DT": dts}), features=[], config=config
+            )
+
+        # The CatBoost GPU guard runs inline in this process, so call_count is reliable.
         self.assertEqual(mock_backtest.call_count, 2)
         self.assertEqual(len(bundles), 2)
         self.assertEqual(sorted(b.origin_number for b in bundles), [1, 2])

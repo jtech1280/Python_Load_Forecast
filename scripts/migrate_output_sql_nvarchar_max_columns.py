@@ -139,6 +139,33 @@ def _unmigrated_row_count(conn, schema: str, table: str, column: str, tmp_col: s
     return int(result) if result is not None else 0
 
 
+def _column_metadata(conn, schema: str, table: str, column: str) -> dict | None:
+    row = conn.execute(
+        text(
+            """
+            SELECT DATA_TYPE, CHARACTER_MAXIMUM_LENGTH
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = :schema
+              AND TABLE_NAME = :table
+              AND COLUMN_NAME = :column
+            """
+        ),
+        {"schema": schema, "table": table, "column": column},
+    ).mappings().first()
+    return dict(row) if row else None
+
+
+def _staging_column_is_usable(metadata: dict, bound: int) -> bool:
+    if str(metadata.get("DATA_TYPE") or "").lower() != "nvarchar":
+        return False
+    length = metadata.get("CHARACTER_MAXIMUM_LENGTH")
+    try:
+        length_i = int(length)
+    except Exception:
+        return False
+    return length_i == -1 or length_i >= int(bound)
+
+
 def _migrate_column(
     engine,
     schema: str,
@@ -159,19 +186,40 @@ def _migrate_column(
     drop_stmt = f"ALTER TABLE {full} DROP COLUMN [{column}]"
     rename_stmt = f"EXEC sp_rename '{schema}.{table}.{tmp_col}', '{column}', 'COLUMN'"
 
+    with engine.connect() as conn:
+        tmp_metadata = _column_metadata(conn, schema, table, tmp_col)
+
     if not execute:
+        staging_step = (
+            f"reuse existing [{tmp_col}]"
+            if tmp_metadata
+            else f"add [{tmp_col}]"
+        )
         print(
             f"  PLANNED {schema}.{table}.{column} -> NVARCHAR({bound}) "
-            f"(longest value on file: {observed_max} chars): add, backfill in "
+            f"(longest value on file: {observed_max} chars): {staging_step}, backfill in "
             f"batches of {batch_rows}, drop old column, rename into place",
             flush=True,
         )
         return True
 
     try:
-        with engine.begin() as conn:
-            conn.execute(text(add_stmt))
-        print(f"  ADDED [{tmp_col}] NVARCHAR({bound}) to {full}", flush=True)
+        if tmp_metadata:
+            if not _staging_column_is_usable(tmp_metadata, bound):
+                print(
+                    f"  ERROR {schema}.{table}.{column}: existing staging column "
+                    f"[{tmp_col}] has incompatible type {tmp_metadata}; not using it.",
+                    flush=True,
+                )
+                return False
+            print(
+                f"  REUSING existing staging column [{tmp_col}] on {full}",
+                flush=True,
+            )
+        else:
+            with engine.begin() as conn:
+                conn.execute(text(add_stmt))
+            print(f"  ADDED [{tmp_col}] NVARCHAR({bound}) to {full}", flush=True)
 
         backfill_stmt = text(
             f"UPDATE TOP ({int(batch_rows)}) {full} "

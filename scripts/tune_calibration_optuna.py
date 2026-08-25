@@ -63,9 +63,8 @@ from forecasting.backtest.rolling_origin_replay import build_search_scorecard
 from forecasting.config_utils import load_forecast_config
 from forecasting.tuning.calibration_search import (
     RawOriginBundle,
-    build_raw_origin_bundles,
+    build_raw_origin_bundle_cache,
     load_raw_origin_bundles,
-    save_raw_origin_bundles,
     score_bundles,
 )
 from forecasting.tuning.optuna_tuning import (
@@ -125,15 +124,18 @@ def build_cache(config: dict, cache_dir: Path, origin_limit: int | None) -> None
     results = run_pipeline(config)
     train_df = results["historical_fit_df"]
     features = results.get("features", [])
-    bundles = build_raw_origin_bundles(
-        train_df, features, config, origin_limit=origin_limit
+    paths = build_raw_origin_bundle_cache(
+        train_df,
+        features,
+        config,
+        cache_dir=cache_dir,
+        origin_limit=origin_limit,
     )
-    if not bundles:
+    if not paths:
         raise SystemExit(
             "No origins produced a usable raw forecast bundle; check "
             "training.rolling_origin_replay config (min_train_days, calibration_days, etc.)."
         )
-    paths = save_raw_origin_bundles(bundles, cache_dir)
     print(f"Cached {len(paths)} raw origin bundles to {cache_dir}", flush=True)
 
 

@@ -22,6 +22,7 @@ multiprocessing pattern for build_raw_origin_bundles's parallel path, rather tha
 reimplementing either. If that module's internals move, update the imports here.
 """
 
+import os
 import pickle
 from dataclasses import dataclass
 from multiprocessing import Pool, cpu_count
@@ -36,6 +37,7 @@ from forecasting.backtest.rolling_origin_replay import (
     _origin_candidates,
     _origin_raw_forecasts,
     _replay_cfg,
+    _serial_replay_required_for_catboost_gpu,
     _worker_config_for_parallel_replay,
     apply_origin_correction_chain,
 )
@@ -151,30 +153,15 @@ def _build_one_origin_bundle(args: tuple) -> RawOriginBundle | None:
     )
 
 
-def build_raw_origin_bundles(
+def _raw_origin_pool_args(
     train_df: pd.DataFrame,
     features: list[str],
     config: dict,
     *,
     origin_limit: int | None = None,
-) -> list[RawOriginBundle]:
-    """Run calibration-window training + per-origin raw forecasting once per origin.
-
-    Everything here depends on `config`'s `model.*`/`training.*` (and feature-building)
-    settings, NOT on `calibration.*` settings. Build the cache once against the base config
-    before starting a calibration-only search; do not rebuild it per trial, and do not reuse
-    a cache across configs that change model/feature/training settings.
-
-    Each origin's three training passes (calibration backtest, rare-event extended lookback,
-    origin raw/weather-realism/scenario forecasts) are independent of every other origin, the
-    same property that already makes rolling_origin_replay.py's production replay path safe to
-    parallelize across origins. This reuses that same training.rolling_origin_replay.parallel.*
-    config (enabled/processes) and CPU-thread-division safeguard, so a cache build picks up
-    whatever parallelism you already have configured for replay -- e.g. the gpu_ram_part
-    setting that lets concurrent CatBoost GPU training share VRAM safely applies here too.
-    """
+) -> tuple[list[tuple], bool, int]:
     if train_df is None or train_df.empty:
-        return []
+        return [], False, 1
 
     cfg = _replay_cfg(config)
     horizon_days = _as_int(cfg.get("horizon_days"), 16)
@@ -203,6 +190,21 @@ def build_raw_origin_bundles(
             num_processes = 2
     num_processes = min(num_processes, max(1, len(origins)))
 
+    if (
+        parallel_enabled
+        and num_processes > 1
+        and _serial_replay_required_for_catboost_gpu(
+            config, skip_catboost, parallel_cfg
+        )
+    ):
+        print(
+            "CatBoost GPU is enabled; building raw origin bundles sequentially "
+            "to avoid native CatBoost GPU memory aborts from concurrent workers.",
+            flush=True,
+        )
+        parallel_enabled = False
+        num_processes = 1
+
     run_config = config
     if parallel_enabled and num_processes > 1:
         run_config = _worker_config_for_parallel_replay(config, num_processes)
@@ -223,12 +225,42 @@ def build_raw_origin_bundles(
         )
         for origin_number, origin_dt in enumerate(origins, start=1)
     ]
+    return pool_args, parallel_enabled, num_processes
+
+
+def build_raw_origin_bundles(
+    train_df: pd.DataFrame,
+    features: list[str],
+    config: dict,
+    *,
+    origin_limit: int | None = None,
+) -> list[RawOriginBundle]:
+    """Run calibration-window training + per-origin raw forecasting once per origin.
+
+    Everything here depends on `config`'s `model.*`/`training.*` (and feature-building)
+    settings, NOT on `calibration.*` settings. Build the cache once against the base config
+    before starting a calibration-only search; do not rebuild it per trial, and do not reuse
+    a cache across configs that change model/feature/training settings.
+
+    Each origin's three training passes (calibration backtest, rare-event extended lookback,
+    origin raw/weather-realism/scenario forecasts) are independent of every other origin, the
+    same property that already makes rolling_origin_replay.py's production replay path safe to
+    parallelize across origins. This reuses that same training.rolling_origin_replay.parallel.*
+    config (enabled/processes) and CPU-thread-division safeguard, so a cache build picks up
+    whatever parallelism you already have configured for replay -- e.g. the gpu_ram_part
+    setting that lets concurrent CatBoost GPU training share VRAM safely applies here too.
+    """
+    pool_args, parallel_enabled, num_processes = _raw_origin_pool_args(
+        train_df, features, config, origin_limit=origin_limit
+    )
+    if not pool_args:
+        return []
 
     if not parallel_enabled or num_processes <= 1:
         results = [_build_one_origin_bundle(arg) for arg in pool_args]
     else:
         print(
-            f"[calibration_search] building {len(origins)} raw origin bundles in parallel "
+            f"[calibration_search] building {len(pool_args)} raw origin bundles in parallel "
             f"on {num_processes} processes...",
             flush=True,
         )
@@ -243,17 +275,85 @@ def _bundle_path(cache_dir: Path, bundle: RawOriginBundle) -> Path:
     return cache_dir / f"origin_{bundle.origin_number:03d}_{date_tag}.pkl"
 
 
+def _save_one_raw_origin_bundle(bundle: RawOriginBundle, cache_dir: str | Path) -> Path:
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = _bundle_path(cache_dir, bundle)
+    tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    with tmp_path.open("wb") as fh:
+        pickle.dump(bundle, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp_path.replace(path)
+    return path
+
+
+def _build_and_save_one_origin_bundle(args: tuple) -> str | None:
+    origin_args, cache_dir = args
+    bundle = _build_one_origin_bundle(origin_args)
+    if bundle is None:
+        return None
+    path = _save_one_raw_origin_bundle(bundle, cache_dir)
+    print(f"[calibration_search] saved raw origin bundle: {path}", flush=True)
+    return str(path)
+
+
+def build_raw_origin_bundle_cache(
+    train_df: pd.DataFrame,
+    features: list[str],
+    config: dict,
+    cache_dir: str | Path,
+    *,
+    origin_limit: int | None = None,
+) -> list[Path]:
+    """Build and persist raw origin bundles, writing each bundle as soon as it completes.
+
+    This is the preferred path for long cache-build CLI runs. Returning full
+    RawOriginBundle objects through a multiprocessing queue can move hundreds of
+    MB of DataFrames through the parent process before anything is written to
+    disk. Here each worker writes its own bundle and returns only the path, so a
+    late failure or pool issue does not discard hours of completed origins.
+    """
+    pool_args, parallel_enabled, num_processes = _raw_origin_pool_args(
+        train_df, features, config, origin_limit=origin_limit
+    )
+    if not pool_args:
+        return []
+
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    worker_args = [(arg, str(cache_dir)) for arg in pool_args]
+    paths: list[Path] = []
+
+    if not parallel_enabled or num_processes <= 1:
+        for arg in worker_args:
+            path = _build_and_save_one_origin_bundle(arg)
+            if path is not None:
+                paths.append(Path(path))
+    else:
+        print(
+            f"[calibration_search] building {len(pool_args)} raw origin bundles in parallel "
+            f"on {num_processes} processes and writing each bundle as it completes...",
+            flush=True,
+        )
+        with Pool(processes=num_processes) as pool:
+            for path in pool.imap_unordered(
+                _build_and_save_one_origin_bundle, worker_args, chunksize=1
+            ):
+                if path is not None:
+                    paths.append(Path(path))
+                    print(
+                        f"[calibration_search] collected saved bundle {len(paths)}/{len(pool_args)}",
+                        flush=True,
+                    )
+
+    return sorted(paths)
+
+
 def save_raw_origin_bundles(
     bundles: list[RawOriginBundle], cache_dir: str | Path
 ) -> list[Path]:
-    cache_dir = Path(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     for bundle in bundles:
-        path = _bundle_path(cache_dir, bundle)
-        with path.open("wb") as fh:
-            pickle.dump(bundle, fh, protocol=pickle.HIGHEST_PROTOCOL)
-        paths.append(path)
+        paths.append(_save_one_raw_origin_bundle(bundle, cache_dir))
     return paths
 
 
