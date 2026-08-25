@@ -351,11 +351,20 @@ features:
     # Rows with fewer than min_reference_years of prior history get NaN, not zero --
     # a silent zero is exactly what made the first attempt look fine until someone
     # checked the per-origin breakdown by hand.
+    # active_months restricts Temp_Excess_Over_Climatology_F to these calendar months
+    # (Climatology_Temp_PXX_F/Temp_Climatology_Reference_Years stay populated everywhere
+    # for audit purposes). A same-day, confound-controlled A/B (build both caches
+    # back-to-back so neither carries the other's build-date data-window drift) showed
+    # a real MAE gain on Hot peak days (-0.246 MWH) but a larger regression on Shoulder
+    # heat transition (+0.210 MWH) when this ran unscoped, year-round -- "how
+    # record-breaking is today's heat" isn't the relevant question outside summer. Set
+    # to [] to apply year-round instead.
     # Needs a full rolling-origin replay before being considered for promotion.
     enabled: false
     percentile: 95.0
     day_of_year_window_days: 10
     min_reference_years: 3
+    active_months: [6, 7, 8, 9]
 
 hardware:
   # V12.8 keeps V12.3/V12.4 max performance mode. Use all visible CPU cores and XGBoost GPU when available.

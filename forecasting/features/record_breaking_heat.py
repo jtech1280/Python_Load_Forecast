@@ -26,6 +26,12 @@ Two failure modes this is designed to fail loudly on rather than silently degrad
     NaN, gated by min_reference_years, and the actual count is exposed as its own
     column (Temp_Climatology_Reference_Years) so this is auditable rather than
     another number nobody checks.
+
+Scoped to summer months by default (see DEFAULT_ACTIVE_MONTHS on add_record_breaking_
+heat_features): a same-day, confound-controlled A/B showed a real MAE gain on Hot peak
+days but a larger regression on Shoulder heat transition (Spring/Fall) when this ran
+unscoped year-round -- "how record-breaking is today's heat" isn't the relevant
+question outside summer, and feeding it in there looked like noise, not signal.
 """
 
 import numpy as np
@@ -34,6 +40,16 @@ import pandas as pd
 DEFAULT_PERCENTILE = 95.0
 DEFAULT_DAY_OF_YEAR_WINDOW_DAYS = 10
 DEFAULT_MIN_REFERENCE_YEARS = 3
+# A same-day A/B (ablation_cache_clean vs record_breaking_cache_clean, both caches built
+# back-to-back so neither carries the other's build-date data-window drift) showed a real
+# MAE improvement on Hot peak days (-0.246 MWH) but a larger regression on Shoulder heat
+# transition (+0.210 MWH, Spring/Fall, temp 75-93F) when the feature ran unscoped, year-round.
+# The trailing-percentile "how record-breaking is today" signal is a summer-heat concept;
+# feeding it into shoulder-season rows where that's not the relevant question looks like it
+# was adding noise rather than signal. Restricting to summer months (matching this project's
+# existing IsSummerSeason convention, see time_features.py) keeps the improvement in scope
+# without touching the months where it was actively hurting.
+DEFAULT_ACTIVE_MONTHS: tuple[int, ...] = (6, 7, 8, 9)
 
 
 def _cfg(config: dict | None) -> dict:
@@ -190,7 +206,13 @@ def add_record_breaking_heat_features(
     Pxx reference. Disabled (config off, or no lookup available) is a true no-op --
     the column is simply never added, so DEFAULT_FEATURES can list it unconditionally
     and _available_features() will just skip it when absent, same as every other
-    optional feature in this project."""
+    optional feature in this project.
+
+    Temp_Excess_Over_Climatology_F is set to NaN (not dropped -- Climatology_Temp_PXX_F
+    and Temp_Climatology_Reference_Years stay populated for audit purposes) outside
+    `active_months` (default (6, 7, 8, 9), i.e. summer -- see DEFAULT_ACTIVE_MONTHS for
+    why). Pass `active_months: []` (or any falsy value) in config to apply the feature
+    year-round instead."""
     out = df.copy()
     cfg = _cfg(config)
     if not bool(cfg.get("enabled", False)):
@@ -208,5 +230,12 @@ def add_record_breaking_heat_features(
 
     daily_max = pd.to_numeric(out["Temperature_DailyMax"], errors="coerce")
     reference = pd.to_numeric(out["Climatology_Temp_PXX_F"], errors="coerce")
-    out["Temp_Excess_Over_Climatology_F"] = daily_max - reference
+    excess = daily_max - reference
+
+    active_months = cfg.get("active_months", DEFAULT_ACTIVE_MONTHS)
+    if active_months:
+        month = pd.to_datetime(out["DT"], errors="coerce").dt.month
+        excess = excess.where(month.isin(active_months))
+
+    out["Temp_Excess_Over_Climatology_F"] = excess
     return out

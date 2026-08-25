@@ -183,6 +183,61 @@ class AddRecordBreakingHeatFeaturesTests(unittest.TestCase):
         )
         self.assertTrue((out["Temp_Excess_Over_Climatology_F"] == 4.0).all())  # 96 - 92
 
+    def test_default_active_months_excludes_shoulder_season_rows(self):
+        """A same-day A/B showed a real MAE gain on Hot peak days but a bigger
+        regression on Shoulder heat transition (Spring/Fall) when this ran
+        unscoped -- the default active_months=(6,7,8,9) is meant to keep the
+        gain and drop the regression by leaving non-summer rows NaN."""
+        dt = pd.date_range("2021-04-15", periods=3, freq="h")  # April: outside (6,7,8,9)
+        df = pd.DataFrame({"DT": dt, "Temperature_DailyMax": [96.0, 96.0, 96.0]})
+        lookup = pd.DataFrame(
+            {
+                "Date": [pd.Timestamp("2021-04-15")],
+                "Climatology_Temp_PXX_F": [92.0],
+                "Temp_Climatology_Reference_Years": [5],
+            }
+        )
+        out = add_record_breaking_heat_features(
+            df, lookup, {"features": {"record_breaking_heat": {"enabled": True}}}
+        )
+        self.assertTrue(out["Temp_Excess_Over_Climatology_F"].isna().all())
+        # The audit columns stay populated even when the derived excess is scoped out.
+        self.assertTrue((out["Climatology_Temp_PXX_F"] == 92.0).all())
+
+    def test_custom_active_months_is_respected(self):
+        dt = pd.date_range("2021-04-15", periods=3, freq="h")
+        df = pd.DataFrame({"DT": dt, "Temperature_DailyMax": [96.0, 96.0, 96.0]})
+        lookup = pd.DataFrame(
+            {
+                "Date": [pd.Timestamp("2021-04-15")],
+                "Climatology_Temp_PXX_F": [92.0],
+                "Temp_Climatology_Reference_Years": [5],
+            }
+        )
+        out = add_record_breaking_heat_features(
+            df,
+            lookup,
+            {"features": {"record_breaking_heat": {"enabled": True, "active_months": [4]}}},
+        )
+        self.assertTrue((out["Temp_Excess_Over_Climatology_F"] == 4.0).all())
+
+    def test_empty_active_months_applies_year_round(self):
+        dt = pd.date_range("2021-04-15", periods=3, freq="h")
+        df = pd.DataFrame({"DT": dt, "Temperature_DailyMax": [96.0, 96.0, 96.0]})
+        lookup = pd.DataFrame(
+            {
+                "Date": [pd.Timestamp("2021-04-15")],
+                "Climatology_Temp_PXX_F": [92.0],
+                "Temp_Climatology_Reference_Years": [5],
+            }
+        )
+        out = add_record_breaking_heat_features(
+            df,
+            lookup,
+            {"features": {"record_breaking_heat": {"enabled": True, "active_months": []}}},
+        )
+        self.assertTrue((out["Temp_Excess_Over_Climatology_F"] == 4.0).all())
+
     def test_enabled_with_no_lookup_is_a_no_op(self):
         out = add_record_breaking_heat_features(
             self._df(), None, {"features": {"record_breaking_heat": {"enabled": True}}}
