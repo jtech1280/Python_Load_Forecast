@@ -1,0 +1,2855 @@
+# --- Project configuration ---
+
+project:
+  name: "V12.9 Weather-Realism Peak-Risk Hardening"
+  timezone: "America/Los_Angeles"
+  output_dir: "${FORECAST_OUTPUT_DIR:-forecast_outputs}"
+
+paths:
+  # Optional machine-specific data root. Set FORECAST_DATA_ROOT in .env/.env.local
+  # or in the server environment; config.local.yaml can also override any path.
+  data_root: "${FORECAST_DATA_ROOT}"
+
+sql:
+  dsn_name: "Informatica LRS"
+  # Historical hourly system load (MWh), day-wide rows with Hr1...Hr24 columns
+  history_query: |
+    SELECT *
+    FROM [Informatica].[dbo].[METRIX_HRLY_SYSTEM_VW]
+    ORDER BY YEAR, MONTH, DAY
+
+actuals_import:
+  # Freeze model-training actuals during daily tuning. The utility hourly convention
+  # keeps the prior local day through the 23:00 completed-hour label and blocks
+  # same-day actual changes from moving the model.
+  limit_to_prior_day_he24: true
+  cutoff_days_back: 1
+  cutoff_hour_ending: 24
+
+output_sql:
+  # Default persistence for high-churn outputs that are overwritten on each CSV run.
+  # Use --no-save-sql for local dry runs that should not write to SQL Server.
+  enabled: true
+  dashboard_read_enabled: true
+  dsn_name: "Forecast_DB"
+  database: ""
+  schema: "Forecasting"
+  run_table: "LoadForecastRun"
+  forecast_table: "LoadForecastOutput"
+  backtest_table: "LoadForecastBacktest"
+  weather_table: "LoadForecastWeather"
+  forecast_weather_archive_table: "LoadForecastWeatherArchive"
+  replay_tables:
+    rolling_origin_replay_summary: "LoadForecastReplaySummary"
+    rolling_origin_replay_results: "LoadForecastReplayResult"
+    rolling_origin_replay_origin_coverage: "LoadForecastReplayOriginCoverage"
+    rolling_origin_replay_scorecard: "LoadForecastReplayScorecard"
+    rolling_origin_replay_weather_realism_scorecard: "LoadForecastReplayWeatherRealismScorecard"
+    rolling_origin_replay_weather_input_error_by_lead: "LoadForecastReplayWeatherInputErrorByLead"
+    rolling_origin_replay_weather_input_sensitivity_scorecard: "LoadForecastReplayWeatherInputSensitivityScorecard"
+    rolling_origin_replay_weather_input_sensitivity_detail: "LoadForecastReplayWeatherInputSensitivityDetail"
+    rolling_origin_replay_stage_metrics: "LoadForecastReplayStageMetric"
+    rolling_origin_replay_origin_metrics_by_stage: "LoadForecastReplayOriginMetricByStage"
+    rolling_origin_replay_scored_season_metrics_by_stage: "LoadForecastReplayScoredSeasonMetricByStage"
+    rolling_origin_replay_origin_season_metrics_by_stage: "LoadForecastReplayOriginSeasonMetricByStage"
+    rolling_origin_replay_horizon_metrics_by_stage: "LoadForecastReplayHorizonMetricByStage"
+    rolling_origin_replay_peak_window_metrics_by_stage: "LoadForecastReplayPeakWindowMetricByStage"
+    rolling_origin_replay_peak_window_expansion_scorecard: "LoadForecastReplayPeakWindowExpansionScorecard"
+    rolling_origin_replay_peak_window_14to20_metrics_by_stage: "LoadForecastReplayPeakWindow14to20MetricByStage"
+    rolling_origin_replay_extreme_heat_peak_scorecard: "LoadForecastReplayExtremeHeatPeakScorecard"
+    rolling_origin_replay_extreme_heat_peak_metrics_by_stage: "LoadForecastReplayExtremeHeatPeakMetricByStage"
+    rolling_origin_replay_hot_peak_metrics_by_stage: "LoadForecastReplayHotPeakMetricByStage"
+    rolling_origin_replay_hot_peak_candidate_metrics_by_stage: "LoadForecastReplayHotPeakCandidateMetricByStage"
+    rolling_origin_replay_hot_peak_candidate_scorecard: "LoadForecastReplayHotPeakCandidateScorecard"
+    rolling_origin_replay_hot_ramp_peak_metrics_by_stage: "LoadForecastReplayHotRampPeakMetricByStage"
+    rolling_origin_replay_hot_ramp_peak_candidate_scorecard: "LoadForecastReplayHotRampPeakCandidateScorecard"
+    rolling_origin_replay_heat_persistence_peak_metrics_by_stage: "LoadForecastReplayHeatPersistencePeakMetricByStage"
+    rolling_origin_replay_heat_persistence_peak_candidate_scorecard: "LoadForecastReplayHeatPersistencePeakCandidateScorecard"
+    rolling_origin_replay_shoulder_heat_metrics_by_stage: "LoadForecastReplayShoulderHeatMetricByStage"
+    rolling_origin_replay_cloud_solar_midday_metrics_by_stage: "LoadForecastReplayCloudSolarMiddayMetricByStage"
+    rolling_origin_replay_weekend_metrics_by_stage: "LoadForecastReplayWeekendMetricByStage"
+    rolling_origin_replay_holiday_metrics_by_stage: "LoadForecastReplayHolidayMetricByStage"
+    rolling_origin_replay_long_horizon_metrics_by_stage: "LoadForecastReplayLongHorizonMetricByStage"
+    rolling_origin_replay_delta_breeze_shape_metrics_by_stage: "LoadForecastReplayDeltaBreezeShapeMetricByStage"
+    rolling_origin_replay_daily_peak_shadow_window_scorecard: "LoadForecastReplayDailyPeakShadowWindowScorecard"
+    rolling_origin_replay_daily_peak_miss_by_stage: "LoadForecastReplayDailyPeakMissByStage"
+    rolling_origin_replay_daily_peak_he18_20_miss_by_stage: "LoadForecastReplayDailyPeakHE18to20MissByStage"
+    rolling_origin_replay_heat_analog_shadow_metrics: "LoadForecastReplayHeatAnalogShadowMetric"
+    rolling_origin_replay_heat_analog_shadow_detail: "LoadForecastReplayHeatAnalogShadowDetail"
+    rolling_origin_replay_focused_guard_rule_audit: "LoadForecastReplayFocusedGuardRuleAudit"
+    rolling_origin_replay_timing: "LoadForecastReplayTiming"
+    production_readiness_scorecard: "LoadForecastProductionReadinessScorecard"
+  chunksize: 10
+
+five_min_load:
+  enabled: true
+  dsn_name: "PowerSupply"
+  query: |
+    SELECT
+      StartPST,
+      EndPST,
+      TimeFrameName,
+      Interval,
+      Quantity,
+      QualityName
+    FROM PowerSupply.Measurements.Load_Native
+    WHERE SourceTypeName = 'PI_AF'
+      AND LocationName = 'RsvlCityGate'
+      AND TimeFrameName = '5min'
+      AND MeasurementTypeName = 'SystemLoad'
+      AND StartPST >= DATEADD(day, -180, GETDATE())
+    ORDER BY StartPST
+  # Prior-hour 5-minute aggregates are leakage-safe for hourly forecasts.
+  # Future hours carry the latest known intraday state with an age feature.
+  max_carry_forward_hours: 24
+  # Completed 5-minute hours are promoted into actual load history below. Future
+  # 5-minute model feature carry-forward is disabled by default because fixed-origin
+  # replay showed Day 1 degradation and exact future 5-minute values are not
+  # operationally available.
+  future_model_features_enabled: false
+  # Promote completed 5-minute hours into the recent hourly load history so reruns
+  # anchor the recursive forecast on the newest available system load.
+  use_as_recent_hourly_load: true
+  # Production runs should anchor on completed same-day 5-minute load even when
+  # official hourly imports are frozen to the prior day for tuning/replay stability.
+  respect_actuals_import_cutoff: false
+  min_completed_intervals_per_hour: 10
+  replace_overlap_hours: 0
+
+local_weather:
+  # Local station history is initially used for diagnostics. Enable temperature_calibration
+  # explicitly for controlled A/B replay before promoting it to production.
+  enabled: true
+  dsn_name: "PowerSupply"
+  query: |
+    SELECT  'BERRY_ST' AS STATIONID,
+            'Temperature' AS CONCEPTID,
+            [PacificStandardTime] AS DT,
+            [Value] AS READING
+      FROM [PowerSupply].[Measurements].[Weather_Hourly]
+      WHERE LocationName = 'Berry Sub'
+      AND PacificStandardTime >= '2005-05-14'
+    ORDER BY PacificStandardTime
+  temperature_calibration:
+    enabled: false
+    blend: 1.0
+    cap_f: 8.0
+    max_abs_delta_f: 25.0
+    min_count: 24
+    # Real-time dynamic calibration to correct for transient cooling/warming events
+    # like the Roseville Delta Breeze. Looks at the last 24 hours of actual weather station
+    # readings vs Open-Meteo and applies a decaying correction factor to the future forecast.
+    dynamic_enabled: true
+    dynamic_window_hours: 24
+    dynamic_cap_f: 6.0
+    dynamic_blend: 0.80
+    dynamic_decay_hours: 48.0
+
+openmeteo:
+  latitude: 38.7521
+  longitude: -121.2880
+  # Use UTC from API and convert to local timezone
+  hourly_vars:
+    - temperature_2m
+    - relative_humidity_2m
+    - cloud_cover
+    - wind_speed_10m
+    - wind_direction_10m
+    - precipitation
+    - shortwave_radiation
+    - is_day
+  temperature_unit: "fahrenheit"
+  wind_speed_unit: "mph"
+  precipitation_unit: "inch"
+  # Request timestamps in the project timezone so "historical_end=yesterday local" includes
+  # the entire local day (00:00-23:00), rather than stopping at 16:00 local when using GMT.
+  timezone: "America/Los_Angeles"
+  # When the forecast API is queried after midnight GMT, the returned hourly series can begin at
+  # 00:00 "today" GMT (which is 17:00 the prior day in America/Los_Angeles), leaving a visible gap
+  # between the last historical load hour and the first forecast hour. Request a small amount of
+  # "past" hourly data so the next local midnight is always included; the pipeline still filters
+  # to DT > latest_hist_dt, so this does not change the forecast horizon.
+  forecast_past_hours: 36
+  historical_url: "https://archive-api.open-meteo.com/v1/archive"
+  forecast_url: "https://api.open-meteo.com/v1/forecast"
+  previous_runs_url: "https://previous-runs-api.open-meteo.com/v1/forecast"
+  historical_start: "2012-01-01"     # training start date
+  historical_end: null                # null => yesterday local
+  # Open-Meteo's ERA5-based historical archive revises the most recent ~5-7 days of
+  # data as better observations come in. Only that tail is re-fetched fresh every
+  # run; everything older is cached permanently and grown incrementally so training
+  # isn't silently re-pulling revised values (and re-downloading years of settled
+  # history) on every run.
+  historical_revision_window_days: 8
+  forecast_days: 16
+  cache_dir: "${FORECAST_WEATHER_CACHE_DIR:-weather_cache}"
+  forecast_import_policy:
+    # Open-Meteo refreshes the 16-day forecast several times per day. For daily
+    # model tuning, accept one morning forecast snapshot and reuse it for the rest
+    # of the local day so repeated runs compare against stable weather inputs.
+    enabled: true
+    target_local_time: "06:30"
+    import_window_start_local: "06:00"
+    import_window_end_local: "07:45"
+    daily_cache_stem: "forecast_weather_gfs_06z"
+  # Pull a specific GFS Seamless run cycle (default 06Z) via Open-Meteo's Single Runs
+  # API instead of the standard forecast_url's best_match blend. This keeps weather
+  # inputs stable no matter what time the forecast is run: the first run of a local
+  # day fetches the configured 06Z single run, later runs reuse that daily cache. If
+  # today's 06Z run is not available yet, the loader can fall back to yesterday's 06Z
+  # single run, but it will not fall back to Open-Meteo best_match unless explicitly
+  # re-enabled below.
+  gfs_run_lock:
+    enabled: true
+    single_runs_url: "https://single-runs-api.open-meteo.com/v1/forecast"
+    model: "gfs_seamless"
+    run_hour_utc: 6
+    latest_cache_stem: "forecast_weather_gfs_06z_latest"
+    allow_import_outside_window: true
+    allow_previous_day_fallback: true
+    allow_standard_forecast_fallback: false
+    allow_forecast_results_fallback: false
+  # PENDING VALIDATION (added 2026-08-11): guards against a single-run Open-Meteo point-
+  # forecast temperature "flyer" getting frozen into the whole day's forecast by
+  # forecast_import_policy above. Diagnosed from a real incident: 8/19/2026's forecasted
+  # max had been trending 102/96/92F, then one 6:20am pull showed 79F, and a same-morning
+  # re-pull recovered to 86F -- a run-to-run model artifact, not a real shift. When
+  # enabled, cross-checks each hour's point-forecast temperature against Open-Meteo's
+  # Ensemble API member spread; if the point value deviates from the ensemble mean by
+  # more than min_deviation_f (and enough members are present to trust it), the ensemble
+  # mean is used instead and the hour is flagged via TempF_Outlier_Corrected. Costs one
+  # extra API call per import; any failure fetching the ensemble is non-fatal and falls
+  # back to the point forecast unmodified. Disabled by default -- opt in per machine.
+  ensemble_outlier_guard:
+    enabled: false
+    ensemble_url: "https://ensemble-api.open-meteo.com/v1/ensemble"
+    # GFS's ensemble (GEFS, ~31 members) covers the full 16-day forecast horizon this
+    # project uses. Verify against Open-Meteo's current ensemble-supported model list
+    # before relying on this in production; an unsupported/renamed model id just fails
+    # the (non-fatal) ensemble fetch rather than breaking the main forecast import.
+    model: "gfs_seamless"
+    min_deviation_f: 10.0
+    min_members: 5
+  # TLS certificate verification for weather API calls. Keep true so responses are
+  # authenticated. On Windows, ssl_use_os_truststore lets requests honor the machine
+  # certificate store via truststore, which fixes managed/self-signed proxy chains
+  # without disabling verification. For a custom corporate PEM bundle, set
+  # ssl_ca_bundle or OPENMETEO_CA_BUNDLE. OPENMETEO_SSL_VERIFY=false remains an
+  # emergency local-only bypass and should not be committed into normal config.
+  ssl_verify: true
+  ssl_use_os_truststore: true
+  ssl_ca_bundle: null
+
+btm:
+  mode: "hardcoded"   # "hardcoded" | "sql" | "csv"
+  tsv_path: ""        # not used when mode=hardcoded
+  sql_table: "[Informatica].[dbo].[BTM_SOLAR_MONTHLY_INSTALLATIONS]"
+  extend_future_months: 36
+  current_nameplate_mw: 63.5
+  max_observed_impact_mw: 23.0
+
+solar:
+  # Machine-specific parquet roots are discovered in this order. Prefer setting
+  # FORECAST_SOLAR_PARQUET_ROOT or FORECAST_DATA_ROOT on each server; the drive
+  # candidates preserve today's C:/PY_LRS and D:/PY_LRS layouts without code edits.
+  parquet_root: "${FORECAST_SOLAR_PARQUET_ROOT}"
+  parquet_root_candidates:
+    - "${FORECAST_DATA_ROOT}"
+    - "D:/PY_LRS"
+    - "C:/PY_LRS"
+  weather_cache_dir: "${FORECAST_SOLAR_WEATHER_CACHE_DIR:-weather_cache/solar_weather}"
+  driver: "${FORECAST_SOLAR_DRIVER:-ODBC Driver 17 for SQL Server}"
+  dest_server: "${FORECAST_SOLAR_DEST_SERVER:-re-lrs-db-1}"
+  dest_db: "${FORECAST_SOLAR_DEST_DB:-Forecast}"
+  production_source: "${FORECAST_SOLAR_PRODUCTION_SOURCE:-rec-parquet}"
+
+training:
+  train_start_date: "2012-01-01"
+  backtest_days: 45
+  seasonal_backtests: false
+  rolling_origin_replay:
+    # Opt-in production-horizon replay. Use --rolling-origin-replay with --save-csv to export outputs.
+    # Correction lookups/profile for each origin are learned from the preceding calibration window only.
+    enabled: false
+    parallel:
+      enabled: true
+      processes: 4  # null to default to cpu_count() // 2
+      # CatBoost's GPU backend can terminate the native worker process on small GPUs
+      # when multiple replay origins train concurrently. Keep origin replay serial
+      # whenever CatBoost GPU is active; set false only on a larger dedicated GPU.
+      serial_when_catboost_gpu: true
+    horizon_days: 16
+    calibration_days: 45
+    origin_selection: "fixed" # Fixed set keeps tuning passes apples-to-apples; remove fixed_origins to rebalance.
+    origin_step_days: 28
+    max_origins: 27
+    fixed_origins:
+      - "2024-10-13"
+      - "2024-11-09 23:00:00-08:00"
+      - "2025-03-30"
+      - "2025-04-27"
+      - "2025-05-25"
+      - "2025-06-22"
+      - "2025-07-20"
+      - "2025-08-17"
+      - "2025-09-14"
+      - "2025-10-12"
+      - "2025-11-08 23:00:00-08:00"
+      - "2025-12-06 23:00:00-08:00"
+      - "2026-01-03 23:00:00-08:00"
+      - "2026-01-31 23:00:00-08:00"
+      - "2026-02-28 23:00:00-08:00"
+      - "2026-03-29"
+      - "2026-04-26"
+      - "2026-05-24"
+      # June 12-style hot-ramp validation: origins that score the 2026-06-12
+      # 99F load ramp inside the production horizon once recent actuals exist.
+      - "2026-05-28"
+      - "2026-05-29"
+      # July 21 hot clear peak miss coverage. July 6/7 score the event as long-lead
+      # rows once July actuals exist; July 20/21 score day-ahead/intraday behavior
+      # once the full 16-day replay horizon has actuals.
+      - "2026-07-06"
+      - "2026-07-07"
+      - "2026-07-20"
+      - "2026-07-21"
+      # Aug 1-3 heat-ramp/persistence peak validation inside forecast days 1-7.
+      - "2026-07-27"
+      - "2026-07-28"
+      - "2026-07-29"
+    origins_per_season: 4
+    scorecard_min_origins_per_season: 3
+    min_train_days: 365
+    # Speed controls for rolling replay only. Prophet is benchmark-only in production,
+    # and the peak-risk guard now has tree-disagreement fallback signals, so replay
+    # does not need to fit origin Prophet for the production correction chain.
+    skip_prophet: true
+    skip_calibration_prophet: true
+    skip_catboost: false
+    log_timing: true
+    allow_concurrent: false
+    weather_realism:
+      # Previous Runs fixed-lead weather covers operational weather error for Days 1-7.
+      enabled: true
+      max_previous_days: 7
+
+hardware:
+  # V12.8 keeps V12.3/V12.4 max performance mode. Use all visible CPU cores and XGBoost GPU when available.
+  # CPU threads: -1 means all visible logical cores. Override with --cpu-threads N.
+  performance_mode: "max"
+  cpu_threads: -1
+  max_workers: -1
+  set_thread_env: true
+  overwrite_thread_env: false
+  parallel_tree_training: true
+  force_parallel_cpu_training: false
+
+  # XGBoost GPU training is enabled by default. If CUDA/XGBoost rejects GPU training,
+  # the script automatically retries CPU.
+  use_gpu: true
+  xgb_gpu_api: "auto"       # "auto" | "cuda" | "gpu_hist" | "legacy"
+  fallback_to_cpu: true
+
+  # LightGBM GPU is opt-in because many Windows wheels are CPU-only or OpenCL-dependent.
+  # Leave false unless your installed LightGBM build is known to support GPU.
+  use_lgb_gpu: false
+
+model:
+  ensemble_weights:
+    # 2026-06-12 holdout grid, constrained to avoid worsening actual-peak
+    # underforecast versus the prior XGB/LGB blend.
+    xgb: 0.10
+    lgb: 0.55
+    prophet: 0.00     # benchmark-only unless blend_into_production=true
+    catboost: 0.35
+
+  early_stopping:
+    # Improves generalization by stopping when recent validation MAE stops improving.
+    enabled: true
+    validation_days: 45
+    min_train_rows: 2000
+    rounds: 75
+    metric: "mae"
+
+  monotonic_constraints:
+    # Forces a non-decreasing relationship between heat/cooling-demand features (Temperature,
+    # CDD, HeatIndex, Extreme_Heat_* flags, hot-peak interaction terms, etc.) and load across
+    # XGBoost, LightGBM, and CatBoost. This is standard practice for AC-driven summer-peaking
+    # load: it keeps tree splits from fitting non-monotonic noise in the sparsely populated
+    # extreme-heat bins, which is exactly where the hot-peak underforecast has historically
+    # shown up, and it keeps predictions well-behaved when a forecast temperature exceeds the
+    # hottest day seen in training. See forecasting/model/monotonic_constraints.py for the
+    # default feature list; override with increasing_features/decreasing_features here if needed.
+    enabled: true
+
+  xgb:
+    n_estimators: 1400
+    max_depth: 8
+    learning_rate: 0.025
+    min_child_weight: 3
+    subsample: 0.85
+    colsample_bytree: 0.85
+    reg_lambda: 2.0
+    reg_alpha: 0.05
+    gamma: 0.0
+    tree_method: "hist"     # V12.2 GPU default: modern XGBoost uses hist + device=cuda
+    device: "cuda"          # "cuda" or "cpu"; CPU fallback is controlled by hardware.fallback_to_cpu
+    gpu_api: "auto"         # try modern CUDA first, then legacy gpu_hist, then CPU
+    random_state: 42
+    n_jobs: -1
+
+  sample_weight:
+    peak_q90: 0.90
+    peak_q95: 0.95
+    peak_q90_weight: 1.8
+    peak_q95_weight: 3.0
+    hot_day_min_f: 90.0
+    hot_peak_hours: [16, 17, 18, 19, 20]
+    hot_peak_weight: 1.9
+    # Align train weighting with the production scorecard gates. The previous hot
+    # emphasis only used IsLikelySystemPeakHour, which excludes weekends/holidays;
+    # the scorecard hot gate is HE16-20 whenever daily max is >= 90F.
+    non_business_hot_peak_weight: 1.35
+    peak_window_hours: [14, 15, 16, 17, 18]
+    peak_window_min_maxtemp_f: 75.0
+    peak_window_weight: 1.18
+    recency_end_weight: 1.35
+    max_weight: 9.0
+
+  asymmetric_loss:
+    # PROTOTYPE, off by default -- no behavior change unless explicitly enabled.
+    # Sample weighting only changes how much a row counts, not which direction of
+    # error the model is penalized for; the raw model's hot-peak-hour bias is
+    # systematically one-directional (under-forecast), which a symmetric loss has
+    # no reason to prefer against. This targets that directly: within the same
+    # hot-peak scope sample_weight already upweights (hot_day_min_f/hot_peak_hours
+    # above), under-forecasting a row is penalized under_forecast_penalty_multiplier
+    # times as much as over-forecasting it; every other row is untouched, and the
+    # objective is mathematically identical to plain reg:squarederror when this is
+    # disabled or the multiplier is 1.0. Applied to both XGBoost and LightGBM (see
+    # train_xgb/train_lgb) -- together model.ensemble_weights.xgb + .lgb is 65% of
+    # the Raw_Forecast_MWH blend below. CatBoost (the remaining 35%) doesn't have
+    # this yet -- its sklearn API needs a class-based loss (calc_ders_range), not a
+    # simple (y_true, y_pred) -> grad, hess callable, so it isn't a drop-in. See
+    # model.ensemble_weights above for the current blend split.
+    # Needs a full rolling-origin replay before being considered for promotion --
+    # see forecasting/model/xgb_model.py:make_asymmetric_hot_peak_objective.
+    enabled: false
+    under_forecast_penalty_multiplier: 2.0
+
+  lgb:
+    # Keep CPU by default. Set hardware.use_lgb_gpu=true only if your LightGBM build supports GPU.
+    use_gpu: false
+    device_type: "gpu"
+    n_estimators: 1200
+    learning_rate: 0.025
+    num_leaves: 96
+    min_child_samples: 25
+    subsample: 0.85
+    colsample_bytree: 0.85
+    reg_lambda: 2.0
+    reg_alpha: 0.05
+    random_state: 42
+    n_jobs: -1
+
+  catboost:
+    # V12.9: CatBoost is blended into production at a constrained weight after
+    # the latest holdout grid showed lower raw MAE without increasing the actual
+    # peak miss versus the prior XGB/LGB blend.
+    enabled: true
+    blend_into_production: true
+    iterations: 1400
+    depth: 8
+    learning_rate: 0.025
+    l2_leaf_reg: 4.0
+    loss_function: "RMSE"
+    random_seed: 42
+    # GPU first when hardware.use_gpu=true. In this production config CatBoost GPU is
+    # required, so CPU fallback is disabled for CatBoost even though hardware.fallback_to_cpu
+    # stays available for XGBoost/LightGBM. To force CPU on a smaller machine, set both
+    # FORECAST_CATBOOST_REQUIRE_GPU=false and FORECAST_CATBOOST_TASK_TYPE=CPU in the OS
+    # environment, then open a new terminal.
+    require_gpu: "${FORECAST_CATBOOST_REQUIRE_GPU:-true}"
+    task_type: "${FORECAST_CATBOOST_TASK_TYPE:-GPU}"
+    devices: "0"
+    # CatBoost GPU does not implement MAE as a native eval metric; scorecards still
+    # evaluate MAE after prediction, but GPU early stopping uses RMSE to avoid the
+    # "MAE is not implemented for GPU" warning and CPU-side metric throttling.
+    gpu_eval_metric: "RMSE"
+    thread_count: -1
+    # CatBoost's own default (0.95) grabs nearly all free VRAM on startup. Keep a cap
+    # because this workstation has a 5 GB GPU and XGBoost/display contexts may already
+    # be resident. Rolling replay serializes CatBoost GPU training separately via
+    # training.rolling_origin_replay.parallel.serial_when_catboost_gpu.
+    gpu_ram_part: 0.20
+
+  prophet:
+    enabled: true
+    blend_into_production: false   # Keep Prophet separate from production forecast by default.
+    growth: "linear"
+    seasonality_mode: "multiplicative"
+    yearly_seasonality: true
+    weekly_seasonality: true
+    daily_seasonality: true
+    changepoint_prior_scale: 0.08
+    seasonality_prior_scale: 6.0
+    holidays_prior_scale: 5.0
+    interval_width: 0.80
+    add_roseville_holidays: true
+    holiday_years_forward: 3
+    add_monthly_seasonality: true
+    monthly_period_days: 30.5
+    monthly_fourier_order: 5
+    add_annual_peak_seasonality: true
+    annual_peak_period_days: 365.25
+    annual_peak_fourier_order: 12
+    standardize_regressors: true
+    regressor_prior_scale: 0.25
+    min_train_rows: 1440
+    # CmdStan can hang or run for many minutes when optimizing the full multi-year
+    # hourly frame with the full regressor set. Keep Prophet as a recent-history
+    # benchmark model; production Raw_Forecast_MWH does not blend Prophet by default.
+    max_train_rows: 13140   # 18 months of hourly rows
+    fit_algorithm: "LBFGS"
+    fit_iter: 10000
+
+forecast:
+  horizons:
+    next_day_hours: 24
+    next_week_days: 7
+    full_days: 16     # run through 16 calendar days
+  require_full_window: false
+
+quality:
+  valid_temp_min_f: 10.0
+  valid_temp_max_f: 120.0
+  max_interpolation_gap_hours: 3
+  # Timestamp alignment knob (ported from v11.6 WEATHER_TIMESTAMP_SHIFT_HOURS).
+  # Use +1 or -1 only if your weather timestamps are proven to be offset relative to
+  # the load timestamps (hour-beginning vs hour-ending conventions).
+  weather_timestamp_shift_hours: 0
+
+bands:
+  # V12.8: conditional residual bands are primary, with extra widening for hours 14-16 and solar-loss risk.
+  # Exported forecast outputs name the central 80% residual band P10/P50/P90.
+  default_percent_band: 0.055
+  band_floor_mwh: 4.0
+  band_scale: 0.55
+  residual_based: true
+  hot_bucket_band_floor:
+    # The 6-origin hot replay showed overnight interval undercoverage after the point forecast
+    # guard fixes. Keep this scoped to hot overnight rows so midday/peak intervals are unchanged.
+    enabled: true
+    rules:
+      - name: hot_95_to_100_overnight_min_band
+        min_daily_max_temp_f: 95.0
+        max_daily_max_temp_f: 100.0
+        hour_groups: ["Overnight"]
+        min_band_mwh: 5.5
+      - name: hot_100_plus_overnight_min_band
+        min_daily_max_temp_f: 100.0
+        hour_groups: ["Overnight"]
+        min_band_mwh: 7.5
+      - name: hot_100_plus_early_overnight_min_band
+        min_daily_max_temp_f: 100.0
+        hours: [0, 1]
+        min_band_mwh: 13.0
+      - name: hot_100_plus_late_evening_min_band
+        min_daily_max_temp_f: 100.0
+        hour_groups: ["LateEvening"]
+        min_band_mwh: 15.0
+  weather_input_risk:
+    # Previous-run weather replay showed forecast-weather inputs can roughly double operational
+    # error on days 1-7, especially cloudy solar-loss and hot-peak regimes. This widens future
+    # P10/P90 bands only; it does not move the P50 point forecast.
+    enabled: true
+    max_day: 16
+    # Calibrated from rolling_origin_replay_weather_input_sensitivity_scorecard.
+    # Day 1 and days 4-7 showed larger operational weather-error damage than days 2-3.
+    day1_multiplier: 1.45
+    days2to3_multiplier: 1.60
+    days4to7_multiplier: 3.00
+    days8to16_multiplier: 3.50
+    cloudy_solar_multiplier: 1.45
+    hot_peak_multiplier: 1.60
+    shoulder_heat_multiplier: 1.45
+    high_temp_min_maxtemp_f: 95.0
+    high_temp_multiplier: 2.20
+    cap_multiplier: 6.00
+  weather_scenarios:
+    enabled: true
+    cap_scenario_deltas: true
+    delta_caps:
+      default_mwh: 18.0
+      cloud_solar_mwh: 14.0
+      hot_peak_mwh: 22.0
+      days8to16_mwh: 16.0
+      hot_peak_min_maxtemp_f: 90.0
+      cloud_solar_min_loss_mw: 1.25
+    scenarios:
+      - name: warmer
+        temperature_delta_f: 3.0
+      - name: hot_stress_5f
+        temperature_delta_f: 5.0
+      - name: cooler
+        temperature_delta_f: -3.0
+      - name: cloudier_solar_loss
+        cloud_cover_delta_norm: 0.30
+        ghi_multiplier: 0.65
+      - name: severe_cloud_solar_loss
+        cloud_cover_delta_norm: 0.45
+        ghi_multiplier: 0.50
+      - name: clearer_high_solar
+        cloud_cover_delta_norm: -0.30
+        ghi_multiplier: 1.15
+  conformal_weather:
+    enabled: true
+    quantile: 0.80
+    safety_multiplier: 1.0
+    scenario_spread_multiplier: 1.0
+    # The guarded replay had high Day 1 / normal-hour coverage after conformal widening.
+    # Reduce only those lower-risk conformal add-ons; hot peak, peak-window, cloud/solar,
+    # shoulder heat, and long-horizon caution hours keep the full safety factor.
+    horizon_safety_multipliers:
+      Day1: 0.85
+    normal_only_safety_multiplier: 0.92
+    # Walk-forward replay showed conformal narrowing under-covered hot peaks and shoulder heat.
+    # Use conformal and weather scenarios as additional guards, not as a replacement for the
+    # tuned weather-risk band.
+    allow_narrowing: false
+    min_group_rows: 20
+    min_global_rows: 50
+    min_fraction_of_multiplier_band: 0.0
+
+# Pure exclusion of anomalous load intervals (DER dispatch, telemetry gaps, etc.).
+# The listed date + hour-ending (HE) ranges are DROPPED - not repaired - from residual
+# learning, the calibration lookups, the recent-residual profile, and the replay
+# scorecards, so they cannot bias corrections or register as spurious peak misses.
+# HE h maps to rows with local DT.hour == h, matching the official completed-hour
+# load label. Omit he_start/he_end to exclude a whole day.
+anomaly_exclusions:
+  enabled: true
+  events:
+    - name: "2026-07-15 DER dispatch"
+      # EnergyHub DER event telemetry:
+      # - dispatch shed: 17:00-18:45 local, avg 3.76 MW, max 4.90 MW, 7.52 MWh shifted
+      # - post-event rebound: material through 20:45 local
+      # Drop affected hourly actuals only: HE18-HE19 shed + HE20-HE21 rebound.
+      date: "2026-07-15"
+      he_start: 18
+      he_end: 21
+
+calibration:
+  seasonal_enabled: true
+  # PENDING REPLAY VALIDATION (added 2026-08-09): opt-in extra backtest length used only
+  # to train hot_ramp_peak_capture/heat_persistence_peak_capture's walk-forward lookup
+  # artifacts. Diagnosed via the 20260809_205652 replay: build_hot_ramp_peak_capture_artifact
+  # requires a rare joint condition (hot AND ramping the same day) and was finding zero
+  # qualifying days for most origins within the normal calibration window, so it returned
+  # None and the stage silently fell back to targeted_missing_slices rules for the whole
+  # origin -- which is why that rule list keeps growing instead of the lookup generalizing.
+  # null skips the extra backtest pass entirely (zero cost, zero behavior change).
+  #
+  # 2026-08-11: split into two independent knobs after weighing cost-per-use across the
+  # three callers. The extra backtest is expensive (one recursive XGB+LGB pass over the
+  # full lookback window, ~16x the recursive-forecast length of the 45-day
+  # calibration_days window at 730 days), and how well that cost amortizes differs a lot:
+  #   - calibration_search.py (--build-cache) pays it once per origin, then reuses that
+  #     cached data across potentially hundreds of cheap Optuna trials -- cheap per use.
+  #   - The live forecast pays the full cost every single day to correct one day's
+  #     forecast, and a replay pays it once per origin with no reuse -- expensive per use.
+  # rare_event_artifact_lookback_days (this key) feeds the live forecast and replay paths
+  # and defaults back to null (off) given that ratio; rare_event_artifact_lookback_days_search
+  # below is calibration_search.py's own, independent value.
+  rare_event_artifact_lookback_days: null
+  # Dedicated to calibration_search.py (forecasting.tuning.calibration_search /
+  # scripts/tune_calibration_optuna.py's --build-cache step) -- see the note above for why
+  # this carries its own value instead of sharing rare_event_artifact_lookback_days.
+  rare_event_artifact_lookback_days_search: 730
+  stage_selector:
+    # Full seasonal replay showed raw Day 1 and final peak-window selection leaving accuracy
+    # on the table. Select the most robust stage by operational horizon and peak window.
+    enabled: true
+    day1_stage: targeted_meta
+    days2to3_stage: recent_corrected
+    days4to7_stage: recent_corrected
+    non_horizon_apply_bias_uplift: false
+    non_horizon_apply_hot_uplift: false
+    suppress_bias_uplift_for_stage_overrides: true
+    suppress_hot_uplift_for_stage_overrides: true
+    day1_peak_risk_weight: 0.40
+    hot_peak_min_maxtemp_f: 90.0
+    hot_peak_final_stack_override: false
+    peak_window_stage_override:
+      # 2026-06-07 post-holiday replay: the broad HE14-18 override no longer cleared the
+      # peak-window gate and slightly worsened the simpler horizon policy. Leave the
+      # block available for A/B tests, but keep the production selector horizon-driven.
+      enabled: false
+      hours: [14, 15, 16, 17, 18]
+      min_forecast_day: 1
+      max_forecast_day: 16
+      min_maxtemp_f: -999.0
+      stage: recent_corrected
+      exclude_hot_peak: true
+      suppress_bias_uplift: true
+      suppress_hot_uplift: true
+    cloud_solar_stage_override:
+      # Latest replay showed Day-1 cloud/solar midday rows were worse when the
+      # generic Day-1 targeted-meta stage replaced the peak-risk stage. Keep the
+      # normal Day-1 policy elsewhere, but use peak-risk for this narrow BTM
+      # solar/cloud slice.
+      enabled: true
+      hours: [10, 11, 12, 13, 14, 15, 16]
+      min_forecast_day: 1
+      max_forecast_day: 1
+      min_cloud_cover_norm: 0.60
+      min_solar_loss_mw: 1.25
+      stage: peak_risk
+      suppress_bias_uplift: true
+      suppress_hot_uplift: true
+    cloud_solar_raw_override:
+      # 2026-06-07 post-holiday replay showed recent-corrected beating the raw override
+      # on cloud/solar midday (about 4.91 vs 5.60 MAE). Disable the broad raw override
+      # unless a future replay proves the cloud slice regressed.
+      enabled: false
+      hours: [10, 11, 12, 13]
+      min_cloud_cover_norm: 0.60
+      min_solar_loss_mw: 1.25
+      stage: raw
+      suppress_bias_uplift: true
+      suppress_hot_uplift: true
+    conditional_stage_overrides:
+      # Disabled while operational_residual_learner is the single production
+      # hot-peak correction path. Keep the rule as an A/B-test candidate only.
+      - name: day1_summer_hot_peak_peak_risk_override
+        enabled: false
+        seasons: [Summer]
+        hours: [16, 17, 18, 19, 20]
+        min_maxtemp_f: 103.0
+        min_forecast_day: 1
+        max_forecast_day: 1
+        stage: peak_risk
+        only_if_stage_above_current: true
+      # Latest forecast-output scorecard showed summer high-temperature rows were
+      # often better before the post-raw correction stack. Keep this narrow and
+      # diagnostic so it can be A/B tested in rolling replay.
+      - name: summer_high_temp_raw_override
+        enabled: true
+        seasons: [Summer]
+        # Full replay: raw helped core midday but hurt HE16-20 and overnight.
+        # Keep it outside the HE14-18 peak-window scorecard.
+        hours: [9, 10, 11, 12, 13]
+        min_daily_max_temp_bucket: 6
+        min_forecast_day: 1
+        max_forecast_day: 16
+        stage: raw
+    long_horizon_peak_hot_month_correction:
+      # Production-active for bounded day-8..16 peak-window/month bias. A single
+      # scalar hot uplift is not valid: May/Sep were overforecast while July was
+      # underforecast. Use signed, bounded month corrections only on long-horizon
+      # peak/hot rows. Hot rows override the peak offset on HE16-18 overlap so the
+      # two tuned offsets do not stack.
+      enabled: true
+      min_forecast_day: 8
+      max_forecast_day: 16
+      peak_hours: [14, 15, 16, 17, 18]
+      hot_hours: [16, 17, 18, 19, 20]
+      hot_min_maxtemp_f: 90.0
+      # The May hot-month downshift is calibrated for the 93F-plus long-horizon
+      # overforecast cluster. Do not apply it to 90-92F shoulder-heat peaks,
+      # where the weather-robustness hedge can otherwise fight a -12 MWh cap.
+      hot_min_maxtemp_f_by_month:
+        "5": 93.0
+      peak_cap_mwh: 8.0
+      hot_cap_mwh: 12.0
+      peak_exclude_holidays: true
+      hot_exclude_holidays: true
+      peak_month_offsets_mwh:
+        "1": 0.0
+        "2": 0.80
+        "3": 0.0
+        "4": -1.54
+        "5": 0.0
+        "6": -2.12
+        "7": 7.76
+        "8": -1.39
+        "9": -6.44
+        "10": 2.21
+        "11": 5.75
+        "12": -1.16
+      peak_month_forecast_day_scales:
+        # Audit 20260722_213503: September's -6.44 MWh peak offset is helpful
+        # overall, but it overcorrected forecast days 8, 9, 10, and 13.
+        # Disable only those day/month cells while preserving the helpful
+        # September long-horizon rows on days 11, 12, and 14-16.
+        "9":
+          "8": 0.0
+          "9": 0.0
+          "10": 0.0
+          "13": 0.0
+      hot_month_offsets_mwh:
+        "5": -14.76
+        "6": 0.0
+        "7": 9.07
+        "8": 0.11
+        "9": 0.0
+    focused_shape_residual_learner:
+      # Guarded production promotion for the recent-window shape gap. The learner
+      # still learns residual shape against the pre-focused-guard baseline, but
+      # applies additively to the current guarded forecast with bounded peak/hot
+      # deltas so it does not replace the hand guard or create a blanket hot uplift.
+      #
+      # Disabled 2026-08-19 after scripts/ablate_correction_stages.py showed this
+      # stage net-harmful on both peak-relevant gates, by real per-origin majorities
+      # (not a pooled artifact): removing it improved Hot peak days MAE 8.61->8.38
+      # (12 of 17 origins better, 4 worse) and Peak window hours 14-18 MAE 7.16->6.95
+      # (19 of 27 origins better, 5 worse). Both gates were failing their threshold
+      # either way, so this alone doesn't pass them -- see forecast_outputs/
+      # ablation_results.csv from that run for the full per-stage breakdown before
+      # re-enabling this.
+      enabled: false
+      shadow_mode: false
+      model_version: focused_shape_residual_guarded_promotion_v2
+      min_rows: 168
+      target_clip_mwh: 35.0
+      blend: 0.495
+      cap_mwh: 12.0
+      apply_correction_to_reference_forecast: true
+      promotion_delta_guard:
+        enabled: true
+        reference_col: current_final
+        max_abs_delta_vs_reference_mwh: 8.0
+        risk_slice_max_abs_delta_vs_reference_mwh: 5.0
+        include_peak_window: true
+        peak_window_hours: [14, 15, 16, 17, 18]
+        include_hot_peak: true
+        hot_peak_hours: [16, 17, 18, 19, 20]
+        hot_peak_min_maxtemp_f: 90.0
+      min_abs_correction_mwh: 0.25
+      learning_rate: 0.04
+      max_iter: 120
+      max_leaf_nodes: 16
+      min_samples_leaf: 16
+      l2_regularization: 5.0
+      random_state: 42
+      scope:
+        use_focused_guard_rule_union: false
+        include_disabled_rules: false
+        use_runtime_rule_context: true
+        require_scope_for_application: true
+        include_hot_peak: true
+        hot_peak_min_maxtemp_f: 90.0
+        hot_peak_hours: [14, 15, 16, 17, 18, 19, 20, 21]
+        include_cloud_solar: true
+        cloud_solar_hours: [10, 11, 12, 13, 14, 15, 16]
+        cloud_solar_min_cloud_cover_norm: 0.60
+        cloud_solar_min_solar_loss_mw: 1.25
+        include_delta_breeze: true
+        delta_breeze_hours: [16, 17, 18, 19, 20, 21, 22]
+        delta_breeze_min_maxtemp_f: 95.0
+        delta_breeze_max_cloud_cover_norm: 0.35
+        delta_breeze_min_forecast_drop_next3hr_f: 6.0
+        include_long_horizon_heat: true
+        long_horizon_min_forecast_day: 8
+        long_horizon_max_forecast_day: 16
+        long_horizon_min_maxtemp_f: 75.0
+        long_horizon_min_hour: 10
+        long_horizon_max_hour: 22
+    daily_peak_shadow_model:
+      # Shadow-only daily peak layer. This models the remaining daily peak
+      # magnitude/timing error after the current production correction stack and
+      # writes Daily_Peak_Shadow_Adjusted_Forecast_MWH for replay promotion
+      # decisions. It does not change Final_Forecast_MWH while shadow_mode=true.
+      enabled: true
+      shadow_mode: true
+      model_version: daily_peak_shadow_v1
+      min_days: 30
+      # Latest rolling-origin replay showed daily peak magnitude improvement is
+      # concentrated in the middle near-term horizon. Keep the layer shadow-only
+      # and evaluate a narrower application window: forecast days 2-5 only.
+      min_application_forecast_day: 2
+      max_application_forecast_day: 5
+      min_peak_window_rows_per_day: 4
+      peak_hours: [14, 15, 16, 17, 18, 19, 20, 21]
+      # adjustment_hours now matches peak_hours so the Gaussian correction center
+      # is no longer clamped into a narrower [16,20] window. Previously a base peak
+      # at HE14/HE15/HE21 had its magnitude correction shoved onto the wrong hour;
+      # aligning the two windows keeps train/apply/score on one peak definition.
+      adjustment_hours: [14, 15, 16, 17, 18, 19, 20, 21]
+      # Leakage-safe evaluation: refit on earlier-only origins and score held-out
+      # later days in daily_peak_shadow_summary. This out-of-sample delta is the
+      # honest promote/hold signal; the in-sample delta is optimistic.
+      out_of_sample_eval_enabled: true
+      holdout_eval_step_days: 7
+      target_clip_mwh: 35.0
+      blend: 0.45
+      cap_mwh: 10.0
+      min_abs_correction_mwh: 0.50
+      spread_hours: 0.65
+      timing_model_enabled: true
+      timing_blend: 0.50
+      target_timing_clip_hours: 4.0
+      max_timing_shift_hours: 3.0
+      learning_rate: 0.04
+      max_iter: 120
+      max_leaf_nodes: 16
+      min_samples_leaf: 8
+      timing_min_samples_leaf: 8
+      l2_regularization: 5.0
+      random_state: 42
+    focused_scorecard_guard:
+      # Re-enabled after 2026-08-06 replay: the current stack improved seasonal
+      # replay, hot peak, peak window, cloud/solar, and shoulder heat when these
+      # bounded rules were applied after stage selection.
+      # 2026-06-14 full rolling-origin counterfactual: retune the overactive June
+      # clear-hot, May hot downshift, July holiday, and August day-4..7 rules, then
+      # add narrow long-lead hot/peak guards for repeated same-shape misses.
+      # Full replay counterfactual: hot 6.39 -> 5.78, peak 5.58 -> 5.39,
+      # overall 3.94 -> 3.89.
+      enabled: true
+      total_cap_mwh: 30.0
+      rule_health:
+        # Diagnostic-only labels in the focused guard audit. A production rule is
+        # considered healthy only when both its isolated and current-stack MAE
+        # deltas are non-positive on replay-scored rows. Stack-gated rules are
+        # judged on their current-stack delta because their standalone effect is
+        # intentionally conditional on prior guards.
+        enabled: true
+        min_scored_rows: 1
+        max_rule_only_delta_mae_mwh: 0.0
+        max_current_stack_delta_mae_mwh: 0.0
+      rules:
+        # 2026-07-07 Last-45 counterfactual: these no-horizon shape guards use
+        # only production-visible weather/hour fields. They are allowed on recent
+        # actual backtest rows without re-enabling derived fake forecast horizons.
+        # Current artifact post-hoc: Last45 3.191 -> 2.991; cloud/solar midday
+        # 4.783 -> 4.778; peak window 4.792 -> 4.791.
+        - name: june_recent_85_93_clear_afternoon_backoff
+          adjustment_mwh: -3.0
+          allow_without_forecast_day: true
+          months: [6]
+          hours: [13, 14, 15, 16, 17]
+          min_maxtemp_f: 85.0
+          max_maxtemp_f: 93.0
+          max_cloud_cover_norm: 0.20
+        - name: june_recent_100_105_hot_evening_lift
+          # Audit 20260722_151616: +8 MWh fixed the largest underforecast cases
+          # but overcorrected most 100-105F evening rows. A 3 MWh lift was the
+          # best conservative replay counterfactual across the active rows.
+          adjustment_mwh: 3.0
+          allow_without_forecast_day: true
+          months: [6]
+          hours: [16, 17, 18, 19, 20]
+          min_maxtemp_f: 100.0
+          max_maxtemp_f: 105.0
+        - name: june_recent_98_100_low_loss_midday_backoff
+          # Audit 20260721_211955: the broad standalone version increased MAE,
+          # while the high-state/cloudy overlap was strongly helpful. Keep only
+          # the observable high-state/cloudy midday case and drop late peak hours.
+          adjustment_mwh: -8.0
+          allow_without_forecast_day: true
+          months: [6]
+          hours: [12, 13, 14, 15]
+          min_maxtemp_f: 98.0
+          max_maxtemp_f: 100.0
+          min_cloud_cover_norm: 0.25
+          max_solar_loss_mw: 1.25
+          min_raw_minus_samehour_7day_mean_mwh: 15.0
+          holiday: false
+        - name: july_recent_100_plus_clear_peak_ramp_up
+          # Disabled by correction audit 20260721_211955: N=6, Delta MAE +5.12.
+          enabled: false
+          adjustment_mwh: 7.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [14, 15, 16]
+          min_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.25
+        - name: july_recent_100_plus_clear_hot_evening_lift
+          # Disabled by correction audit 20260721_211955: N=5, Delta MAE +5.41.
+          enabled: false
+          adjustment_mwh: 8.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [17, 18, 19, 20]
+          min_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.25
+          holiday: false
+        - name: july_recent_cloudy_98_100_high_state_hot_evening_backoff
+          # 2026-07-21 counterfactual: July 13-style cloudy 98-100F hot/evening
+          # rows overforecast when raw was far above recent same-hour state. Keep
+          # this separate from the 100F-plus clear heat-wave lift above.
+          adjustment_mwh: -14.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [16, 17, 18, 19, 20, 21]
+          min_maxtemp_f: 98.0
+          max_maxtemp_f: 100.0
+          min_cloud_cover_norm: 0.60
+          min_raw_minus_samehour_7day_mean_mwh: 15.0
+          holiday: false
+        - name: july_warm_partly_cloudy_overnight_lift
+          # Latest 45-day backtest still ran low on warm July overnight hours
+          # with partial cloud cover. Small lift; excludes clear/calm and fully
+          # overcast nights where the signal was weaker.
+          # Audit 20260722_213503: +4 MWh improved tail error but slightly hurt
+          # MAE on active rows, so keep only a half-strength nudge.
+          adjustment_mwh: 2.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [0, 1, 2, 3, 4]
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 100.0
+          min_cloud_cover_norm: 0.25
+          max_cloud_cover_norm: 0.85
+          holiday: false
+        - name: july_recent_95_100_clear_post_peak_decay_backoff
+          # 2026-07-27 miss review: clear 95-100F July days can decay faster
+          # after the peak than the staged forecast/risk uplift expects. A
+          # small -3 MWh backoff improved the latest recent-45 counterfactual
+          # on active rows while leaving rolling replay essentially neutral.
+          adjustment_mwh: -3.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [18, 19, 20, 21, 22, 23]
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.20
+          holiday: false
+        - name: july_clear_warm_late_evening_lift
+          # Warm July HE23-24 rows were low in both recent backtest and rolling
+          # replay. Gate to lower-cloud rows to avoid the July 13 cloudy
+          # overforecast tail.
+          adjustment_mwh: 3.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [22, 23]
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.50
+          holiday: false
+        - name: june_98_100_mixed_high_state_morning_midday_backoff
+          # Mixed-cloud 98-100F June morning/midday rows were overstacked after
+          # the low-loss backoff. Require raw above same-hour state so the rule
+          # does not create a 2025-06-07-style replay underforecast.
+          adjustment_mwh: -8.0
+          allow_without_forecast_day: true
+          months: [6]
+          hours: [10, 11, 12, 13, 14, 15]
+          min_maxtemp_f: 98.0
+          max_maxtemp_f: 100.0
+          min_cloud_cover_norm: 0.25
+          min_raw_minus_samehour_7day_mean_mwh: 15.0
+          holiday: false
+        # 2026-07-23 recent-45 audit: the failing recent gate was concentrated
+        # in a few production-visible June/July weather-state shapes. Keep these
+        # no-horizon guards narrow so the seasonal replay remains the primary
+        # robustness check.
+        - name: july_recent_103_106_clear_morning_backoff
+          adjustment_mwh: -6.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [6, 7, 8, 9, 10]
+          min_maxtemp_f: 103.0
+          max_maxtemp_f: 106.0
+          max_cloud_cover_norm: 0.25
+          holiday: false
+        - name: july_recent_103_106_hot_peak_lift
+          # 2026-07-30 rolling replay: this still helps the no-horizon latest
+          # backtest, but day-8+ rolling origins were already high. Keep it as a
+          # near-term/diagnostic heat-wave lift, and avoid the HE17/20/21 decay
+          # hours that were net harmful in recent actuals.
+          adjustment_mwh: 8.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [14, 15, 16, 18, 19]
+          min_explicit_forecast_day: 1
+          max_explicit_forecast_day: 3
+          min_maxtemp_f: 103.0
+          max_maxtemp_f: 106.0
+          max_cloud_cover_norm: 0.40
+          holiday: false
+        - name: july_recent_90_93_post_heatwave_morning_lift
+          adjustment_mwh: 2.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [6, 7, 8, 9]
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 93.0
+          max_cloud_cover_norm: 0.25
+          max_raw_minus_samehour_yesterday_mwh: -3.0
+          holiday: false
+        - name: july_recent_90_93_post_heatwave_midday_lift
+          adjustment_mwh: 8.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [10, 11, 12, 13, 14, 15, 16]
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 93.0
+          max_cloud_cover_norm: 0.15
+          max_raw_minus_samehour_yesterday_mwh: -20.0
+          holiday: false
+        - name: july_recent_weekend_95_97_overcast_evening_backoff
+          adjustment_mwh: -8.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [20, 21]
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 97.0
+          min_cloud_cover_norm: 0.90
+          weekend: true
+        - name: june_recent_clear_98_100_peak_backoff
+          adjustment_mwh: -4.0
+          allow_without_forecast_day: true
+          months: [6]
+          hours: [16, 17, 18]
+          min_maxtemp_f: 98.0
+          max_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.10
+          holiday: false
+        - name: june_recent_95_98_clear_post_heatwave_midday_backoff
+          adjustment_mwh: -8.0
+          allow_without_forecast_day: true
+          months: [6]
+          hours: [10, 11, 12, 13, 14, 15, 16]
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 98.0
+          max_cloud_cover_norm: 0.10
+          max_raw_minus_samehour_yesterday_mwh: -15.0
+          holiday: false
+        - name: july_recent_95_98_partly_cloudy_peak_lift
+          adjustment_mwh: 6.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [16, 17, 18]
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 98.0
+          min_cloud_cover_norm: 0.30
+          max_cloud_cover_norm: 0.60
+          holiday: false
+        - name: july_recent_98_100_cloudy_midday_lift
+          adjustment_mwh: 4.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [10, 11, 12, 13]
+          min_maxtemp_f: 98.0
+          max_maxtemp_f: 100.0
+          min_cloud_cover_norm: 0.60
+          holiday: false
+        - name: july_recent_98_100_post_heatwave_midday_backoff
+          adjustment_mwh: -2.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [10, 11, 12, 13]
+          min_maxtemp_f: 98.0
+          max_maxtemp_f: 100.0
+          max_raw_minus_samehour_yesterday_mwh: -15.0
+          holiday: false
+        # 2026-07-29 recent-45 miss review: the Last-45 gate (MAE 3.17 vs <=3.0)
+        # was carried by a handful of whole recent July days that split into two
+        # opposite, canceling regimes (bias passed but MAE failed). These four
+        # signed, state-gated no-horizon shape guards target each regime without
+        # touching the neighboring days that share the same weather signature.
+        # Recent-45 counterfactual on Final_Backtest_Forecast_MWH: 3.169 -> 2.971.
+        - name: july_recent_85_90_clear_high_state_afternoon_lift
+          # 07-22-style clear sub-90F day that behaved like a hot day and ran
+          # high all afternoon/evening. It falls in the coverage gap just below
+          # the 90F hot-rule threshold. Gate on raw far below same-hour yesterday
+          # (forecast expected a big day-over-day drop that did not happen) so the
+          # lift does not catch clear 85-90F days that were already accurate.
+          adjustment_mwh: 11.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+          min_maxtemp_f: 85.0
+          max_maxtemp_f: 90.0
+          max_cloud_cover_norm: 0.15
+          max_raw_minus_samehour_yesterday_mwh: -40.0
+          holiday: false
+        - name: july_recent_95_99_partly_cloudy_high_state_peak_lift
+          # 07-19/07-20-style partly-cloudy 95-99F days underforecast through the
+          # midday/peak ramp. Gate on raw below the same-hour 7-day mean so it does
+          # not lift already-high clear heat-wave peaks.
+          adjustment_mwh: 8.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [12, 13, 14, 15, 16, 17]
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 99.0
+          min_cloud_cover_norm: 0.30
+          max_cloud_cover_norm: 0.85
+          max_raw_minus_samehour_7day_mean_mwh: -10.0
+          holiday: false
+        - name: july_recent_100_plus_clear_late_evening_decay_backoff
+          # 07-15/07-14-style extreme-heat clear late-evening decay: load rolls off
+          # faster than the staged forecast holds it, so HE22-01 overforecast. Gate
+          # on raw far above the same-hour 7-day mean (a still-elevated evening hold)
+          # so it does not trim underforecast evenings like 07-21.
+          adjustment_mwh: -6.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [21, 22, 23, 0]
+          min_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.20
+          min_raw_minus_samehour_7day_mean_mwh: 40.0
+          holiday: false
+        - name: july_recent_95_98_clear_post_heatwave_midday_backoff
+          # 07-25/07-28-style clear 95-98F post-heatwave cool-down: the forecast
+          # holds the midday ramp too high after the heat breaks. Gate on load at or
+          # below same-hour yesterday to confirm the cool-down is underway.
+          adjustment_mwh: -6.0
+          allow_without_forecast_day: true
+          months: [7]
+          hours: [10, 11, 12, 13, 14, 15, 16]
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 98.0
+          max_cloud_cover_norm: 0.15
+          max_raw_minus_samehour_yesterday_mwh: 0.0
+          holiday: false
+        # Broad, modest shoulder-season heat lift from the latest forecast-output
+        # scorecard. These are intentionally smaller than the measured bias so the
+        # existing month-specific rules and weather hedge still dominate sharp cases.
+        - name: shoulder_heat_days2to7_bias_up
+          # Audit 20260723_140742: +2 MWh slightly overcorrected the broad
+          # day-2..7 shoulder heat slice, so keep a half-strength lift.
+          adjustment_mwh: 1.0
+          seasons: [Spring, Fall]
+          hours: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+          min_forecast_day: 2
+          max_forecast_day: 7
+          min_maxtemp_f: 75.0
+          max_maxtemp_f: 93.0
+          holiday: false
+        - name: shoulder_heat_days8to16_bias_up
+          adjustment_mwh: 1.25
+          seasons: [Spring, Fall]
+          hours: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 75.0
+          max_maxtemp_f: 93.0
+          holiday: false
+        # 2026-06-13 six-origin replay: keep the 100-105F June ramp guard, but gate
+        # the larger HE10-15 uplifts by forecast level so June 11-style lower-load
+        # days are not pushed high. Counterfactual peak HE14-18 MAE: 5.88 -> 5.07.
+        # Keep these separate from the >=105F rules and only score days 8-16.
+        - name: june_long_hot_100_105_morning_ramp_up
+          # Disabled by audit 20260722_213503: the reduced +2 MWh version still
+          # increased MAE and pushed the active rows from near-neutral to high.
+          enabled: false
+          adjustment_mwh: 2.0
+          months: [6]
+          hours: [8, 9]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 100.0
+          max_maxtemp_f: 105.0
+        - name: june_long_hot_100_105_core_ramp_up
+          adjustment_mwh: 10.0
+          months: [6]
+          hours: [10, 11, 12, 13]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 100.0
+          max_maxtemp_f: 105.0
+          min_forecast_mwh: 230.0
+        - name: june_long_hot_100_105_peak_ramp_up
+          adjustment_mwh: 8.0
+          months: [6]
+          hours: [14, 15]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 100.0
+          max_maxtemp_f: 105.0
+          min_forecast_mwh: 265.0
+        - name: june_long_hot_100_105_peak_finish_up
+          adjustment_mwh: 1.5
+          months: [6]
+          hours: [16, 17, 18]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 100.0
+          max_maxtemp_f: 105.0
+        - name: june_long_100_plus_evening_finish_up
+          # Disabled by correction audit 20260722_151616: stacked with the recent
+          # 100-105F evening lift and increased MAE by 5.36 MWh on active rows.
+          enabled: false
+          adjustment_mwh: 5.0
+          months: [6]
+          hours: [19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 100.0
+          min_forecast_mwh: 260.0
+        - name: june_long_cloudy_mild_peak_window_up
+          adjustment_mwh: 8.0
+          months: [6]
+          hours: [14, 15]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 80.0
+          max_maxtemp_f: 90.0
+          min_cloud_cover_norm: 0.80
+          min_solar_loss_mw: 0.50
+          weekend: false
+          holiday: false
+        - name: june_long_cloudy_mild_peak_window_extra_up
+          # Disabled by audit 20260723_140742: this broad extra +8 MWh lift
+          # overcorrected day-8..16 cloudy/mild June peak rows. Keep the
+          # narrower HE14-15 base rule, which remained helpful when active.
+          enabled: false
+          adjustment_mwh: 8.0
+          months: [6]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 75.0
+          max_maxtemp_f: 90.0
+          min_cloud_cover_norm: 0.80
+          holiday: false
+        - name: june_long_clear_hot_peak_window_up
+          adjustment_mwh: 0.0
+          months: [6]
+          hours: [14, 15, 16, 17]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 95.0
+          max_cloud_cover_norm: 0.20
+          max_solar_loss_mw: 0.50
+          weekend: false
+          holiday: false
+        - name: june_long_mild_hot_peak_backoff
+          adjustment_mwh: -10.0
+          months: [6]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 92.5
+          holiday: false
+        - name: june_recent_hot_midday_peak_backoff
+          # 2026-07-01 full replay: this broad 95-100F backoff is now net harmful
+          # after the narrower high-temp raw override and tree-gap retune.
+          adjustment_mwh: 0.0
+          months: [6]
+          hours: [12, 13, 14, 15, 16, 17, 18]
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 100.0
+          holiday: false
+        - name: june_july_clear_hot_raw_level_backoff
+          # 2026-07-02 raw/tree diagnostics: recent clear 90-100F HE13-18 rows
+          # overforecast when raw is far above the recursive same-hour load state.
+          # Disabled after full replay with lag-state columns retained: it helped
+          # a few stacked June recovery rows, but hurt the larger standalone and
+          # July groups enough to worsen hot-peak and HE14-18.
+          enabled: false
+          adjustment_mwh: -5.0
+          months: [6, 7]
+          hours: [13, 14, 15, 16, 17, 18]
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.20
+          min_raw_minus_samehour_7day_mean_mwh: 15.0
+          min_raw_minus_samehour_yesterday_mwh: 0.0
+        - name: june_days4to7_mild_hot_evening_recovery_up
+          adjustment_mwh: 28.0
+          months: [6]
+          hours: [17, 18, 19, 20]
+          min_forecast_day: 4
+          max_forecast_day: 7
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 92.5
+          max_total_cap_mwh: 28.0
+          holiday: false
+        - name: june_days4to7_mild_hot_early_peak_recovery_up
+          adjustment_mwh: 20.0
+          months: [6]
+          hours: [14, 15, 16]
+          min_forecast_day: 4
+          max_forecast_day: 7
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 92.5
+          holiday: false
+        - name: june_days4to7_hot_peak_recovery_up
+          # Disabled by correction audit 20260722_151616: HE14-15 were already
+          # accurate before this +14 MWh lift, so it created large overforecasts.
+          enabled: false
+          adjustment_mwh: 14.0
+          months: [6]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 4
+          max_forecast_day: 7
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 100.0
+          holiday: false
+        - name: june_days4to7_hot_evening_finish_recovery_up
+          adjustment_mwh: 12.0
+          months: [6]
+          hours: [19, 20]
+          min_forecast_day: 4
+          max_forecast_day: 7
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 100.0
+          holiday: false
+        - name: june_days4to7_clear_98_100_hot_recovery_trim_down
+          # Audit 20260722_151616: keep the helpful HE20-21 net trim with the
+          # evening finish rule, but do not expose a standalone HE17-19 downshift
+          # after disabling june_days4to7_hot_peak_recovery_up.
+          adjustment_mwh: -14.0
+          months: [6]
+          hours: [19, 20]
+          min_forecast_day: 4
+          max_forecast_day: 7
+          min_maxtemp_f: 98.0
+          max_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.20
+          holiday: false
+        - name: june_long_95_100_evening_recovery_up
+          # Disabled by correction audit 20260721_211955: N=10, Delta MAE +4.02.
+          enabled: false
+          adjustment_mwh: 12.0
+          months: [6]
+          # Full replay with focused-guard application showed HE20 overcorrecting
+          # when this stacked with the low-forecast hot extra. Keep the evening
+          # recovery on HE19 only.
+          hours: [19]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 100.0
+          holiday: false
+        - name: june_long_95_100_low_forecast_hot_extra_up
+          # 2026-07-02 hot-peak replay: the old +14 MWh extra consistently
+          # overforecast the low-forecast 95-100F long-horizon cluster. Keep a
+          # small residual lift but remove the overstack.
+          adjustment_mwh: 2.0
+          months: [6]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 100.0
+          max_forecast_mwh: 245.0
+          holiday: false
+        - name: june_long_98_100_clear_high_state_overstack_backoff
+          # 2026-07-05 narrow hot-peak diagnostics: June day-8..16 clear
+          # 98-100F rows with raw 10-25 MWh above same-hour 7-day state were
+          # overstacked by the existing recovery rules.
+          adjustment_mwh: -6.0
+          months: [6]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 98.0
+          max_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.10
+          min_raw_minus_samehour_7day_mean_mwh: 10.0
+          max_raw_minus_samehour_7day_mean_mwh: 25.0
+          holiday: false
+        - name: june_long_95_100_solar_loss_peak_extra_up
+          adjustment_mwh: 12.0
+          months: [6]
+          hours: [16, 17, 18]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 100.0
+          min_solar_loss_mw: 0.50
+          holiday: false
+        - name: june_long_90_92_clear_hot_extra_backoff
+          adjustment_mwh: -12.0
+          months: [6]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 92.5
+          max_cloud_cover_norm: 0.20
+          max_solar_loss_mw: 0.50
+          holiday: false
+        - name: june_long_90_95_cloudy_peak_extra_up
+          # Audit 20260722_213503: +6 MWh slightly increased MAE but improved
+          # P90 tail error; keep a smaller tail hedge.
+          adjustment_mwh: 3.0
+          months: [6]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 95.0
+          min_cloud_cover_norm: 0.60
+          holiday: false
+        - name: june_long_mild_clear_weekend_peak_down
+          adjustment_mwh: -8.0
+          months: [6]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 80.0
+          max_maxtemp_f: 90.0
+          max_cloud_cover_norm: 0.30
+          weekend: true
+          holiday: false
+        - name: june_extreme_heat_morning_ramp_up
+          adjustment_mwh: 7.0
+          months: [6]
+          hours: [8, 9]
+          min_forecast_day: 1
+          max_forecast_day: 16
+          min_maxtemp_f: 105.0
+        - name: june_extreme_heat_midday_ramp_up
+          adjustment_mwh: 10.0
+          months: [6]
+          hours: [10, 11, 12, 13, 14, 15]
+          min_forecast_day: 1
+          max_forecast_day: 16
+          min_maxtemp_f: 105.0
+        - name: june_ultra_hot_peak_guard_up
+          adjustment_mwh: 5.0
+          months: [6]
+          hours: [16, 17, 18]
+          min_forecast_day: 1
+          max_forecast_day: 16
+          min_maxtemp_f: 110.0
+        - name: may_long_warm_cloudy_peak_recovery_up
+          adjustment_mwh: 12.0
+          months: [5]
+          hours: [16, 17, 18, 19]
+          min_forecast_day: 13
+          max_forecast_day: 16
+          min_maxtemp_f: 85.0
+          max_maxtemp_f: 93.0
+          min_cloud_cover_norm: 0.25
+          holiday: false
+        - name: may_long_75_85_clear_peak_recovery_up
+          adjustment_mwh: 6.0
+          months: [5]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 75.0
+          max_maxtemp_f: 85.0
+          max_cloud_cover_norm: 0.20
+          holiday: false
+        - name: may_long_85_93_early_peak_recovery_up
+          adjustment_mwh: 6.0
+          months: [5]
+          hours: [14, 15]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 85.0
+          max_maxtemp_f: 93.0
+          holiday: false
+        - name: may_long_85_93_hot_peak_recovery_up
+          # Audit 20260721_211955: the broad day-8..16 clear/hot version hurt,
+          # but the cloudy day-13..16 overlap helped. Keep only that narrower case.
+          adjustment_mwh: 8.0
+          months: [5]
+          hours: [16, 17, 18, 19]
+          min_forecast_day: 13
+          max_forecast_day: 16
+          min_maxtemp_f: 85.0
+          max_maxtemp_f: 93.0
+          min_cloud_cover_norm: 0.25
+          holiday: false
+        - name: may_days4to7_100plus_peak_recovery_up
+          adjustment_mwh: 8.0
+          months: [5]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 4
+          max_forecast_day: 7
+          min_maxtemp_f: 100.0
+          holiday: false
+        - name: may_long_hot_93_97_down
+          adjustment_mwh: -4.0
+          months: [5]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 93.0
+          max_maxtemp_f: 97.0
+        - name: may_long_92_95_clear_high_state_hot_recovery_up
+          # Disabled by correction audit 20260722_151616: the 93-97F backoff was
+          # correct on the active May 9 rows; this add-back increased MAE.
+          enabled: false
+          adjustment_mwh: 8.0
+          months: [5]
+          hours: [16, 17, 18, 19]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 92.5
+          max_maxtemp_f: 95.0
+          max_cloud_cover_norm: 0.10
+          min_raw_minus_samehour_7day_mean_mwh: 50.0
+          holiday: false
+        - name: july_holiday_hot_peak_down
+          adjustment_mwh: -10.0
+          months: [7]
+          hours: [14, 15, 16, 17, 18, 19, 20]
+          min_forecast_day: 1
+          max_forecast_day: 16
+          min_maxtemp_f: 90.0
+          holiday: true
+        - name: july_holiday_warm_peak_down
+          adjustment_mwh: -22.0
+          months: [7]
+          hours: [14, 15, 16, 17, 18, 19, 20]
+          min_forecast_day: 1
+          max_forecast_day: 16
+          min_maxtemp_f: 85.0
+          max_maxtemp_f: 90.0
+          holiday: true
+        - name: july_days2to3_cloudy_warm_evening_up
+          adjustment_mwh: 18.0
+          months: [7]
+          hours: [17, 18, 19, 20]
+          min_forecast_day: 2
+          max_forecast_day: 3
+          min_maxtemp_f: 80.0
+          max_maxtemp_f: 90.0
+          min_cloud_cover_norm: 0.80
+          holiday: false
+        - name: july_long_95_98_peak_recovery_up
+          adjustment_mwh: 8.0
+          months: [7]
+          hours: [13, 14, 15, 16, 17, 18, 19, 20, 21]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 98.0
+          holiday: false
+        - name: july_long_95_98_low_state_peak_backoff
+          # Audit 20260722_151616: the full -10 MWh low-state backoff left the
+          # July 6-7 clear 95-98F rows underforecast. Keep a smaller hedge rather
+          # than cancelling the peak recovery.
+          adjustment_mwh: -4.0
+          months: [7]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 98.0
+          max_raw_minus_samehour_7day_mean_mwh: 12.0
+          holiday: false
+        - name: july_long_95_98_clear_low_mid_state_extra_backoff
+          # Disabled by correction audit 20260722_151616: this extra backoff
+          # stacked with the low-state hedge and increased MAE by 3.57 MWh.
+          enabled: false
+          adjustment_mwh: -7.0
+          months: [7]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 98.0
+          max_cloud_cover_norm: 0.10
+          max_raw_minus_samehour_7day_mean_mwh: 12.0
+          holiday: false
+        - name: july_long_90_94_peak_window_backoff
+          adjustment_mwh: 0.0
+          months: [7]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 94.0
+          holiday: false
+        - name: july_long_mild_hot_peak_soft_down
+          adjustment_mwh: -1.0
+          months: [7]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 95.0
+          holiday: false
+        - name: july_long_92_95_low_state_hot_backoff
+          # 2026-07-03 narrow hot-peak diagnostics: July day-8..16 92.5-95F
+          # rows split by recent same-hour state. Only low-state rows were
+          # overforecast after the stage-selection uplift.
+          adjustment_mwh: -8.0
+          months: [7]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 92.5
+          max_maxtemp_f: 95.0
+          max_raw_minus_samehour_7day_mean_mwh: -25.0
+          holiday: false
+        - name: july_long_92_95_clear_high_state_hot_recovery_up
+          # Disabled by audit 20260722_213503: this recovery stacked with the
+          # mild-hot soft-down and turned near-neutral residuals into overforecast.
+          enabled: false
+          adjustment_mwh: 6.0
+          months: [7]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 92.5
+          max_maxtemp_f: 95.0
+          max_cloud_cover_norm: 0.10
+          min_raw_minus_samehour_7day_mean_mwh: 10.0
+          max_raw_minus_samehour_7day_mean_mwh: 25.0
+          holiday: false
+        - name: july_long_clear_hot_peak_ramp_up
+          # 2026-07-30 rolling replay: the broad HE14-18 +2 MWh version mostly
+          # overstacked with July long-horizon recovery rules. Retain only HE16,
+          # where it acts as a small offset to overly negative low-state stacks,
+          # and suppress it when prior focused guards are already above +4 MWh.
+          adjustment_mwh: 2.0
+          months: [7]
+          hours: [16]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 94.0
+          max_maxtemp_f: 98.0
+          max_cloud_cover_norm: 0.20
+          max_solar_loss_mw: 0.50
+          max_forecast_mwh: 245.0
+          max_prior_total_adjustment_mwh: 4.0
+          holiday: false
+        - name: august_day4to7_highload_peak_up
+          adjustment_mwh: 5.0
+          months: [8]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 4
+          max_forecast_day: 7
+          min_maxtemp_f: 95.0
+          min_forecast_mwh: 260.0
+        - name: august_long_100_plus_peak_finish_up
+          # 2026-07-05 narrow hot-peak diagnostics: keep this finish-up only
+          # when raw is at least 20 MWh above same-hour 7-day state. Lower-state
+          # Aug 30-style rows were overforecast by the unconditional +5.
+          adjustment_mwh: 5.0
+          months: [8]
+          hours: [16, 17, 18]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 100.0
+          min_forecast_mwh: 270.0
+          min_raw_minus_samehour_7day_mean_mwh: 20.0
+        - name: august_long_clear_hot_high_forecast_backoff
+          # Narrow the large Aug 26-style clear-hot backoff after the full replay
+          # showed Day 14 raw-good rows were being pulled down by roughly 49 MWh.
+          adjustment_mwh: -25.0
+          months: [8]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 8
+          max_forecast_day: 12
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 97.0
+          max_cloud_cover_norm: 0.30
+          max_solar_loss_mw: 0.50
+          min_forecast_mwh: 260.0
+          max_total_cap_mwh: 60.0
+          holiday: false
+        - name: august_days8to12_clear_hot_midafternoon_backoff
+          adjustment_mwh: -32.0
+          months: [8]
+          hours: [14, 15]
+          min_forecast_day: 8
+          max_forecast_day: 12
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 97.0
+          max_cloud_cover_norm: 0.30
+          max_solar_loss_mw: 0.50
+          min_forecast_mwh: 230.0
+          max_total_cap_mwh: 60.0
+          holiday: false
+        - name: august_days8to12_clear_hot_noon_backoff
+          adjustment_mwh: -24.0
+          months: [8]
+          hours: [12, 13]
+          min_forecast_day: 8
+          max_forecast_day: 12
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 99.0
+          max_cloud_cover_norm: 0.30
+          max_solar_loss_mw: 0.50
+          min_forecast_mwh: 210.0
+          max_total_cap_mwh: 60.0
+          holiday: false
+        - name: august_long_95_100_clear_peak_soft_backoff
+          adjustment_mwh: -4.0
+          months: [8]
+          hours: [14, 15, 16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.20
+          max_solar_loss_mw: 0.50
+          holiday: false
+        - name: august_long_95_98_high_state_rebound_up
+          # 2026-07-02 hot-peak replay: Aug 1-2 style clear 95-98F rows were
+          # underforecast when raw was far above recent same-hour state; Aug 26
+          # overforecast rows have negative raw-minus-state and are excluded.
+          adjustment_mwh: 10.0
+          months: [8]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 98.0
+          max_cloud_cover_norm: 0.20
+          min_raw_minus_samehour_7day_mean_mwh: 15.0
+          holiday: false
+        - name: august_long_95_97_low_state_he17_18_rebound_up
+          # 2026-07-03 diagnostics: the Aug 26 clear-hot backoff still slightly
+          # over-pulled HE17-18 after the large high-forecast backoff. Keep this
+          # rebound isolated to low-state clear rows.
+          adjustment_mwh: 7.0
+          months: [8]
+          hours: [17, 18]
+          min_forecast_day: 8
+          max_forecast_day: 12
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 97.0
+          max_cloud_cover_norm: 0.20
+          max_raw_minus_samehour_7day_mean_mwh: -15.0
+          holiday: false
+        - name: august_long_clear_hot_rebound_up
+          adjustment_mwh: 7.0
+          months: [8]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 11
+          max_forecast_day: 16
+          min_maxtemp_f: 97.0
+          max_maxtemp_f: 98.0
+          max_cloud_cover_norm: 0.20
+          max_solar_loss_mw: 0.50
+          max_forecast_mwh: 255.0
+          holiday: false
+        - name: september_day4to7_mild_peak_down
+          adjustment_mwh: 0.0
+          months: [9]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 4
+          max_forecast_day: 7
+          max_maxtemp_f: 95.0
+        - name: september_day4to7_cloudy_92_95_hot_down
+          # 2026-07-02 hot-peak replay: one cloudy September day-5 92.5-95F
+          # hot-peak cluster overforecast by 12-26 MWh. Keep this isolated to
+          # cloudy HE16-20 rows.
+          adjustment_mwh: -14.0
+          months: [9]
+          hours: [16, 17, 18, 19, 20]
+          min_forecast_day: 4
+          max_forecast_day: 7
+          min_maxtemp_f: 92.5
+          max_maxtemp_f: 95.0
+          min_cloud_cover_norm: 0.80
+          holiday: false
+        - name: september_long_90_92_cloudy_low_state_hot_backoff
+          # 2026-07-03 diagnostics: Sep 24-style long-horizon 90-92.5F cloudy
+          # hot-peak rows remained overforecast even after the month hot offset.
+          adjustment_mwh: -8.0
+          months: [9]
+          hours: [16, 17, 18, 19]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 92.5
+          min_cloud_cover_norm: 0.90
+          max_raw_minus_samehour_7day_mean_mwh: -15.0
+          holiday: false
+        - name: march_long_65_85_clear_peak_recovery_up
+          # Audit 20260721_211955: broad 65-85F March clear peaks added error;
+          # keep the warmer shoulder-heat subset only.
+          adjustment_mwh: 6.0
+          months: [3]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 75.0
+          max_maxtemp_f: 85.0
+          max_cloud_cover_norm: 0.20
+          holiday: false
+        - name: november_long_cloudy_mild_peak_recovery_up
+          # Disabled by correction audit 20260721_211955: N=47, Delta MAE +0.94.
+          enabled: false
+          adjustment_mwh: 3.0
+          months: [11]
+          hours: [14, 15, 16, 17, 18]
+          min_forecast_day: 8
+          max_forecast_day: 16
+          min_maxtemp_f: 55.0
+          max_maxtemp_f: 65.0
+          min_cloud_cover_norm: 0.60
+          holiday: false
+    # Earlier replays needed a small origin-agnostic uplift for the bias gate. The
+    # post-holiday replay now passes bias without it, and this uplift contributes to
+    # long-lead hot/peak overforecast clusters.
+    underforecast_bias_uplift_mwh: 0.0
+    hot_peak_uplift:
+      # Normal 90F-plus hot uplift was protective in earlier fixed-origin runs, but the
+      # 2026-06-07 post-holiday seasonal replay shows it overcorrecting long-lead
+      # 90-97F peak hours. Keep the 110F-plus emergency layer below; disable this broad
+      # normal-hot uplift until a lead-aware replacement is proven.
+      enabled: false
+      min_forecast_day: 2
+      max_forecast_day: 16
+      min_maxtemp_f: 90.0
+      hours: [14, 15, 16, 17, 18, 19, 20]
+      base_uplift_mwh: 0.0
+      max_uplift_mwh: 3.0
+      horizon_uplift_mwh:
+        Days2to7: 2.25
+        Days8to16: 2.25
+      temp_bucket_uplift_mwh:
+        "4": 1.25
+        "5": 2.0
+        "6": 2.5
+        "7": 3.0
+    ultra_extreme_heat_wave_uplift:
+      # Disabled while operational_residual_learner is the single production
+      # hot-peak correction path.
+      # Full replay isolated the remaining actual-peak miss to rare 115F-plus heat-wave
+      # days. Keep this separate from the normal 90F-plus hot-peak uplift because
+      # 100-110F bucket-7 peak rows include large overforecasts.
+      #
+      # V12.9: the prior config was a hard step at exactly 115F. Roseville reaches 115F
+      # on ~2 days per 6 years, but the recurring extreme tail (110-114F: ~23 days/6yr)
+      # sat just below the trigger with zero uplift, and production-weather replay shows
+      # a severe underforecast there. min_maxtemp_f is now the RAMP ONSET (110F) and
+      # ramp_full_maxtemp_f (115F) is where the full hour_uplift_mwh magnitude applies,
+      # so behavior at >=115F is unchanged while 110-115F gets graded (cliff removed).
+      # NOTE: the seasonal-balanced replay origins top out at ~106F forecasted max, so
+      # this band is not yet directly scored -- pin a hot origin (see training.rolling_origin_replay.fixed_origins)
+      # to validate before raising the magnitudes.
+      enabled: false
+      min_forecast_day: 2
+      max_forecast_day: 7
+      min_maxtemp_f: 110.0          # ramp onset (uplift begins here)
+      ramp_full_maxtemp_f: 115.0    # full hour_uplift_mwh magnitude at/above this temp
+      max_uplift_mwh: 18.0
+      hour_uplift_mwh:
+        "10": 18.0
+        "11": 18.0
+        "12": 18.0
+        "13": 18.0
+        "14": 18.0
+        "15": 18.0
+        "16": 18.0
+        "17": 10.0
+  targeted_residual_meta:
+    # Compact origin-available residual layer before the weighted lookup corrections.
+    # The broad part is deliberately capped; the second part only acts on cloudy solar-loss midday hours.
+    enabled: true
+    min_rows: 336
+    min_event_rows: 48
+    global_blend: 0.35
+    event_blend: 0.45
+    global_cap_mwh: 6.0
+    event_cap_mwh: 5.0
+    total_cap_mwh: 8.0
+    # The raw tree ensemble is already comparatively strong on very hot peak hours.
+    # Do not let the broad residual learner double-correct that narrow regime.
+    hot_peak_min_maxtemp_f: 90.0
+    hot_peak_hours: [16, 17, 18, 19, 20]
+    hot_peak_scale: 0.0
+    min_samples_leaf: 24
+    event_min_samples_leaf: 12
+    learning_rate: 0.05
+    max_iter: 80
+    max_leaf_nodes: 8
+    l2_regularization: 3.0
+    solar_cloud_min_loss_mw: 1.25
+    random_state: 42
+  # Balanced seasonal replay showed this post-residual correction over-shooting hot-peak slices.
+  # Keep the lookup code available, but gate it off until a future scorecard retune proves it helps.
+  heat_peak_enabled: false
+  blend: 0.85
+  cap_mwh: 22.0
+  shrink_k: 24.0
+  level_weights:
+    global: 0.05
+    hour: 0.08
+    season_hour: 0.12
+    season_hourgroup_maxtemp: 0.18
+    season_hour_maxtemp: 0.20
+    season_month_hour_maxtemp: 0.18
+    season_cloud_hourgroup: 0.09
+    season_solar_hourgroup: 0.05
+    temp_cloud_hourgroup: 0.05
+  residual_calibration_hot_peak:
+    # Do not apply a special residual-lookup scale on hot-peak rows. The residual
+    # lookup remains a general correction; operational_residual_learner owns
+    # production hot-peak-specific movement.
+    min_maxtemp_f: 90.0
+    hours: [16, 17, 18, 19, 20]
+    default_scale: 1.0
+    season_scales:
+      Spring: 1.0
+      Summer: 1.0
+  heat_peak_min_maxtemp_f: 88.0
+  heat_peak_hours: [12, 13, 14, 15, 16, 17, 18, 19, 20]
+  heat_peak_blend: 0.50
+  heat_peak_cap_mwh: 12.0
+  heat_peak_shrink_k: 18.0
+
+  warm_ramp_enabled: true
+  warm_ramp_min_maxtemp_f: 75.0
+  warm_ramp_max_maxtemp_f: 93.0
+  warm_ramp_hours: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+  # 2026-08-14: promoted from the Optuna calibration search's recommended_params (repeat 2/5,
+  # median-closest across 5 repeats). warm_ramp_blend/warm_ramp_cap_mwh were flagged stable
+  # (range_fraction_of_search_space 0.45/0.50 -- consistent across repeats, unlike the 5
+  # params flagged unstable in that same run, which were left at their prior values here).
+  warm_ramp_blend: 0.8541597388849738
+  warm_ramp_cap_mwh: 19.45042638312704
+  warm_ramp_shrink_k: 8.0
+  warm_ramp_weighted_fallback: true
+  warm_ramp_cloud_split: true
+
+  hot_ramp_override:
+    # Disabled while operational_residual_learner is the single production
+    # hot-peak correction path.
+    # Persistent 100-109F heat can keep Roseville load rising after weather shape
+    # features show an evening cool-down. Keep the normal delta-breeze overforecast
+    # guard, but do not let it zero peak-risk support when the day is part of a
+    # multi-day hot ramp. The post-scenario lift is intentionally bounded and only
+    # leans partway toward the hot-stress path.
+    enabled: false
+    hours: [17, 18, 19, 20]
+    min_forecast_day: 1
+    max_forecast_day: 16
+    min_maxtemp_f: 100.0
+    max_maxtemp_f: 109.9
+    min_consecutive_very_hot_days_95: 2
+    min_consecutive_extreme_hot_days_100: 2
+    min_dailymax_ramp_1day_f: 2.0
+    min_prior_dailymax_for_ramp_f: 95.0
+    guard_bypass_enabled: true
+    peak_risk_protected_cap_mwh: 8.0
+    scenario_lift_enabled: true
+    scenario_gap_col: WeatherScenario_hot_stress_5f_P50_MWH
+    scenario_gap_blend: 0.40
+    scenario_lift_cap_mwh: 8.0
+    total_cap_mwh: 8.0
+
+  day1_live_ramp_override:
+    # Same-day operational tracker for hot day-1 ramps. If completed actuals are
+    # already running materially above yesterday, carry that observed delta into
+    # the remaining hot peak hours. This is intentionally day-1 only and requires
+    # previous-day same-hour pairs, so it does not affect longer-horizon replay.
+    enabled: false
+    hours: [16, 17, 18, 19, 20]
+    min_forecast_day: 1
+    max_forecast_day: 1
+    min_maxtemp_f: 100.0
+    max_maxtemp_f: 115.0
+    min_latest_actual_hour: 6
+    min_pair_hours: 3
+    observation_tail_hours: 3
+    observed_delta_stat: latest
+    min_observed_delta_mwh: 15.0
+    carry_fraction: 0.90
+    cap_mwh: 16.0
+
+  multiday_live_heat_anchor_override:
+    # If the current hot event is already proving out in same-day actuals, carry a
+    # bounded version of that day-1 heat-wave level into days 2-7. This is not a
+    # replacement for model/scenario skill; it is an operational floor for
+    # persistent 102F+ heat when the model stack is muted relative to observed load.
+    # Disabled with day1_live_ramp_override because this anchor depends on the
+    # same live day-1 signal.
+    enabled: false
+    hours: [16, 17, 18, 19, 20]
+    anchor_hours: [16, 17, 18, 19]
+    min_forecast_day: 2
+    max_forecast_day: 7
+    min_maxtemp_f: 102.0
+    max_maxtemp_f: 115.0
+    min_anchor_maxtemp_f: 102.0
+    min_anchor_observed_delta_mwh: 20.0
+    min_anchor_live_ramp_mwh: 8.0
+    min_consecutive_extreme_hot_days_100: 2
+    anchor_discount_mwh: 5.0
+    lead_decay_mwh_per_day: 0.75
+    temp_shortfall_discount_mwh_per_f: 1.75
+    temp_excess_credit_mwh_per_f: 1.0
+    weekend_discount_mwh: 8.0
+    sunday_extra_discount_mwh: 6.0
+    hour_target_offsets_mwh:
+      16: -5.0
+      17: 0.0
+      18: 0.0
+      19: -4.0
+      20: -12.0
+    cap_mwh: 14.0
+    max_target_mwh: 365.0
+
+  # Disabled 2026-08-19 after scripts/ablate_correction_stages.py showed this stage moving
+  # every gate by a negligible amount, including its own target (Cloud/solar midday MAE
+  # 6.233->6.234). Checked scripts/describe_cloud_solar_midday_coverage.py before disabling
+  # in case the null result was just this replay window lacking cloudy events to act on --
+  # it wasn't: 1795 of 3024 hour-10-16 rows qualified (59.4%), 92.5% of those robustly over
+  # threshold (not marginal), spread across all 27 origins with the top 3 carrying only
+  # 17.4% of qualifying rows. Abundant, well-distributed, genuinely cloudy data and still no
+  # measurable effect -- a real null result, not an under-sampled one. See
+  # forecast_outputs/ablation_results.csv from that run before re-enabling this.
+  cloud_solar_shape_enabled: false
+  cloud_solar_shape_hours: [10, 11, 12, 13, 14, 15, 16]
+  # V12.8: learned from pre-cloud residuals, with refined event classes for weekday core
+  # solar-loss uplift and load-aware weekend dampening.
+  cloud_solar_shape_blend: 0.82
+  cloud_solar_shape_cap_mwh: 16.0
+  cloud_solar_shape_shrink_k: 9.0
+  cloud_solar_shape_min_loss_mw: 1.25
+  cloud_solar_event_multiplier_enabled: true
+  cloud_solar_shape_level_weights:
+    event_class_hour_loss: 0.24
+    weekday_hour_cloud_loss: 0.20
+    event_class_hour_temp: 0.14
+    hour_cloud_loss: 0.14
+    season_hour_cloud_loss: 0.10
+    hour_base_loss: 0.08
+    hour_temp_loss: 0.05
+    hour_loss: 0.03
+    hour_cloud: 0.02
+
+  peak_risk:
+    enabled: false
+    # Uses Prophet/CatBoost only as conditional warning signals, not as normal blends.
+    hours: [16, 17, 18, 19, 20, 21]
+    min_maxtemp_f: 78.0
+    prophet_gap_threshold_mwh: 6.0
+    catboost_gap_threshold_mwh: 7.5
+    tree_gap_threshold_mwh: 3.0
+    tree_gap_signal_strength: 1.00
+    tree_gap_model_cols: [XGB_Pred_MWH, LGB_Pred_MWH, CatBoost_Pred_MWH]
+    blend: 0.55
+    cap_mwh: 10.0
+    # The fixed-origin hot-summer replay still had large Days 2-7 misses during
+    # extreme 110F-plus peak-window events, while ordinary bucket-7 rows were often
+    # already close or high. Keep the normal cap unchanged and only loosen it for
+    # rows where a benchmark model is already warning high in that narrow regime.
+    extreme_hot_peak:
+      enabled: true
+      min_forecast_day: 2
+      max_forecast_day: 7
+      min_maxtemp_f: 110.0
+      hours: [16, 17, 18]
+      cap_mwh: 16.0
+    # Suppress positive peak-risk uplift when the forecast is already high versus
+    # recent same-hour load and the weather forecast shows a sharp evening cool-down.
+    # This targets the 2026-07-29 delta-breeze-style over-uplift without removing
+    # the July 21-style hot-peak upside protection.
+    positive_guard:
+      enabled: true
+      overforecast_risk:
+        enabled: true
+        hours: [16, 17, 18, 19, 20, 21]
+        min_maxtemp_f: 95.0
+        min_raw_minus_samehour_7day_mean_mwh: 30.0
+        min_forecast_drop_next3hr_f: 6.0
+        max_positive_correction_mwh: 0.0
+        blocked_source: peak_risk_overforecast_guard_blocked
+    min_recent_underforecast_correction_mwh: 0.0
+
+  weather_robustness_hedge:
+    # Disabled while operational_residual_learner is the single production
+    # hot-peak correction path. Weather scenarios still feed bands/audits.
+    # V12.9 production weather-robustness hardening. Converts the existing +/-3F
+    # weather-scenario re-predictions from a band-only signal into a small, bounded,
+    # lead-aware UPLIFT on the hot/peak point forecast. Addresses the realized-vs-
+    # forecast-weather gap: under operational (forecast) weather the hot-peak forecast
+    # underforecasts by ~7-8 MWh on average (Jensen convexity of load in temperature),
+    # which the realized-weather-tuned correction stack does not compensate for.
+    #
+    # 2026-06-08 replay showed the prior aggressive hedge reduced underforecast
+    # risk but overshot warm-biased forecast-weather leads. Keep a small convexity
+    # guard and damp it when previous-run weather is historically warm-biased at
+    # that lead.
+    enabled: false
+    # Keep the primary realized-weather replay from scoring an operational
+    # forecast-weather hedge. Previous-run weather replay still applies it.
+    apply_to_realized_replay: false
+    hours: [16, 17, 18, 19, 20]
+    # Lower-capped ramp path for the June 12-style long-horizon hot ramp. This
+    # lets scenario curvature add a small uplift before peak hours without
+    # loosening the existing peak hedge.
+    ramp_hours: [8, 9, 10, 11, 12, 13, 14, 15]
+    ramp_min_maxtemp_f: 100.0
+    ramp_min_forecast_day: 8
+    ramp_max_forecast_day: 16
+    ramp_cap_mwh: 3.5
+    ramp_max_fraction_of_warmer_delta: 0.25
+    # Gate on the FORECASTED daily-max (operationally available), not the realized max.
+    min_maxtemp_f: 90.0
+    exclude_holidays: true
+    min_forecast_day: 1
+    max_forecast_day: 16
+    scenario_delta_f: 3.0           # must match the warmer/cooler scenario delta in bands.weather_scenarios
+    # Operational-only hedge: previous-run forecast-weather rows still show large
+    # hot-peak misses, so allow a modestly stronger bounded convexity/upper blend.
+    jensen_scale: 1.50              # scales the symmetric convexity (Jensen) term
+    upper_scenario_blend: 0.20      # small one-sided lean on the warmer scenario
+    cap_mwh: 8.0
+    max_fraction_of_warmer_delta: 0.70
+    mae_to_sigma_factor: 1.2533     # half-normal MAE -> Gaussian sigma
+    sigma_ref_lead: 7               # normalize the upper term to the longest validated lead
+    min_signed_bias_damping: 0.35   # lower bound when lead weather is warm-biased
+    # Daily-max temperature forecast error (MAE, F) by lead, from
+    # rolling_origin_replay_weather_input_error_by_lead.csv. Re-tune from the live scorecard.
+    # Leads 1-7 are measured; 8-16 are EXTRAPOLATED (gentle saturating growth toward the
+    # seasonal daily-max spread) and are NOT validated against forecast weather -- they only
+    # widen the hedge where weather is least trustworthy and remain bounded by cap_mwh.
+    dailymax_temp_mae_by_lead_f:
+      1: 1.94
+      2: 1.00
+      3: 1.92
+      4: 2.36
+      5: 4.11
+      6: 4.69
+      7: 6.30
+      8: 6.80
+      9: 7.20
+      10: 7.55
+      11: 7.85
+      12: 8.10
+      13: 8.35
+      14: 8.55
+      15: 8.75
+      16: 8.90
+    # Signed previous-run daily-max temperature bias by lead:
+    # previous-run forecast minus realized weather. Positive means forecast weather
+    # was already warm, so the hot uplift is damped rather than stacked on top.
+    dailymax_temp_bias_by_lead_f:
+      1: -0.59
+      2: 1.25
+      3: 1.85
+      4: 2.98
+      5: 3.94
+      6: 4.11
+      7: 3.97
+      8: 4.00
+      9: 4.00
+      10: 4.00
+      11: 4.00
+      12: 4.00
+      13: 4.00
+      14: 4.00
+      15: 4.00
+      16: 4.00
+
+  hot_ramp_peak_capture:
+    # Guarded peak-anchor stage for clear, extreme heat-ramp events.
+    # Promoted after replay showed the support/anchor guards flipped the sparse
+    # hot-ramp stratum from net harmful to net beneficial.
+    enabled: true
+    shadow_mode: false
+    model_version: "hot_ramp_peak_capture_guarded_prod_v2"
+    source: "hot_ramp_peak_guarded_prod"
+    # Keep sparse-event support for the walk-forward artifact; promotion safety
+    # comes from the learned-residual and anchor-support guards below.
+    min_training_days: 1
+    min_lookup_days: 1
+    allow_anchorless_shadow_fallback: true
+    train_enforce_forecast_day: false
+    # PENDING REPLAY VALIDATION (added 2026-08-09): the walk-forward lookup artifact's
+    # training frame previously required the exact same joint min_maxtemp_f AND
+    # min_dailymax_ramp_1day_f gate used at apply time. That joint condition is rare
+    # enough in the normal calibration window that build_hot_ramp_peak_capture_artifact
+    # was finding zero qualifying days for most origins and returning None, which sends
+    # every row down the static targeted_missing_slices fallback instead -- confirmed via
+    # the 20260809_205652 replay (generic lookup source fired on 4/4032 rows across
+    # forecast days 1-8). These train_* overrides only widen the pool of days used to
+    # populate the lookup; apply-time gating (min_maxtemp_f / min_dailymax_ramp_1day_f
+    # below) is unchanged.
+    train_min_maxtemp_f: 95.0
+    train_min_dailymax_ramp_1day_f: 0.0
+    min_maxtemp_f: 100.0
+    min_dailymax_ramp_1day_f: 2.0
+    strong_ramp_min_maxtemp_f: 100.0
+    strong_ramp_min_dailymax_ramp_1day_f: 3.0
+    min_forecast_day: 1
+    max_forecast_day: 7
+    hours: [16, 17, 18, 19, 20]
+    max_cloud_cover_norm: 0.40
+    spread_hours: 1.0
+    peak_timing_selector:
+      enabled: true
+      required_source: "xgb_component"
+      timing_sources:
+        - source: "xgb_component"
+          column: "XGB_Pred_MWH"
+        - source: "raw_xgb_lgb"
+          column: "Raw_Forecast_MWH"
+        - source: "recent_corrected"
+          column: "Recent_Corrected_Forecast_MWH"
+      source_priority: ["xgb_component", "raw_xgb_lgb", "recent_corrected"]
+      consensus_required: 2
+      max_consensus_hour_spread: 1.0
+      min_peak_margin_mwh: 1.0
+      allowed_hours: [16, 17, 18, 19, 20]
+      block_on_strong_hot_ramp: true
+      strong_hot_ramp_min_maxtemp_f: 100.0
+      strong_hot_ramp_min_dailymax_ramp_1day_f: 3.0
+      target_selected_hour_to_daily_peak: true
+      cap_nonselected_hours_to_target: true
+      max_selected_hour_extra_correction_mwh: 4.0
+    ramp_floor_mwh: 0.0
+    strong_ramp_floor_mwh: 4.0
+    cap_mwh: 9.0
+    strong_ramp_cap_mwh: 10.0
+    min_abs_correction_mwh: 0.25
+    block_negative_learned_residual: true
+    min_learned_residual_mwh: 0.0
+    anchor_support_guard_enabled: true
+    anchor_min_learned_residual_mwh: 4.0
+    anchor_min_maxtemp_f: 105.0
+    floor_requires_anchor_support: true
+    recent_anchor_days: 3
+    warmer_scenario_fraction: 0.25
+    lag24_ramp_slope_cap_mwh_per_f: 4.0
+    cooling_underway_guard:
+      enabled: true
+      mode: "all"
+      min_hour: 18
+      min_drop_from_dailymax_f: 5.0
+      min_forecast_drop_next3hr_f: 6.0
+      min_delta_breeze_cooling_signal: 1.0
+      min_delta_breeze_post_peak_load_decay_signal: 1.0
+      blocked_source: "hot_ramp_peak_cooling_underway_blocked"
+    targeted_missing_slices:
+      # Replay gate misses are concentrated in bounded peak-window strata outside
+      # the core 100F/day-1..7 hot-ramp artifact scope. These fixed offsets are
+      # production-active only where raw-vs-same-hour-7 state and weather gates
+      # showed net MAE improvement; avoid any blanket hot-month uplift.
+      - name: july_long_98_100_clear_moderate_state_peak_capture
+        # Tightened after 2026-08-07 replay: the full HE16-20 / +10..25 MWh
+        # raw-state band flipped harmful, while HE17-18 with +20..25 MWh state
+        # was consistently positive across the last three replay runs.
+        enabled: true
+        source: "hot_ramp_peak_targeted_july_long_98_100_clear_moderate_state"
+        months: [7]
+        min_forecast_day: 8
+        max_forecast_day: 16
+        hours: [17, 18]
+        min_maxtemp_f: 98.0
+        max_maxtemp_f_exclusive: 100.0
+        max_cloud_cover_norm: 0.10
+        min_raw_minus_samehour7_mwh: 20.0
+        max_raw_minus_samehour7_mwh_exclusive: 25.0
+        correction_mwh: 6.0
+      - name: july_long_95_98_clear_positive_state_peak_capture
+        # Disabled after 2026-08-07 replay: 23/23 rows worsened, +5.79 MWh
+        # touched-row MAE delta.
+        enabled: false
+        source: "hot_ramp_peak_targeted_july_long_95_98_clear_positive_state"
+        months: [7]
+        min_forecast_day: 8
+        max_forecast_day: 16
+        hours: [16, 17, 18, 19, 20]
+        min_maxtemp_f: 95.0
+        max_maxtemp_f_exclusive: 98.0
+        max_cloud_cover_norm: 0.10
+        min_raw_minus_samehour7_mwh: 10.0
+        correction_mwh: 6.0
+      - name: july_long_100_105_clear_high_state_peak_capture
+        # Tightened after 2026-08-07 replay: HE18-20 and earlier long-horizon
+        # rows were unstable; day-15..16 HE16-17 rows were consistently positive.
+        enabled: true
+        source: "hot_ramp_peak_targeted_july_long_100_105_clear_high_state"
+        months: [7]
+        min_forecast_day: 15
+        max_forecast_day: 16
+        hours: [16, 17]
+        min_maxtemp_f: 100.0
+        max_maxtemp_f_exclusive: 105.0
+        max_cloud_cover_norm: 0.10
+        min_raw_minus_samehour7_mwh: 25.0
+        max_raw_minus_samehour7_mwh_exclusive: 50.0
+        correction_mwh: 6.0
+      - name: june_long_100_105_clear_very_high_state_peak_capture
+        # Disabled after 2026-08-07 replay: 21/26 rows worsened, +2.88 MWh
+        # touched-row MAE delta.
+        enabled: false
+        source: "hot_ramp_peak_targeted_june_long_100_105_clear_very_high_state"
+        months: [6]
+        min_forecast_day: 8
+        max_forecast_day: 16
+        hours: [16, 17, 18, 19, 20]
+        min_maxtemp_f: 100.0
+        max_maxtemp_f_exclusive: 105.0
+        max_cloud_cover_norm: 0.10
+        min_raw_minus_samehour7_mwh: 50.0
+        correction_mwh: 5.0
+      - name: july_days2to3_90_92_clear_neutral_state_peak_capture
+        enabled: true
+        source: "hot_ramp_peak_targeted_july_days2to3_90_92_clear_neutral_state"
+        months: [7]
+        min_forecast_day: 2
+        max_forecast_day: 3
+        hours: [16, 17, 18, 19, 20]
+        min_maxtemp_f: 90.0
+        max_maxtemp_f_exclusive: 92.5
+        max_cloud_cover_norm: 0.10
+        min_raw_minus_samehour7_mwh: -10.0
+        max_raw_minus_samehour7_mwh_exclusive: 10.0
+        correction_mwh: 6.0
+      - name: june_days4to7_92_95_clear_moderate_state_peak_capture
+        enabled: true
+        source: "hot_ramp_peak_targeted_june_days4to7_92_95_clear_moderate_state"
+        months: [6]
+        min_forecast_day: 4
+        max_forecast_day: 7
+        hours: [16, 17, 18, 19, 20]
+        min_maxtemp_f: 92.5
+        max_maxtemp_f_exclusive: 95.0
+        max_cloud_cover_norm: 0.10
+        min_raw_minus_samehour7_mwh: 10.0
+        max_raw_minus_samehour7_mwh_exclusive: 25.0
+        correction_mwh: 6.0
+      - name: july_days4to7_90_92_overcast_deep_low_state_peak_capture
+        enabled: true
+        source: "hot_ramp_peak_targeted_july_days4to7_90_92_overcast_deep_low_state"
+        months: [7]
+        min_forecast_day: 4
+        max_forecast_day: 7
+        hours: [16, 17, 18, 19, 20]
+        min_maxtemp_f: 90.0
+        max_maxtemp_f_exclusive: 92.5
+        min_cloud_cover_norm: 0.60
+        min_raw_minus_samehour7_mwh: -999.0
+        max_raw_minus_samehour7_mwh_exclusive: -25.0
+        correction_mwh: 12.0
+      - name: july_days4to7_90_92_overcast_deep_low_state_he14_15_peak_capture
+        # Selective pull-forward from the 2026-08-08 late run: this covers the
+        # July day-4..7 HE14-15 overcast deep-low-state tail miss without changing
+        # the 20260808_035658 baseline hot-ramp operating hours.
+        enabled: true
+        source: "hot_ramp_peak_targeted_july_days4to7_90_92_overcast_deep_low_state_he14_15"
+        months: [7]
+        min_forecast_day: 4
+        max_forecast_day: 7
+        hours: [14, 15]
+        min_maxtemp_f: 90.0
+        max_maxtemp_f_exclusive: 92.5
+        min_cloud_cover_norm: 0.60
+        min_raw_minus_samehour7_mwh: -999.0
+        max_raw_minus_samehour7_mwh_exclusive: -25.0
+        correction_mwh: 6.0
+      - name: july_days2to3_85_90_clear_deep_low_state_peak_capture
+        enabled: true
+        source: "hot_ramp_peak_targeted_july_days2to3_85_90_clear_deep_low_state"
+        months: [7]
+        min_forecast_day: 2
+        max_forecast_day: 3
+        hours: [14, 15, 16, 17, 18]
+        min_maxtemp_f: 85.0
+        max_maxtemp_f_exclusive: 90.0
+        max_cloud_cover_norm: 0.10
+        min_raw_minus_samehour7_mwh: -999.0
+        max_raw_minus_samehour7_mwh_exclusive: -25.0
+        correction_mwh: 14.0
+      - name: july_days2to3_90_92_clear_negative_state_peak_capture
+        enabled: true
+        source: "hot_ramp_peak_targeted_july_days2to3_90_92_clear_negative_state"
+        months: [7]
+        min_forecast_day: 2
+        max_forecast_day: 3
+        hours: [16, 17, 18, 19, 20]
+        min_maxtemp_f: 90.0
+        max_maxtemp_f_exclusive: 92.5
+        max_cloud_cover_norm: 0.10
+        min_raw_minus_samehour7_mwh: -25.0
+        max_raw_minus_samehour7_mwh_exclusive: -10.0
+        correction_mwh: 6.0
+      - name: july_days4to7_95_98_clear_neutral_state_peak_capture
+        # 2026-08-08 replay sweep across the last six runs favored +7/+8 MWh;
+        # keep +7 as the conservative setting to reduce the remaining clear July
+        # day-4..7 HE16-20 underforecast pocket without flipping the slice short.
+        enabled: true
+        source: "hot_ramp_peak_targeted_july_days4to7_95_98_clear_neutral_state"
+        months: [7]
+        min_forecast_day: 4
+        max_forecast_day: 7
+        hours: [16, 17, 18, 19, 20]
+        min_maxtemp_f: 95.0
+        max_maxtemp_f_exclusive: 98.0
+        max_cloud_cover_norm: 0.10
+        min_raw_minus_samehour7_mwh: -10.0
+        max_raw_minus_samehour7_mwh_exclusive: 10.0
+        correction_mwh: 7.0
+      - name: july_days4to7_95_98_clear_mild_negative_state_peak_capture
+        # Keep the neutral clear slice from dropping out when retraining/weather
+        # drift moves raw-minus-samehour7 just below -10 MWh. Use a smaller
+        # correction than the neutral-state slice to avoid over-lifting low misses.
+        enabled: true
+        source: "hot_ramp_peak_targeted_july_days4to7_95_98_clear_mild_negative_state"
+        months: [7]
+        min_forecast_day: 4
+        max_forecast_day: 7
+        hours: [16, 17, 18, 19, 20]
+        min_maxtemp_f: 95.0
+        max_maxtemp_f_exclusive: 98.0
+        max_cloud_cover_norm: 0.10
+        min_raw_minus_samehour7_mwh: -15.0
+        max_raw_minus_samehour7_mwh_exclusive: -10.0
+        correction_mwh: 4.0
+      - name: july_days4to7_95_100_clear_high_state_peak_capture
+        enabled: true
+        source: "hot_ramp_peak_targeted_july_days4to7_95_100_clear_high_state"
+        months: [7]
+        min_forecast_day: 4
+        max_forecast_day: 7
+        hours: [16, 17, 18, 19, 20]
+        min_maxtemp_f: 95.0
+        max_maxtemp_f_exclusive: 100.0
+        max_cloud_cover_norm: 0.10
+        min_raw_minus_samehour7_mwh: 25.0
+        max_raw_minus_samehour7_mwh_exclusive: 50.0
+        correction_mwh: 6.0
+      - name: july_long_98_100_clear_negative_state_peak_capture
+        enabled: true
+        source: "hot_ramp_peak_targeted_july_long_98_100_clear_negative_state"
+        months: [7]
+        min_forecast_day: 8
+        max_forecast_day: 16
+        hours: [16, 17, 18, 19, 20]
+        min_maxtemp_f: 98.0
+        max_maxtemp_f_exclusive: 100.0
+        max_cloud_cover_norm: 0.10
+        min_raw_minus_samehour7_mwh: -25.0
+        max_raw_minus_samehour7_mwh_exclusive: -10.0
+        correction_mwh: 8.0
+      - name: july_long_90_92_clear_negative_state_peak_capture
+        enabled: true
+        source: "hot_ramp_peak_targeted_july_long_90_92_clear_negative_state"
+        months: [7]
+        min_forecast_day: 8
+        max_forecast_day: 16
+        hours: [16, 17, 18, 19, 20]
+        min_maxtemp_f: 90.0
+        max_maxtemp_f_exclusive: 92.5
+        max_cloud_cover_norm: 0.10
+        min_raw_minus_samehour7_mwh: -25.0
+        max_raw_minus_samehour7_mwh_exclusive: -10.0
+        correction_mwh: 8.0
+
+  heat_persistence_peak_capture:
+    # Guarded companion to hot_ramp_peak_capture for Aug-3-style heat
+    # persistence peaks where daily max stays extreme but the 1-day ramp is
+    # below the hot-ramp threshold. Promoted after the 2026-08-15 replay showed
+    # only 16 touched rows, all Aug day-6/7 peak rows, improving touched-row MAE
+    # from 9.92 to 6.43 MWh and seasonal MAE from 4.636 to 4.631.
+    enabled: true
+    shadow_mode: false
+    model_version: "heat_persistence_peak_capture_guarded_prod_v1"
+    source: "heat_persistence_peak_guarded_prod"
+    min_training_days: 3
+    min_lookup_days: 2
+    train_enforce_forecast_day: false
+    # PENDING REPLAY VALIDATION (added 2026-08-09): same starvation issue as
+    # hot_ramp_peak_capture's train_min_* overrides above -- requiring min_maxtemp_f AND
+    # 3+ consecutive extreme-hot days AND a high 3-day mean simultaneously for the lookup's
+    # training frame is an even narrower joint condition, so this artifact is starved more
+    # easily. These only widen the training pool; apply-time gating is unchanged.
+    train_min_maxtemp_f: 95.0
+    train_min_consecutive_extreme_days100: 1.0
+    train_min_dailymax_3day_mean_f: 95.0
+    min_maxtemp_f: 100.0
+    min_consecutive_extreme_days100: 3.0
+    min_dailymax_3day_mean_f: 100.0
+    max_dailymax_ramp_1day_f: 2.0
+    strong_min_maxtemp_f: 100.0
+    strong_min_consecutive_extreme_days100: 3.0
+    min_forecast_day: 1
+    max_forecast_day: 7
+    hours: [16, 17, 18, 19, 20]
+    max_cloud_cover_norm: 0.40
+    spread_hours: 1.0
+    persistence_floor_mwh: 0.0
+    strong_persistence_floor_mwh: 9.0
+    cap_mwh: 9.0
+    strong_cap_mwh: 9.0
+    min_abs_correction_mwh: 0.25
+    floor_applies_without_positive_anchor: true
+    # Reverted to shadow-only on 2026-08-17: strong_min_maxtemp_f/strong_min_consecutive_
+    # extreme_days100 equal the base scope thresholds, so every in-scope row is "strong",
+    # and strong_persistence_floor_mwh == strong_cap_mwh (9.0) makes the anchorless
+    # fallback a flat +9 MWh correction across the entire strong scope whenever the
+    # per-origin lookup is starved -- not just the narrow Aug day-6/7 pattern it was
+    # validated on. The 2026-08-16 4:44 PM full replay showed Hot peak days (+0.223 MAE)
+    # and Peak window 14-18 (+0.079 MAE) both got worse after this went live in
+    # production, so it stays shadow-only (diagnostics only) until validated against the
+    # full hot-peak/peak-window gate population, not just the 16-row touched slice.
+    allow_anchorless_fallback: false
+    allow_anchorless_shadow_fallback: true
+    recent_anchor_days: 3
+    warmer_scenario_fraction: 0.25
+    cooling_underway_guard:
+      enabled: true
+      mode: "all"
+      min_hour: 18
+      min_drop_from_dailymax_f: 5.0
+      min_forecast_drop_next3hr_f: 6.0
+      min_delta_breeze_cooling_signal: 1.0
+      min_delta_breeze_post_peak_load_decay_signal: 1.0
+      blocked_source: "heat_persistence_peak_cooling_underway_blocked"
+
+  operational_residual_learner:
+    # Scoped second-pass learner for residuals left after the production correction
+    # chain. The full residual signal is promoted only through a small per-row cap
+    # after replay showed it closes the Last-45 miss without broad hot uplift. The
+    # uncapped signal stays in Auto_Residual_Full_Shadow_* diagnostics.
+    enabled: true
+    shadow_mode: false
+    production_scope: "capped_full_shadow"
+    capped_full_shadow_cap_mwh: 1.0
+    model_version: "operational_residual_capped_full_shadow_v1"
+    min_rows: 336
+    backtest_min_train_rows: 336
+    target_clip_mwh: 30.0
+    learning_rate: 0.05
+    max_iter: 80
+    max_leaf_nodes: 12
+    min_samples_leaf: 24
+    l2_regularization: 4.0
+    blend: 0.35
+    cap_mwh: 6.0
+    total_cap_mwh: 8.0
+    hot_peak:
+      enabled: true
+      min_rows: 48
+      min_samples_leaf: 12
+      min_maxtemp_f: 90.0
+      hours: [16, 17, 18, 19, 20]
+      blend: 0.45
+      cap_mwh: 6.0
+      structural_shadow:
+        # Shadow-only structural hot-peak candidate inside ORL. This tests
+        # forecast-origin-safe hot/peak residual evidence without relying on the
+        # raw-vs-yesterday gate that blocks many broader hot underforecasts.
+        enabled: true
+        source: "global+hot_peak_structural_residual"
+        min_rows: 48
+        min_samples_leaf: 12
+        min_maxtemp_f: 90.0
+        hours: [16, 17, 18, 19, 20]
+        min_forecast_day: 1
+        max_forecast_day: 16
+        blend: 0.30
+        cap_mwh: 5.0
+        total_cap_mwh: 5.0
+        min_positive_correction_mwh: 1.0
+        allow_negative_correction: false
+        respect_cooling_underway_guard: true
+        below_min_source: "hot_peak_structural_below_min_correction"
+        no_positive_source: "hot_peak_structural_no_positive_correction"
+        cooling_underway_guard:
+          enabled: true
+          mode: "all"
+          min_drop_from_dailymax_f: 5.0
+          min_forecast_drop_next3hr_f: 6.0
+          cap_positive_correction_mwh: 0.0
+          blocked_source: "hot_peak_structural_cooling_underway_guard_blocked"
+      broad_shadow:
+        # Shadow-only ORL candidate for testing a broader hot-peak gate without
+        # changing Final_Forecast_MWH. Promotion decisions should come from the
+        # horizon x month x temp/cloud replay scorecards, not from loosening the
+        # production positive_gate globally.
+        enabled: true
+        source: "global+hot_peak_broad_shadow"
+        min_maxtemp_f: 90.0
+        hours: [16, 17, 18, 19, 20]
+        min_forecast_day: 1
+        max_forecast_day: 16
+        blend: 0.45
+        cap_mwh: 6.0
+        total_cap_mwh: 8.0
+        min_abs_correction_mwh: 0.25
+        allow_negative_correction: false
+        no_positive_source: "hot_peak_broad_no_positive_correction"
+        below_min_source: "hot_peak_broad_below_min_correction"
+        positive_gate:
+          enabled: true
+          min_raw_minus_samehour_7day_mean_mwh: 8.0
+          max_raw_minus_samehour_7day_mean_mwh: 45.0
+          min_raw_minus_samehour_yesterday_mwh: 0.0
+          max_final_minus_raw_forecast_mwh: 18.0
+          max_cloud_cover_norm: 0.40
+          allow_negative_correction: false
+          blocked_source: "hot_peak_broad_low_forecast_gate_blocked"
+        cooling_underway_guard:
+          enabled: true
+          mode: "all"
+          min_drop_from_dailymax_f: 5.0
+          min_forecast_drop_next3hr_f: 6.0
+          cap_positive_correction_mwh: 0.0
+          blocked_source: "hot_peak_broad_cooling_underway_guard_blocked"
+      positive_gate:
+        # Promoted toward the broad hot-peak shadow gate after replay showed it
+        # was the best overall shadow stage and still positive on hot-peak slices.
+        # Keep the same bounded raw-vs-recent state checks and cooling guard.
+        enabled: true
+        min_raw_minus_samehour_7day_mean_mwh: 8.0
+        max_raw_minus_samehour_7day_mean_mwh: 45.0
+        min_raw_minus_samehour_yesterday_mwh: 0.0
+        max_final_minus_raw_forecast_mwh: 18.0
+        min_forecast_day: 1
+        max_forecast_day: 16
+        max_cloud_cover_norm: 0.40
+        allow_negative_correction: false
+        live_ramp_gate:
+          # Day-1 escape hatch for the positive hot-peak gate when completed
+          # same-day load proves the ramp is running above recent analog levels.
+          # This keeps the correction in operational_residual_learner instead of
+          # reintroducing separate hot-ramp or peak-risk point movers.
+          enabled: true
+          source: "global+hot_peak_live_ramp_gate"
+          min_forecast_day: 1
+          max_forecast_day: 1
+          hours: [17, 18, 19]
+          min_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.20
+          min_lag1_mwh: 330.0
+          min_lag1_minus_base_forecast_mwh: 0.0
+          min_lag1_minus_samehour_yesterday_mwh: 10.0
+          min_lag1_minus_samehour_7day_mean_mwh: 35.0
+          min_live_ramp_1hr_mwh: 4.0
+        blocked_source: "hot_peak_low_forecast_gate_blocked"
+        cooling_underway_guard:
+          # Replay diagnostics showed the correction chain can over-lift hot
+          # evening rows once the load-shape has already rolled into post-peak
+          # decay. Suppress positive auto-residual lifts only when both current
+          # cooling from the daily max and the forecasted next-3-hour drop confirm
+          # that decay is underway.
+          enabled: true
+          mode: "all"
+          min_drop_from_dailymax_f: 5.0
+          min_forecast_drop_next3hr_f: 6.0
+          cap_positive_correction_mwh: 0.0
+          blocked_source: "hot_peak_cooling_underway_guard_blocked"
+
+  recent_residual:
+    enabled: true
+    recent_hours: 48
+    same_hour_days: 7
+    # V12.4: allow the online correction to key off similar weather/solar conditions.
+    min_weather_bucket_count: 6
+    blend: 0.85
+    cap_mwh: 9.0
+    decay_hours: 96
+    min_decay: 0.25
+    # Forecast-origin replay showed the pre-origin online profile over-correcting first-day hours.
+    day1_scale: 0.35
+    horizon_regime_scales:
+      # Full replay showed the online residual profile transfers less reliably past day 1,
+      # especially on clear hot Summer days where the peak/cloud stack already handles shape.
+      forecast_day_scales:
+        days2to3: 0.45
+        days4to7: 1.0
+        days8plus: 1.0
+      summer_clear_hot_days2to7:
+        enabled: true
+        min_maxtemp_f: 90.0
+        max_cloud_cover_norm: 0.20
+        scale: 0.0
+    hot_peak:
+      # Disable online residual carryover on 90F-plus peak hours.
+      min_maxtemp_f: 90.0
+      hours: [16, 17, 18, 19, 20]
+      # Disable hot-peak-specific online residual carryover; the general recent
+      # residual profile can still operate outside hot-peak rows.
+      default_scale: 0.0
+      season_scales:
+        Summer: 0.0
+    ar_residual:
+      # Conservative AR(1) carryover: residual_t = actual_t - pre_recent_forecast_t.
+      enabled: false
+      lookback_hours: 168
+      min_pairs: 24
+      max_lag_gap_hours: 1.5
+      phi_shrink_k: 72.0
+      phi_cap: 0.40
+      blend: 0.35
+      same_hour_blend: 0.20
+      same_hour_days: 7
+      cap_mwh: 4.0
+      decay_hours: 36.0
+      min_decay: 0.0
+      forecast_day_scales:
+        day1: 1.0
+        days2to3: 0.45
+        days4to7: 0.15
+        days8plus: 0.0
+    origin_day_state:
+      # Conservative block-state carryover for same-sign residual episodes.
+      # Uses only pre-origin residuals and applies a heavily shrunk day-level state.
+      enabled: false
+      lookback_days: 7
+      min_day_hours: 12
+      min_days: 2
+      min_total_hours: 36
+      latest_day_weight: 0.65
+      require_latest_recent_same_sign: true
+      shrink_days: 6.0
+      shrink_hours: 96.0
+      state_cap_mwh: 5.0
+      min_abs_state_mwh: 0.50
+      blend: 0.45
+      hourgroup_blend: 0.15
+      same_hour_blend: 0.10
+      require_component_same_sign: true
+      same_sign_threshold_mwh: 0.25
+      min_same_sign_run_hours: 4
+      short_run_scale: 0.50
+      cap_mwh: 2.0
+      decay_days: 5.0
+      min_decay: 0.0
+      forecast_day_scales:
+        day1: 0.35
+        days2to3: 0.45
+        days4to7: 0.25
+        days8plus: 0.08
+      cap_by_forecast_day:
+        day1: 1.00
+        days2to3: 1.50
+        days4to7: 1.00
+        days8plus: 0.50
+    weights:
+      recent_mean: 0.35
+      last24_mean: 0.20
+      # 2026-08-14: same_hour/temp_cloud_hourgroup promoted from the Optuna calibration
+      # search's recommended_params (repeat 2/5, median-closest across 5 repeats). Both
+      # flagged stable (range_fraction_of_search_space 0.46/0.39) unlike solar_loss_hourgroup
+      # (flagged unstable in that same run), which was left at its prior value here.
+      same_hour: 0.11187865767976685
+      hourgroup: 0.06
+      global: 0.03
+      temp_hourgroup: 0.08
+      cloud_hourgroup: 0.05
+      solar_hourgroup: 0.03
+      solar_loss_hourgroup: 0.08
+      temp_cloud_hourgroup: 0.09377899446551476
+
+diagnostics:
+  enabled: true
+  # Writes training_weight_by_temp_bucket.csv: row counts and effective sample_weight
+  # by Temperature_DailyMax bucket, for diagnosing whether hot-day under-forecast bias
+  # is a training-data sparsity problem. Off by default (adds a bit of run time).
+  training_weight_diagnostic: true
+  top_n: 100
+  min_segment_count: 6
+  stage_aware: true
+  lead_time_diagnostics: true
+  band_coverage_diagnostics: true
+  benchmark_baselines: true
+  catboost_benchmark: true
+  optuna_tuning_harness: true
+
+tuning:
+  optuna:
+    enabled: false
+    n_trials: 40
+    objective_weights:
+      overall_mae: 0.40
+      peak_mae: 0.25
+      daily_peak_miss: 0.20
+      warm_peak_bias: 0.10
+      cloudy_midday_mae: 0.05
