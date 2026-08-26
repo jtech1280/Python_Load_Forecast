@@ -2616,6 +2616,21 @@ calibration:
     max_dailymax_ramp_1day_f: 2.0
     strong_min_maxtemp_f: 100.0
     strong_min_consecutive_extreme_days100: 3.0
+    # Moderate tier (OFF by default -- null): min_consecutive_extreme_days100 above counts
+    # only days that hit 100F, so a sustained plateau that never crosses 100F reads 0
+    # consecutive days no matter how long it persists and never enters scope at all. This
+    # was a real gap: the 2026-07-27..29 replay origins (a 6-7 day plateau of 95-98F) carried
+    # by far the largest bias of any origin in that replay set (13-15 MWH vs ~6.6 for
+    # everyone else), and neither this stage nor hot_ramp_peak_capture ever fired for it.
+    # This tier is an independent, OR'd-in eligibility path (its own threshold, its own
+    # consecutive-day count -- see _consecutive_days_at_threshold) that admits a sustained
+    # sub-100F plateau into scope without loosening the 100F tier above; a row admitted only
+    # through this tier is never classified "strong", so it gets the smaller floor/cap, not
+    # the aggressive strong ones. Needs its own replay validation before enabling --
+    # set moderate_min_maxtemp_f (e.g. 95.0) and moderate_min_consecutive_days (default 5.0
+    # if unset) to turn it on.
+    moderate_min_maxtemp_f: null
+    moderate_min_consecutive_days: 5.0
     min_forecast_day: 1
     max_forecast_day: 7
     hours: [16, 17, 18, 19, 20]

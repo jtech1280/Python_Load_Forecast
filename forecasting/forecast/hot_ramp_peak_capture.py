@@ -244,6 +244,37 @@ def _consecutive_extreme_days100(
     return work["_Date"].map(count_map).reindex(values.index).astype(float)
 
 
+def _consecutive_days_at_threshold(
+    values: pd.DataFrame, threshold: float, dt: pd.Series | None = None
+) -> pd.Series:
+    """Same running-count-of-consecutive-days logic as _consecutive_extreme_days100, but at
+    an arbitrary threshold instead of the hardcoded 100.0F. Always computed fresh (no
+    ConsecutiveExtremeHotDays100-style cached-column shortcut) since a sub-100F threshold
+    has no precomputed feature column to read -- this is meant for _persistence_scope_mask's
+    moderate tier, where a multi-day plateau in the mid-90s never reaches 100F at all, so the
+    existing 100F-only counter reads 0 for it regardless of how many days it's persisted."""
+    dt = dt if dt is not None else _local_datetime(values)
+    date = _date(values, dt=dt)
+    work = pd.DataFrame(
+        {"_Date": date, "_DailyMax": _daily_max(values)}, index=values.index
+    )
+    daily = work.groupby("_Date", dropna=False)["_DailyMax"].max().reset_index()
+    daily["_Date_dt"] = pd.to_datetime(daily["_Date"], errors="coerce")
+    daily = daily.sort_values("_Date_dt")
+
+    counts: list[int] = []
+    running = 0
+    for value in pd.to_numeric(daily["_DailyMax"], errors="coerce"):
+        if pd.notna(value) and float(value) >= threshold:
+            running += 1
+        else:
+            running = 0
+        counts.append(running)
+    daily["_Count"] = counts
+    count_map = daily.set_index("_Date")["_Count"].to_dict()
+    return work["_Date"].map(count_map).reindex(values.index).astype(float)
+
+
 def _dailymax_3day_mean(values: pd.DataFrame, dt: pd.Series | None = None) -> pd.Series:
     configured = _optional_num(values, "DailyMaxTemp_3DayMean", default=np.nan)
     if configured.notna().any():
@@ -1227,11 +1258,9 @@ def _persistence_scope_mask(
         if training
         else cfg.get("min_consecutive_extreme_days100", 3.0)
     )
-    mask = (
-        hour.isin(hours)
-        & daily_max.ge(min_maxtemp_f).fillna(False)
-        & consecutive_extreme.ge(min_consecutive).fillna(False)
-    )
+    heat_condition = daily_max.ge(min_maxtemp_f).fillna(False) & consecutive_extreme.ge(
+        min_consecutive
+    ).fillna(False)
     min_3day = (
         cfg.get(
             "train_min_dailymax_3day_mean_f", cfg.get("min_dailymax_3day_mean_f", 100.0)
@@ -1240,7 +1269,40 @@ def _persistence_scope_mask(
         else cfg.get("min_dailymax_3day_mean_f", 100.0)
     )
     if min_3day is not None:
-        mask &= dailymax_3day.ge(float(min_3day)).fillna(False)
+        heat_condition &= dailymax_3day.ge(float(min_3day)).fillna(False)
+
+    # Moderate tier: origin_25/26/27 (2026-07-27..29, a 6-7 day plateau of 95-98F that
+    # never reached 100F) carried by far the largest bias of any origin in a replay set
+    # otherwise topping out around 6.6 MWH -- and both hot_ramp_peak_capture and this
+    # stage's primary tier above gate on ConsecutiveExtremeHotDays100, which is hardcoded
+    # to count only days >=100F, so a sustained sub-100F plateau reads as 0 consecutive
+    # days no matter how long it's persisted and never enters scope at all. This tier is
+    # an independent, OR'd-in eligibility path using its own threshold and its own
+    # consecutive-day count (_consecutive_days_at_threshold, not the 100F-locked one), so
+    # a long moderate-heat plateau can qualify without touching the existing 100F tier's
+    # thresholds or its "strong" classification -- moderate-tier rows are in scope but
+    # never strong, so they get the smaller floor/cap, not the aggressive strong ones.
+    # Off by default (moderate_min_maxtemp_f: null) -- opt in explicitly to test it.
+    moderate_min_maxtemp_f = cfg.get("moderate_min_maxtemp_f")
+    if moderate_min_maxtemp_f is not None:
+        moderate_min_maxtemp_f = float(moderate_min_maxtemp_f)
+        moderate_min_consecutive = float(cfg.get("moderate_min_consecutive_days", 5.0))
+        moderate_consecutive = _consecutive_days_at_threshold(
+            values, moderate_min_maxtemp_f, dt=dt
+        )
+        moderate_condition = daily_max.ge(moderate_min_maxtemp_f).fillna(
+            False
+        ) & moderate_consecutive.ge(moderate_min_consecutive).fillna(False)
+        moderate_min_3day = cfg.get(
+            "moderate_min_dailymax_3day_mean_f", moderate_min_maxtemp_f
+        )
+        if moderate_min_3day is not None:
+            moderate_condition &= dailymax_3day.ge(float(moderate_min_3day)).fillna(
+                False
+            )
+        heat_condition = heat_condition | moderate_condition
+
+    mask = hour.isin(hours) & heat_condition
     min_ramp = cfg.get("min_dailymax_ramp_1day_f")
     if min_ramp is not None:
         mask &= ramp.ge(float(min_ramp)).fillna(False)

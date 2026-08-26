@@ -7,6 +7,8 @@ import pandas as pd
 from forecasting.forecast.hot_ramp_peak_capture import (
     apply_heat_persistence_peak_capture,
     apply_hot_ramp_peak_capture,
+    _consecutive_days_at_threshold,
+    _persistence_scope_mask,
 )
 
 
@@ -246,6 +248,138 @@ class HeatPersistenceNoAnchorGuardTests(unittest.TestCase):
             out["Raw_Forecast_MWH"].idxmax(), "Heat_Persistence_Peak_Correction_MWH"
         ]
         self.assertAlmostEqual(float(peak_correction), 3.0, places=6)
+
+
+class ConsecutiveDaysAtThresholdTests(unittest.TestCase):
+    def _daily_frame(self, daily_max_by_day: list[float]) -> pd.DataFrame:
+        rows = []
+        for day_offset, temp in enumerate(daily_max_by_day):
+            date = pd.Timestamp("2026-07-01") + pd.Timedelta(days=day_offset)
+            for hour in range(24):
+                rows.append({"DT": date + pd.Timedelta(hours=hour), "Temperature_DailyMax": temp})
+        return pd.DataFrame(rows)
+
+    def test_counts_consecutive_days_at_an_arbitrary_threshold(self):
+        # 89 (below), then four straight days at/above 95 -- count should climb 0,1,2,3,4.
+        df = self._daily_frame([89.0, 95.0, 96.0, 97.0, 98.0])
+        counts = _consecutive_days_at_threshold(df, 95.0)
+        daily_counts = counts.groupby(pd.to_datetime(df["DT"]).dt.date).first()
+        self.assertEqual(list(daily_counts), [0, 1, 2, 3, 4])
+
+    def test_resets_on_a_day_below_threshold(self):
+        df = self._daily_frame([96.0, 96.0, 94.0, 96.0])
+        counts = _consecutive_days_at_threshold(df, 95.0)
+        daily_counts = counts.groupby(pd.to_datetime(df["DT"]).dt.date).first()
+        self.assertEqual(list(daily_counts), [1, 2, 0, 1])
+
+    def test_never_reaches_100f_still_counts_at_a_lower_threshold(self):
+        """The exact origin_25/26/27 (2026-07-27..29) scenario: a plateau that never
+        crosses 100F reads 0 forever from the 100F-locked counter, but a threshold-95
+        count correctly tracks how long the plateau has persisted. 94.6 is the one day
+        here that falls just under the 95F threshold, resetting the count to 0 before
+        the run of >=95F days begins."""
+        df = self._daily_frame([89.7, 94.6, 96.9, 96.4, 96.0, 95.5, 96.7, 98.1])
+        counts = _consecutive_days_at_threshold(df, 95.0)
+        daily_counts = counts.groupby(pd.to_datetime(df["DT"]).dt.date).first()
+        self.assertEqual(list(daily_counts), [0, 0, 1, 2, 3, 4, 5, 6])
+
+
+class ModeratePersistenceScopeTests(unittest.TestCase):
+    def _plateau_frame(self, daily_max_by_day: list[float]) -> pd.DataFrame:
+        rows = []
+        for day_offset, temp in enumerate(daily_max_by_day):
+            date = pd.Timestamp("2026-07-01") + pd.Timedelta(days=day_offset)
+            for hour in range(24):
+                rows.append(
+                    {
+                        "DT": date + pd.Timedelta(hours=hour),
+                        "Temperature_DailyMax": temp,
+                        "CloudCover_Norm": 0.0,
+                        "Forecast_Day": 2,
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    def _last_day_peak_hour_mask(self, df: pd.DataFrame, mask: pd.Series) -> bool:
+        last_date = pd.to_datetime(df["DT"]).dt.date.max()
+        rows = (pd.to_datetime(df["DT"]).dt.date == last_date) & (
+            pd.to_datetime(df["DT"]).dt.hour == 18
+        )
+        return bool(mask.loc[rows].iloc[0])
+
+    def test_sustained_subthreshold_plateau_is_out_of_scope_by_default(self):
+        """Regression guard: without moderate_min_maxtemp_f configured, a 7-day plateau
+        that never reaches the default 100F min_maxtemp_f must stay out of scope exactly
+        like before this tier existed."""
+        df = self._plateau_frame([89.7, 94.6, 96.9, 96.4, 96.0, 95.5, 96.7, 98.1])
+        mask, _cooling = _persistence_scope_mask(df, {})
+        self.assertFalse(self._last_day_peak_hour_mask(df, mask))
+
+    def test_moderate_tier_admits_a_sustained_plateau_once_configured(self):
+        df = self._plateau_frame([89.7, 94.6, 96.9, 96.4, 96.0, 95.5, 96.7, 98.1])
+        cfg = {"moderate_min_maxtemp_f": 95.0, "moderate_min_consecutive_days": 5.0}
+        mask, _cooling = _persistence_scope_mask(df, cfg)
+        self.assertTrue(self._last_day_peak_hour_mask(df, mask))
+
+    def test_moderate_tier_requires_the_minimum_consecutive_days(self):
+        """Only 3 consecutive days above the moderate threshold by the last day -- must
+        NOT qualify against a moderate_min_consecutive_days of 5; a single day (or a
+        short run) above 95F is not the sustained-plateau pattern this tier targets."""
+        df = self._plateau_frame([80.0, 80.0, 96.0, 96.5, 97.0])
+        cfg = {"moderate_min_maxtemp_f": 95.0, "moderate_min_consecutive_days": 5.0}
+        mask, _cooling = _persistence_scope_mask(df, cfg)
+        self.assertFalse(self._last_day_peak_hour_mask(df, mask))
+
+    def test_moderate_tier_does_not_widen_the_100f_tier_thresholds(self):
+        """Configuring the moderate tier must not loosen the existing min_maxtemp_f=100
+        tier for a short, sharp single-day spike that isn't a sustained plateau at all."""
+        df = self._plateau_frame([80.0, 80.0, 105.0])
+        cfg = {"moderate_min_maxtemp_f": 95.0, "moderate_min_consecutive_days": 5.0}
+        mask, _cooling = _persistence_scope_mask(df, cfg)
+        self.assertFalse(self._last_day_peak_hour_mask(df, mask))
+
+    def test_moderate_tier_row_is_in_scope_but_never_strong(self):
+        """A row admitted only through the moderate tier (never crossed 100F) must not
+        get classified as 'strong' -- the aggressive strong floor/cap must stay reserved
+        for genuine 100F+ persistence."""
+        dt = pd.date_range("2026-07-23 00:00", periods=24 * 8, freq="h")
+        daily_max_by_day = [89.7, 94.6, 96.9, 96.4, 96.0, 95.5, 96.7, 98.1]
+        temp = [daily_max_by_day[i // 24] for i in range(len(dt))]
+        df = pd.DataFrame(
+            {
+                "DT": dt,
+                "Raw_Forecast_MWH": 500.0,
+                "Temperature_DailyMax": temp,
+                "CloudCover_Norm": 0.0,
+                "Forecast_Day": 2,
+                "MWH_SameHour7DayMean": 520.0,
+            }
+        )
+        cfg = {
+            "enabled": True,
+            "shadow_mode": True,
+            "moderate_min_maxtemp_f": 95.0,
+            "moderate_min_consecutive_days": 5.0,
+            "min_abs_correction_mwh": 0.1,
+            "persistence_floor_mwh": 0.5,
+            "strong_persistence_floor_mwh": 9.0,
+            "cap_mwh": 9.0,
+            "strong_cap_mwh": 9.0,
+        }
+        artifact = {"metadata": {"global_peak_residual_mwh": 0.0}, "lookups": {}}
+        out = apply_heat_persistence_peak_capture(
+            df,
+            artifact,
+            {"heat_persistence_peak_capture": cfg},
+            forecast_col="Raw_Forecast_MWH",
+            evaluation_mode="shadow",
+        )
+        last_day_rows = pd.to_datetime(out["DT"]).dt.date == pd.to_datetime(out["DT"]).dt.date.max()
+        self.assertTrue((out.loc[last_day_rows, "Heat_Persistence_Peak_Scope_Flag"] == 1).any())
+        self.assertTrue((out.loc[last_day_rows, "Heat_Persistence_Peak_Strong_Flag"] == 0).all())
+        applied = out.loc[last_day_rows, "Heat_Persistence_Peak_Correction_MWH"]
+        self.assertTrue((applied > 0.0).any())
+        self.assertTrue((applied <= 9.0).all())
 
 
 if __name__ == "__main__":
