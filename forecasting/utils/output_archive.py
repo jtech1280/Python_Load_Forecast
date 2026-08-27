@@ -66,13 +66,13 @@ def save_distinct_snapshot(
             if existing_path.exists():
                 return existing_path
 
-    created_at = pd.Timestamp.utcnow().strftime("%Y%m%d_%H%M%S")
+    created_at = pd.Timestamp.now("UTC").strftime("%Y%m%d_%H%M%S")
     path = archive_dir / f"{stem}_{created_at}_{digest[:10]}.csv"
     df.to_csv(path, index=False)
 
     first_dt, last_dt = _dt_bounds(df)
     row = {
-        "CreatedAtUTC": pd.Timestamp.utcnow().isoformat(),
+        "CreatedAtUTC": pd.Timestamp.now("UTC").isoformat(),
         "Stem": stem,
         "SnapshotPath": str(path),
         "ContentHash": digest,
