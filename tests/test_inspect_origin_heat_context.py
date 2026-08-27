@@ -97,6 +97,41 @@ class MainSmokeTests(unittest.TestCase):
             out = buf.getvalue()
             self.assertIn("Temp_Excess_Over_Climatology_F on origin day: 4.0", out)
 
+    def test_prints_the_full_horizon_and_flags_a_later_hot_spike(self):
+        """Regression case: origin_17 (2026-04-26) looked untouchable by a sustained-heat
+        persistence tier from its own 60.5F origin-day temperature alone, but the gate
+        that actually surfaced a change scores the whole forecast horizon -- a hot
+        stretch 10+ days out would be invisible without printing the full sequence."""
+        with tempfile.TemporaryDirectory() as tmp:
+            origin_dt = pd.Timestamp("2026-04-26 00:00:00")
+            rows = []
+            for day_offset, temp in enumerate([60.5, 61.0, 62.0, 95.0, 96.0, 97.0]):
+                date = origin_dt + pd.Timedelta(days=day_offset)
+                for hour in range(24):
+                    rows.append({"DT": date + pd.Timedelta(hours=hour), "Temperature_DailyMax": temp})
+            bundle = RawOriginBundle(
+                origin_number=17,
+                origin_dt=origin_dt,
+                calibration_days=3,
+                raw_calibration=pd.DataFrame(),
+                raw_origin=pd.DataFrame(rows),
+                raw_weather_realism=pd.DataFrame(),
+                raw_realized_scenarios={},
+                raw_weather_scenarios={},
+            )
+            save_raw_origin_bundles([bundle], tmp)
+            import io
+            import contextlib
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                sys.argv = ["prog", "--cache-dir", tmp, "--origins", "17"]
+                inspect_mod.main()
+            out = buf.getvalue()
+            self.assertIn("Origin-day Temperature_DailyMax: 60.5", out)
+            self.assertIn("peak 97.0F on 2026-05-01", out)
+            self.assertIn("2026-05-01: 97.0 F", out)
+
     def test_missing_origin_warns_and_continues(self):
         with tempfile.TemporaryDirectory() as tmp:
             save_raw_origin_bundles([_bundle(25, "2026-07-27")], tmp)

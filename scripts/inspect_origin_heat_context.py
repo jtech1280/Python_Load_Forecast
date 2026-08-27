@@ -22,6 +22,11 @@ counted three times, and whether they look meaningfully more extreme (longer ram
 more consecutive 100F+ days, a thinner climatology reference) than the origins where the
 feature helped -- this prints exactly that context, origin by origin.
 
+Also prints the full forecast-horizon daily-max sequence from raw_origin, not just the
+origin day itself: a cool origin day (e.g. April) can still contain a hot stretch 10+
+days into its 16-day horizon that qualifies for a hot-peak-relevant gate or a persistence
+tier's trigger -- checking only the origin day's own temperature understates that.
+
 Usage:
     python scripts/inspect_origin_heat_context.py \\
         --cache-dir forecast_outputs/record_breaking_cache \\
@@ -92,6 +97,15 @@ def main() -> int:
                 print(f"  {date}: {temp:.1f} F")
         else:
             print("No trailing calibration-window daily-max temps available.")
+
+        if not origin_daily.empty:
+            peak_date = origin_daily.idxmax()
+            print(
+                f"Full forecast-horizon daily-max ({len(origin_daily)} day(s), peak "
+                f"{origin_daily.max():.1f}F on {peak_date}):"
+            )
+            for date, temp in origin_daily.items():
+                print(f"  {date}: {temp:.1f} F")
 
         consec_col = "ConsecutiveExtremeHotDays100"
         if consec_col in bundle.raw_origin.columns:
