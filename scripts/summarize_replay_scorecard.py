@@ -41,18 +41,9 @@ def _num(row: pd.Series, col: str) -> float | None:
         return None if pd.isna(value) else float(value)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description="Print the key replay scorecard rows.")
-    parser.add_argument("--output-dir", default="forecast_outputs")
-    parser.add_argument("--label", default=None)
-    parser.add_argument("--json-out", default=None)
-    args = parser.parse_args()
-
-    output_dir = Path(args.output_dir)
-    path = _scorecard_path(output_dir, args.label)
-    df = pd.read_csv(path)
-
+def _summarize_rows(df: pd.DataFrame) -> list[dict]:
     # Pre-convert Test column to string for faster comparison
+    df = df.copy()
     df["Test"] = df["Test"].astype(str)
 
     rows = []
@@ -76,6 +67,78 @@ def main() -> int:
                 ),
             }
         )
+    return rows
+
+
+def _print_comparison(current_rows: list[dict], compare_rows: list[dict], compare_path: Path) -> None:
+    current_by_test = {r["Test"]: r for r in current_rows}
+    compare_by_test = {r["Test"]: r for r in compare_rows}
+    tests_in_order = [t for t in KEY_TESTS if t in current_by_test or t in compare_by_test]
+
+    diff_rows = []
+    for test in tests_in_order:
+        cur = current_by_test.get(test)
+        cmp = compare_by_test.get(test)
+        cur_mae = cur["MAE_MWH"] if cur else None
+        cmp_mae = cmp["MAE_MWH"] if cmp else None
+        cur_bias = cur["Bias_MWH"] if cur else None
+        cmp_bias = cmp["Bias_MWH"] if cmp else None
+        diff_rows.append(
+            {
+                "Test": test,
+                "Pass_current": cur["Pass"] if cur else None,
+                "Pass_compare": cmp["Pass"] if cmp else None,
+                "MAE_current": cur_mae,
+                "MAE_compare": cmp_mae,
+                "Delta_MAE": (
+                    cur_mae - cmp_mae if cur_mae is not None and cmp_mae is not None else None
+                ),
+                "Bias_current": cur_bias,
+                "Bias_compare": cmp_bias,
+                "Delta_Bias": (
+                    cur_bias - cmp_bias
+                    if cur_bias is not None and cmp_bias is not None
+                    else None
+                ),
+            }
+        )
+    print(f"\nComparison against: {compare_path}")
+    print(
+        "(Delta = current - compare; negative Delta_MAE means current is better, "
+        "Delta_Bias moving toward 0 means current is less biased)"
+    )
+    print(
+        pd.DataFrame(diff_rows).to_string(
+            index=False, float_format=lambda x: f"{x:.4f}", na_rep="--"
+        )
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Print the key replay scorecard rows.")
+    parser.add_argument("--output-dir", default="forecast_outputs")
+    parser.add_argument("--label", default=None)
+    parser.add_argument("--json-out", default=None)
+    parser.add_argument(
+        "--compare-label",
+        default=None,
+        help=(
+            "Label of a second scorecard to diff the current one against, e.g. "
+            "'before_moderate_tier' for production_readiness_scorecard_before_moderate_tier.csv "
+            "in --output-dir. Ignored if --compare-path is also given."
+        ),
+    )
+    parser.add_argument(
+        "--compare-path",
+        default=None,
+        help="Explicit path to a second scorecard CSV to diff the current one against.",
+    )
+    args = parser.parse_args()
+
+    output_dir = Path(args.output_dir)
+    path = _scorecard_path(output_dir, args.label)
+    df = pd.read_csv(path)
+    rows = _summarize_rows(df)
 
     summary = pd.DataFrame(rows)
     print(f"Scorecard: {path}")
@@ -83,6 +146,16 @@ def main() -> int:
         print("No key scorecard rows found.")
     else:
         print(summary.to_string(index=False, float_format=lambda x: f"{x:.4f}"))
+
+    compare_path_arg = args.compare_path
+    if compare_path_arg is None and args.compare_label:
+        compare_path_arg = str(_scorecard_path(output_dir, args.compare_label))
+    if compare_path_arg:
+        compare_path = Path(compare_path_arg)
+        if not compare_path.exists():
+            raise FileNotFoundError(f"--compare scorecard not found: {compare_path}")
+        compare_rows = _summarize_rows(pd.read_csv(compare_path))
+        _print_comparison(rows, compare_rows, compare_path)
 
     backend_files = [
         "xgb_training_backend",
