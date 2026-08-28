@@ -2618,24 +2618,33 @@ calibration:
     strong_min_consecutive_extreme_days100: 3.0
     # Moderate tier (ENABLED 2026-08-27): min_consecutive_extreme_days100 above counts only
     # days that hit 100F, so a sustained plateau that never crosses 100F reads 0 consecutive
-    # days no matter how long it persists and never enters scope at all. This was a real gap:
-    # the 2026-07-27..29 replay origins (a 6-7 day plateau of 95-98F) carried by far the
-    # largest bias of any origin in that replay set (13-15 MWH vs ~6.6 for everyone else),
-    # and neither this stage nor hot_ramp_peak_capture ever fired for it. This tier is an
+    # days no matter how long it persists and never enters scope at all. This is an
     # independent, OR'd-in eligibility path (its own threshold, its own consecutive-day count
     # -- see _consecutive_days_at_threshold) that admits a sustained sub-100F plateau into
     # scope without loosening the 100F tier above; a row admitted only through this tier is
     # never classified "strong", so it gets the smaller floor/cap, not the aggressive strong
-    # ones. Validated via a same-day, confound-controlled full 27-origin A/B (build both
-    # caches back-to-back so neither carries the other's build-date data-window drift): every
-    # one of the 8 production-readiness gates improved or held flat with this on, none
-    # regressed -- Hot peak days MAE 8.374->8.131, Peak window hours 14-18 MAE 6.954->6.796,
-    # both with bias moving toward zero too, not just MAE. Per-origin, the improvement was
-    # concentrated in the origins the tier targets (the 2026-07-27..29 cluster and the nearby
-    # 2026-07-20..21 event), not spread as noise -- confirmed by checking that the one large
-    # outlier origin in that comparison (2026-04-26) never reaches 95F anywhere in its 16-day
-    # horizon, so it was mechanically untouchable by this tier and its swing was retraining
-    # noise, not a side effect.
+    # ones.
+    #
+    # Validation history / correction: an initial full-27-origin A/B compared two
+    # SEPARATELY-BUILT caches (moderate on vs off) and reported every one of the 8
+    # production-readiness gates improving. That comparison was confounded -- each
+    # --build-cache run independently retrains XGB/LGB/CatBoost, and that retraining
+    # noise (confirmed elsewhere at swings up to ~1.9 MWH per origin) dominated the
+    # result; it was not actually isolating this parameter's effect. Re-run the correct
+    # way -- scoring the SAME cached raw bundles twice, once per config, so retraining
+    # noise cannot contribute -- the isolated effect across the full 27-origin replay set
+    # is real but narrow: exactly one origin (2026-07-27) picks up a correction from this
+    # tier specifically (5 hourly rows, Strong_Flag=0), improving its Hot peak days /
+    # Peak window bias by ~0.25-0.27 MWH; every other origin is unchanged (delta exactly
+    # 0.000), including 2026-07-28 and 2026-07-29 -- the rest of that same heat wave --
+    # which turned out to already be covered by the pre-existing 100F tier via a hotter
+    # day later in their own 16-day horizons, not by this addition.
+    #
+    # Net: not harmful anywhere it fires, and it closes a genuine (if rare) blind spot --
+    # a multi-day heat plateau that never crosses 100F anywhere in a 16-day forecast --
+    # but it is not the broad accuracy improvement the original (confounded) validation
+    # suggested. Keeping it enabled on that basis; don't cite the original 8-gates-
+    # improved figures as evidence, they were noise.
     moderate_min_maxtemp_f: 95.0
     moderate_min_consecutive_days: 5.0
     min_forecast_day: 1
