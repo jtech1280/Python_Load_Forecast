@@ -14,18 +14,47 @@ which one it is, origin by origin, the same way ablate_correction_stages.py's
 _per_origin_summary already does for MAE deltas within a single cache -- this just
 does it for signed bias across two different caches.
 
-Both caches are scored through the SAME config's correction chain (whatever
---config points at, default config.yaml) -- the only thing that differs between
-the two inputs is what's baked into each cache's raw per-origin forecasts, e.g.
-record_breaking_heat's Temp_Excess_Over_Climatology_F feature being present at
-training time in one cache and absent in the other. Origins are matched by
-Replay_Origin_ID (origin_NN), which is stable across cache builds run against the
-same training window and --origin-limit.
+By default both caches are scored through the SAME config's correction chain
+(--config, default config.yaml). That's correct ONLY when the thing you're testing
+is baked in at TRAINING time -- e.g. record_breaking_heat's Temp_Excess_Over_
+Climatology_F being present in one cache's raw per-origin forecasts and absent in
+the other, which --build-cache already locked in before this script ever runs.
 
-Usage:
+It is WRONG when the thing you're testing is a correction-chain (scoring-time)
+parameter instead -- e.g. heat_persistence_peak_capture's moderate_min_maxtemp_f,
+or anything else read inside apply_origin_correction_chain rather than during raw
+bundle training. For those, pass --config-b pointing at the OTHER cache's own
+config file, so cache-a is scored with --config and cache-b with --config-b. If
+you don't, both caches silently get scored with whatever a single --config (or
+plain config.yaml if you passed neither) says for that parameter, and any
+"difference" you see is almost certainly just retraining noise between the two
+--build-cache runs, not the thing you meant to test -- this happened for real: an
+early heat_persistence_peak_capture moderate-tier validation ran exactly this
+comparison with only --config (no --config-b) while the correction-chain
+parameter under test lived in --config-b's file, and reported gate-by-gate
+"improvement" that later turned out to be unfalsifiable, because both caches were
+actually scored identically the whole time.
+
+Rule of thumb: if what differs between cache-a and cache-b is a training/feature
+config, one shared --config is fine (and cache-b's own knob doesn't matter to
+scoring). If what differs is a calibration.* correction-chain knob, you need both
+--config and --config-b, matching whatever --config each cache was BUILT with.
+
+Origins are matched by Replay_Origin_ID (origin_NN), which is stable across cache
+builds run against the same training window and --origin-limit.
+
+Usage (training-time feature, one shared config):
     python scripts/compare_origin_bias_across_caches.py \\
         --cache-a forecast_outputs/record_breaking_cache \\
         --cache-b forecast_outputs/ablation_cache \\
+        --test-name "Hot peak days"
+
+Usage (correction-chain parameter, each cache needs its own matching config):
+    python scripts/compare_origin_bias_across_caches.py \\
+        --cache-a forecast_outputs/heat_persistence_moderate_full \\
+        --config forecasting/config_heat_persistence_full_moderate.yaml \\
+        --cache-b forecast_outputs/heat_persistence_baseline_full \\
+        --config-b forecasting/config_heat_persistence_full_baseline.yaml \\
         --test-name "Hot peak days"
 """
 
@@ -81,10 +110,29 @@ def main() -> int:
     parser.add_argument("--label-a", default=None, help="Column label for --cache-a (default: its dir name)")
     parser.add_argument("--label-b", default=None, help="Column label for --cache-b (default: its dir name)")
     parser.add_argument("--test-name", default=HOT_PEAK_TEST_NAME, choices=[HOT_PEAK_TEST_NAME, PEAK_WINDOW_TEST_NAME])
-    parser.add_argument("--config", default=None, help="Path to config.yaml (default: FORECAST_CONFIG or config.yaml)")
+    parser.add_argument("--config", default=None, help="Path to config.yaml used to score --cache-a (default: FORECAST_CONFIG or config.yaml)")
+    parser.add_argument(
+        "--config-b",
+        default=None,
+        help=(
+            "Path to config.yaml used to score --cache-b. Omit to score cache-b with the SAME "
+            "config as cache-a (--config) -- correct only for a training-time-feature "
+            "comparison. For a correction-chain (scoring-time) parameter, pass this explicitly "
+            "pointing at cache-b's own config, or the comparison will silently score both "
+            "caches identically -- see the module docstring."
+        ),
+    )
     args = parser.parse_args()
 
-    config = load_forecast_config(args.config)
+    config_a = load_forecast_config(args.config)
+    config_b = load_forecast_config(args.config_b) if args.config_b else config_a
+    if args.config_b is None:
+        print(
+            "NOTE: --config-b not given -- scoring both caches with the same config "
+            f"({args.config or 'FORECAST_CONFIG or config.yaml'}). This is only correct if "
+            "what differs between the two caches was baked in at training time, not a "
+            "correction-chain parameter read at scoring time. See the module docstring."
+        )
     label_a = args.label_a or Path(args.cache_a).name
     label_b = args.label_b or Path(args.cache_b).name
 
@@ -97,8 +145,8 @@ def main() -> int:
     print(f"Loaded {len(bundles_a)} bundles from {args.cache_a} ({label_a})")
     print(f"Loaded {len(bundles_b)} bundles from {args.cache_b} ({label_b})")
 
-    replay_a = score_bundles(bundles_a, config)
-    replay_b = score_bundles(bundles_b, config)
+    replay_a = score_bundles(bundles_a, config_a)
+    replay_b = score_bundles(bundles_b, config_b)
 
     bias_a = _origin_signed_bias(replay_a, args.test_name)
     bias_b = _origin_signed_bias(replay_b, args.test_name)

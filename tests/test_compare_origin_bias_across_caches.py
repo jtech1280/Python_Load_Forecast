@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 import importlib
+import io
+import contextlib
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+import yaml
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 compare = importlib.import_module("compare_origin_bias_across_caches")
+
+from forecasting.tuning.calibration_search import RawOriginBundle, save_raw_origin_bundles
 
 
 def _replay_df(origin_id: str, hour: list[int], daily_max: float, actual: float, forecast: float) -> pd.DataFrame:
@@ -86,6 +93,91 @@ class OriginSignedBiasTests(unittest.TestCase):
     def test_empty_or_none_input_returns_empty_series(self):
         self.assertTrue(compare._origin_signed_bias(pd.DataFrame(), compare.HOT_PEAK_TEST_NAME).empty)
         self.assertTrue(compare._origin_signed_bias(None, compare.HOT_PEAK_TEST_NAME).empty)
+
+
+class MainConfigSelectionTests(unittest.TestCase):
+    """Regression coverage for the exact mistake that undermined an earlier real
+    validation: without --config-b, both caches were silently scored with the same
+    config, hiding a correction-chain-parameter difference entirely."""
+
+    def _bundle(self) -> RawOriginBundle:
+        dt = pd.date_range("2026-07-15", periods=24, freq="h")
+        df = pd.DataFrame({"DT": dt, "Temperature_DailyMax": 95.0})
+        return RawOriginBundle(
+            origin_number=1,
+            origin_dt=dt[0],
+            calibration_days=3,
+            raw_calibration=df.copy(),
+            raw_origin=df.copy(),
+            raw_weather_realism=pd.DataFrame(),
+            raw_realized_scenarios={},
+            raw_weather_scenarios={},
+        )
+
+    def test_without_config_b_both_caches_are_scored_with_the_same_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cache_a, cache_b = tmp_path / "a", tmp_path / "b"
+            save_raw_origin_bundles([self._bundle()], cache_a)
+            save_raw_origin_bundles([self._bundle()], cache_b)
+            config_a_path = tmp_path / "config_a.yaml"
+            config_a_path.write_text(yaml.safe_dump({"marker": "A"}))
+
+            seen_configs = []
+
+            def fake_score_bundles(bundles, config):
+                seen_configs.append(config)
+                return pd.DataFrame()
+
+            with patch.object(compare, "score_bundles", side_effect=fake_score_bundles):
+                with contextlib.redirect_stdout(io.StringIO()) as buf:
+                    sys.argv = [
+                        "prog",
+                        "--cache-a", str(cache_a),
+                        "--cache-b", str(cache_b),
+                        "--config", str(config_a_path),
+                    ]
+                    with self.assertRaises(SystemExit):
+                        compare.main()
+
+            self.assertEqual(len(seen_configs), 2)
+            self.assertEqual(seen_configs[0].get("marker"), "A")
+            self.assertEqual(seen_configs[1].get("marker"), "A")
+            self.assertIn("NOTE: --config-b not given", buf.getvalue())
+
+    def test_with_config_b_each_cache_is_scored_with_its_own_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cache_a, cache_b = tmp_path / "a", tmp_path / "b"
+            save_raw_origin_bundles([self._bundle()], cache_a)
+            save_raw_origin_bundles([self._bundle()], cache_b)
+            config_a_path = tmp_path / "config_a.yaml"
+            config_a_path.write_text(yaml.safe_dump({"marker": "A"}))
+            config_b_path = tmp_path / "config_b.yaml"
+            config_b_path.write_text(yaml.safe_dump({"marker": "B"}))
+
+            seen_configs = []
+
+            def fake_score_bundles(bundles, config):
+                seen_configs.append(config)
+                return pd.DataFrame()
+
+            with patch.object(compare, "score_bundles", side_effect=fake_score_bundles):
+                with contextlib.redirect_stdout(io.StringIO()) as buf:
+                    sys.argv = [
+                        "prog",
+                        "--cache-a", str(cache_a),
+                        "--cache-b", str(cache_b),
+                        "--config", str(config_a_path),
+                        "--config-b", str(config_b_path),
+                    ]
+                    with self.assertRaises(SystemExit):
+                        compare.main()
+
+            self.assertEqual(len(seen_configs), 2)
+            self.assertEqual(seen_configs[0].get("marker"), "A")
+            self.assertEqual(seen_configs[1].get("marker"), "B")
+            self.assertNotIn("NOTE: --config-b not given", buf.getvalue())
 
 
 if __name__ == "__main__":
