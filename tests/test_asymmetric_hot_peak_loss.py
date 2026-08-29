@@ -114,6 +114,59 @@ class BuildSampleWeightsRefactorRegressionTests(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(weights)))
 
 
+class BuildSampleWeightsRecencyCapTests(unittest.TestCase):
+    """The severity multipliers (peak_q95_weight * hot_peak_weight, etc.) alone can
+    clear max_weight, so folding the recency ramp in before the single final clip
+    made every extreme row collapse to the same weight regardless of recency --
+    silently erasing the recency signal for exactly the highest-priority rows.
+    build_sample_weights now clips the severity weight first, then applies recency
+    on top, so an old and a new extreme row are still distinguishable."""
+
+    def _extreme_df(self, n: int) -> pd.DataFrame:
+        rng = np.random.default_rng(0)
+        mwh = rng.normal(500, 50, n)
+        mwh[0] = 900
+        mwh[-1] = 900
+        return pd.DataFrame(
+            {
+                "MWH": mwh,
+                "Temperature_DailyMax": 95.0,
+                "Hour": 18,
+                "IsLikelySystemPeakHour": 1,
+            }
+        )
+
+    def test_recency_still_distinguishes_saturated_extreme_rows(self):
+        df = self._extreme_df(10000)
+        config = {
+            "model": {
+                "sample_weight": {
+                    "max_weight": 8.0,
+                    "recency_end_weight": 1.35,
+                }
+            }
+        }
+        weights = build_sample_weights(df, config)
+        oldest_extreme = weights[0]
+        newest_extreme = weights[-1]
+        self.assertGreater(newest_extreme, oldest_extreme)
+        self.assertAlmostEqual(newest_extreme / oldest_extreme, 1.35, places=2)
+
+    def test_ordinary_rows_keep_full_recency_ratio(self):
+        df = self._extreme_df(10000)
+        config = {
+            "model": {
+                "sample_weight": {
+                    "max_weight": 8.0,
+                    "recency_end_weight": 1.35,
+                }
+            }
+        }
+        weights = build_sample_weights(df, config)
+        ratio = weights[-100] / weights[100]
+        self.assertAlmostEqual(ratio, 1.35, places=1)
+
+
 class MakeAsymmetricHotPeakObjectiveTests(unittest.TestCase):
     def test_uses_sklearn_objective_signature_with_sample_weight_param(self):
         """XGBRegressor.fit() inspects this signature via inspect.signature() and

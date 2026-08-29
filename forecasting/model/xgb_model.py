@@ -532,12 +532,22 @@ def build_sample_weights(df: pd.DataFrame, config: dict | None = None) -> np.nda
             )
             weights[peak_window.to_numpy()] *= peak_window_weight
 
+    # Cap the peak-load/hot-peak-hour severity weight BEFORE applying the recency
+    # ramp below. Recency used to be folded in first and the combined product
+    # clipped once at the end -- since peak_q95_weight*hot_peak_weight alone
+    # already clears max_weight, every extreme row (old or new) collapsed to the
+    # same final weight regardless of recency, silently neutralizing the recency
+    # signal for exactly the rows it matters most for (recent extreme hot-peak
+    # events, e.g. load growth since older training years).
+    max_weight = float(sw_cfg.get("max_weight", 8.0))
+    weights = np.clip(weights, 0.25, max_weight)
+
     recency_end_weight = float(sw_cfg.get("recency_end_weight", 1.35))
     if recency_end_weight > 1 and len(df) > 1:
         ranks = np.linspace(1.0, recency_end_weight, len(df))
         weights *= ranks
 
-    return np.clip(weights, 0.25, float(sw_cfg.get("max_weight", 8.0)))
+    return np.clip(weights, 0.25, max_weight * max(recency_end_weight, 1.0))
 
 
 def _base_xgb_params(config: dict | None) -> dict[str, Any]:
