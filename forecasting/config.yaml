@@ -2708,23 +2708,35 @@ calibration:
       blocked_source: "heat_persistence_peak_cooling_underway_blocked"
 
   escalating_heat_persistence_correction:
-    # NOT YET VALIDATED (added 2026-08-30). Manual, rule-based correction for the
-    # 2026-07-27..29 event's failure mode: inspect_raw_bias_by_forecast_day.py showed
-    # the raw ensemble's bias on Hot peak days tracks ConsecutiveVeryHotDays95 depth
-    # directly and near-identically regardless of forecast lead time (ruling out
-    # recursive-forecast compounding), while every learned/reactive stage tested --
-    # heat_persistence_peak_capture's moderate tier, operational_residual_learner's
-    # residual model even after extending its training window from 45 to 730 days --
-    # estimates at most a few MWH of correction on the worst rows against a 15-30 MWH
-    # raw bias. This applies that depth relationship as an explicit linear rule instead
-    # of relying on a model to infer it from a handful of historical exemplars of
-    # streaks this deep. Test via score_bundles() on an existing cache (same cache,
-    # config-only change) before enabling in production -- min_consecutive_very_hot_
-    # days95/escalation_mwh_per_day/max_correction_mwh below are first-pass estimates,
-    # not yet swept or validated against the full scorecard.
-    enabled: false
-    min_consecutive_very_hot_days95: 5.0
-    escalation_mwh_per_day: 1.5
+    # ENABLED 2026-08-30. Manual, rule-based correction for the 2026-07-27..29 event's
+    # failure mode: inspect_raw_bias_by_forecast_day.py showed the raw ensemble's bias on
+    # Hot peak days tracks ConsecutiveVeryHotDays95 depth directly and near-identically
+    # regardless of forecast lead time (ruling out recursive-forecast compounding), while
+    # every learned/reactive stage tested -- heat_persistence_peak_capture's moderate tier,
+    # operational_residual_learner's residual model even after extending its training
+    # window from 45 to 730 days -- estimated at most a few MWH of correction on the worst
+    # rows against a 15-30 MWH raw bias. This applies that depth relationship as an
+    # explicit linear rule instead of relying on a model to infer it from a handful of
+    # historical exemplars of streaks this deep.
+    #
+    # Validated by scoring the SAME cached raw bundles (forecast_outputs/heat_persistence_
+    # baseline_full) against the default first-pass parameters, then a 3-way sweep, all via
+    # score_bundles() -- no retraining, so retrain noise cannot explain the result. Default
+    # params (onset=5, rate=1.5) already dropped Hot peak days from MAE 8.281/Bias 4.300 to
+    # 6.117/1.619 (still just short of the 6.0 threshold) with zero movement on Cloud/solar
+    # midday or Shoulder heat transition. The sweep below is the winner: onset=4/rate=1.75
+    # cleared the threshold (Hot peak days MAE 5.956, Bias 0.697, Pass=True) and also
+    # flipped Seasonal rolling origins to Pass as a side effect, still with zero movement on
+    # the untouched gates. Per-origin, this roughly halved final bias on every hot-event
+    # origin (e.g. 2026-07-27..29: ~14.7-15.7 MWH final bias before -> 6.1-6.8 MWH after).
+    #
+    # Not yet validated against a genuine full rolling-origin replay (fresh retrain) --
+    # only against this cached raw-bundle re-score. Peak window hours 14-18/Day 1 only/
+    # Last 45 days remain failing and are untouched by this stage (Peak window doesn't
+    # require >=90F, so much of its population is out of this rule's scope by design).
+    enabled: true
+    min_consecutive_very_hot_days95: 4.0
+    escalation_mwh_per_day: 1.75
     max_correction_mwh: 20.0
     hours: [16, 17, 18, 19, 20]
     min_maxtemp_f: 90.0
