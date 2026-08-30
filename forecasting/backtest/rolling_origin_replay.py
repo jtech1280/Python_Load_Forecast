@@ -69,6 +69,9 @@ from forecasting.forecast.hot_ramp_peak_capture import (
     heat_persistence_peak_capture_summary,
     hot_ramp_peak_capture_summary,
 )
+from forecasting.forecast.escalating_heat_persistence_correction import (
+    apply_escalating_heat_persistence_correction,
+)
 from forecasting.forecast.recursive_engine import recursive_forecast
 from forecasting.data.weather_loader import fetch_previous_run_weather
 from forecasting.features.feature_builder import build_forecast_frame
@@ -1335,6 +1338,12 @@ def apply_origin_correction_chain(
         also_update_cols=("Stage_Selected_Forecast_MWH",),
         evaluation_mode="origin_available_shadow",
     )
+    corrected = apply_escalating_heat_persistence_correction(
+        corrected,
+        config,
+        forecast_col="Final_Backtest_Forecast_MWH",
+        also_update_cols=("Stage_Selected_Forecast_MWH",),
+    )
     if not raw_weather_realism.empty:
         corrected_weather_realism = apply_origin_available_correction_chain(
             raw_weather_realism, config, artifacts
@@ -1395,6 +1404,11 @@ def apply_origin_correction_chain(
             config,
             forecast_col="Final_Backtest_Forecast_MWH",
             evaluation_mode="weather_realism_origin_available_shadow",
+        )
+        corrected_weather_realism = apply_escalating_heat_persistence_correction(
+            corrected_weather_realism,
+            config,
+            forecast_col="Final_Backtest_Forecast_MWH",
         )
         corrected = _merge_weather_realism(corrected, corrected_weather_realism)
     return corrected

@@ -101,6 +101,9 @@ from forecasting.forecast.daily_peak_shadow_model import (
     build_daily_peak_shadow_model,
     daily_peak_shadow_summary,
 )
+from forecasting.forecast.escalating_heat_persistence_correction import (
+    apply_escalating_heat_persistence_correction,
+)
 from forecasting.forecast.hot_ramp_peak_capture import (
     HEAT_PERSISTENCE_PEAK_COLUMNS,
     HOT_RAMP_PEAK_COLUMNS,
@@ -1978,6 +1981,12 @@ def run_pipeline(
         forecast_col="Final_Forecast_MWH",
         also_update_cols=("Stage_Selected_Forecast_MWH", "Calibrated_Forecast_MWH"),
         evaluation_mode="future_shadow",
+    )
+    cal_future = apply_escalating_heat_persistence_correction(
+        cal_future,
+        config,
+        forecast_col="Final_Forecast_MWH",
+        also_update_cols=("Stage_Selected_Forecast_MWH", "Calibrated_Forecast_MWH"),
     )
     _progress(progress_callback, "Applied production forecast guards", advance=1)
 
