@@ -716,10 +716,24 @@ calibration:
   #     cached data across potentially hundreds of cheap Optuna trials -- cheap per use.
   #   - The live forecast pays the full cost every single day to correct one day's
   #     forecast, and a replay pays it once per origin with no reuse -- expensive per use.
-  # rare_event_artifact_lookback_days (this key) feeds the live forecast and replay paths
-  # and defaults back to null (off) given that ratio; rare_event_artifact_lookback_days_search
-  # below is calibration_search.py's own, independent value.
-  rare_event_artifact_lookback_days: null
+  # rare_event_artifact_lookback_days (this key) feeds the live forecast and replay paths;
+  # rare_event_artifact_lookback_days_search below is calibration_search.py's own,
+  # independent value.
+  #
+  # 2026-08-30: turned on (null -> 730, matching rare_event_artifact_lookback_days_search)
+  # after operational_residual_learner was added as a third consumer of extended_lookback_df
+  # (build_operational_residual_learner in forecast_pipeline.py's build_correction_artifacts).
+  # Its residual model already had ConsecutiveVeryHotDays95/HeatPersistenceStress95 as
+  # features but was fit only on the 45-day calibration window, which rarely contains a row
+  # deep into a sustained heat streak -- confirmed on the 2026-07-27..29 event via
+  # scripts/inspect_operational_residual_shadow_signal.py (Auto_Residual_Full_Shadow_
+  # Correction_MWH stayed at 0.04-0.33 MWH mean against 15-16 MWH raw bias with the 45-day
+  # window; extending to 730 days activated the previously-dormant structural_hot_peak_
+  # shadow sub-model and meaningfully increased the shadow signal, though it still tops out
+  # around 3-4 MWH -- not sufficient on its own, but a real improvement worth paying the
+  # daily cost for). Accepting the documented per-use cost (one extra recursive XGB+LGB pass
+  # over 730 days, every live forecast run and every replay origin) for this.
+  rare_event_artifact_lookback_days: 730
   # Dedicated to calibration_search.py (forecasting.tuning.calibration_search /
   # scripts/tune_calibration_optuna.py's --build-cache step) -- see the note above for why
   # this carries its own value instead of sharing rare_event_artifact_lookback_days.
