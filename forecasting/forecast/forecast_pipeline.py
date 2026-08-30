@@ -284,14 +284,15 @@ def build_correction_artifacts(
 ) -> dict:
     """Build correction lookups and the origin-available recent profile from raw residuals.
 
-    extended_lookback_df is an optional, longer-history raw backtest frame used only to
-    train hot_ramp_peak_capture/heat_persistence_peak_capture's walk-forward lookup
-    artifacts. Those two stages require a rare joint condition (e.g. hot AND ramping on
-    the same day), so the normal calibration window often contains zero qualifying days,
-    the artifact comes back empty, and the stage silently falls back to its static
-    targeted_missing_slices rules for the whole origin. Passing a wider window here gives
-    the lookup more days to draw from without changing the window used for every other
-    correction stage. Omit (default) to preserve prior behavior exactly.
+    extended_lookback_df is an optional, longer-history raw backtest frame used to train
+    hot_ramp_peak_capture/heat_persistence_peak_capture's walk-forward lookup artifacts,
+    and operational_residual_learner's residual model. All three need days that are rare
+    within the normal (short) calibration window -- a joint hot-and-ramping day for the
+    first two, a day deep into a sustained heat streak for the third -- so the normal
+    window often contains zero or few qualifying rows and the stage falls back to static
+    rules or simply has nothing to learn a response from. Passing a wider window here
+    gives each of them more days to draw from without changing the window used for every
+    other correction stage. Omit (default) to preserve prior behavior exactly.
     """
     cal_cfg = config.get("calibration", {})
     artifacts = {
@@ -472,8 +473,30 @@ def build_correction_artifacts(
                 "focused_shape_residual_artifact"
             ),
         )
+        # The 45-day calibration window rarely contains a row deep into a sustained
+        # heat streak (ConsecutiveVeryHotDays95 double digits), so the residual model
+        # has the persistence features but no exemplars to learn a response from --
+        # the same rare-event training-window gap already fixed for hot_ramp_peak_
+        # capture/heat_persistence_peak_capture via extended_lookback_df. Reuse the
+        # same wider backtest here instead of duplicating the recent window.
+        auto_residual_training_basis = auto_residual_basis
+        if extended_lookback_df is not None and not extended_lookback_df.empty:
+            auto_residual_training_basis = _apply_v126_correction_chain_to_frame(
+                raw_df=extended_lookback_df,
+                config=config,
+                targeted_meta_artifact=artifacts["targeted_meta_artifact"],
+                lookup_bundle=artifacts["lookup_bundle"],
+                heat_lookup=artifacts["heat_lookup"],
+                warm_lookup=artifacts["warm_lookup"],
+                cloud_solar_lookup=artifacts["cloud_solar_lookup"],
+                simulate_recent=True,
+                apply_auto_residual=False,
+                focused_shape_residual_artifact=artifacts.get(
+                    "focused_shape_residual_artifact"
+                ),
+            )
         artifacts["operational_residual_artifact"] = build_operational_residual_learner(
-            auto_residual_basis,
+            auto_residual_training_basis,
             config,
             forecast_col="Final_Backtest_Forecast_MWH",
         )
