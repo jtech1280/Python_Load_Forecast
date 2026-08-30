@@ -720,20 +720,32 @@ calibration:
   # rare_event_artifact_lookback_days_search below is calibration_search.py's own,
   # independent value.
   #
-  # 2026-08-30: turned on (null -> 730, matching rare_event_artifact_lookback_days_search)
-  # after operational_residual_learner was added as a third consumer of extended_lookback_df
-  # (build_operational_residual_learner in forecast_pipeline.py's build_correction_artifacts).
-  # Its residual model already had ConsecutiveVeryHotDays95/HeatPersistenceStress95 as
-  # features but was fit only on the 45-day calibration window, which rarely contains a row
-  # deep into a sustained heat streak -- confirmed on the 2026-07-27..29 event via
-  # scripts/inspect_operational_residual_shadow_signal.py (Auto_Residual_Full_Shadow_
-  # Correction_MWH stayed at 0.04-0.33 MWH mean against 15-16 MWH raw bias with the 45-day
-  # window; extending to 730 days activated the previously-dormant structural_hot_peak_
-  # shadow sub-model and meaningfully increased the shadow signal, though it still tops out
-  # around 3-4 MWH -- not sufficient on its own, but a real improvement worth paying the
-  # daily cost for). Accepting the documented per-use cost (one extra recursive XGB+LGB pass
-  # over 730 days, every live forecast run and every replay origin) for this.
-  rare_event_artifact_lookback_days: 730
+  # 2026-08-30: briefly turned on (null -> 730, matching rare_event_artifact_lookback_days_
+  # search) after operational_residual_learner was added as a third consumer of extended_
+  # lookback_df (build_operational_residual_learner in forecast_pipeline.py's build_
+  # correction_artifacts). Its residual model already had ConsecutiveVeryHotDays95/
+  # HeatPersistenceStress95 as features but was fit only on the 45-day calibration window,
+  # which rarely contains a row deep into a sustained heat streak -- confirmed on the
+  # 2026-07-27..29 event via scripts/inspect_operational_residual_shadow_signal.py
+  # (Auto_Residual_Full_Shadow_Correction_MWH stayed at 0.04-0.33 MWH mean against 15-16 MWH
+  # raw bias with the 45-day window; extending to 730 days activated the previously-dormant
+  # structural_hot_peak_shadow sub-model and increased the shadow signal, though it still
+  # tops out around 3-4 MWH).
+  #
+  # Reverted back to null the same day: the resulting full rolling-origin replay (real
+  # retrain, not a cached re-score) was a mixed/net-negative result -- Hot peak days MAE
+  # got WORSE (8.352->8.454) despite bias improving, Max_Underforecast_MWH on Hot peak days
+  # got worse (31.67->34.06 MW), and Days 2-3/Shoulder heat transition bias also regressed.
+  # This key isn't only consumed by operational_residual_learner -- hot_ramp_peak_capture and
+  # heat_persistence_peak_capture also build their lookup artifacts from extended_lookback_df,
+  # and this was the first time either of them ever got the 730-day window in an actual
+  # replay/production run (previously only calibration_search.py's --build-cache path used
+  # it, via the separate rare_event_artifact_lookback_days_search key). So the mixed result
+  # reflects three stages changing behavior at once, not just the one this was meant to fix.
+  # Back to null pending an isolated re-run (this change alone, without it) to confirm how
+  # much of that regression this key caused versus the model.sample_weight max_weight fix
+  # that landed the same day.
+  rare_event_artifact_lookback_days: null
   # Dedicated to calibration_search.py (forecasting.tuning.calibration_search /
   # scripts/tune_calibration_optuna.py's --build-cache step) -- see the note above for why
   # this carries its own value instead of sharing rare_event_artifact_lookback_days.
