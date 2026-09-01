@@ -16,6 +16,11 @@ env/
 .env.local
 forecasting/config.local.yaml
 
+# Disposable per-test config copies (generated during ad-hoc score_bundles()/
+# ablation testing, e.g. config_escalating_*.yaml, config_*_test.yaml) --
+# never meant to be committed.
+forecasting/config_*.yaml
+
 # IDE/project-local metadata
 .idea/
 .vscode/
