@@ -4,15 +4,37 @@ param(
     [switch]$UseLocalWeatherCalibration,
     [string]$FixedOriginsFile = "",
     [int]$ReplayMaxOrigins = 0,
+    [ValidateSet("server", "gpu-cu12")]
+    [string]$SetupProfile = "server",
+    [string]$ServerConfigLocal = "",
+    [string]$CudaDevice = "0",
+    [int]$ReplayProcesses = 0,
     [string]$PythonExe = "",
     [switch]$UpdateEnvironment,
-    [switch]$SkipBootstrap
+    [switch]$ForceRecreateVenv,
+    [switch]$SkipBootstrap,
+    [switch]$NoSaveSql
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 & (Join-Path $PSScriptRoot "import_forecast_env.ps1") -RepoRoot $RepoRoot
+
+if (![string]::IsNullOrWhiteSpace($ServerConfigLocal)) {
+    if (![System.IO.Path]::IsPathRooted($ServerConfigLocal)) {
+        $ServerConfigLocal = Join-Path $RepoRoot $ServerConfigLocal
+    }
+    if (!(Test-Path $ServerConfigLocal)) {
+        throw "Server override config not found: $ServerConfigLocal"
+    }
+    $env:FORECAST_CONFIG_LOCAL = $ServerConfigLocal
+}
+
+if (![string]::IsNullOrWhiteSpace($CudaDevice)) {
+    $env:FORECAST_CUDA_DEVICE = $CudaDevice
+    $env:CUDA_VISIBLE_DEVICES = $CudaDevice
+}
 
 if ([string]::IsNullOrWhiteSpace($RunLabel)) {
     $RunLabel = "overnight_" + (Get-Date -Format "yyyyMMdd_HHmmss")
@@ -22,8 +44,27 @@ $usingDefaultPython = [string]::IsNullOrWhiteSpace($PythonExe)
 if ($usingDefaultPython) {
     $PythonExe = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 }
-if (($usingDefaultPython -and !$SkipBootstrap) -and ((!(Test-Path $PythonExe)) -or $UpdateEnvironment)) {
-    & (Join-Path $PSScriptRoot "setup_forecast_environment.ps1")
+
+function Test-PythonExeRuns {
+    param([string]$Path)
+    if (!(Test-Path $Path)) {
+        return $false
+    }
+    try {
+        & $Path -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)" *> $null
+        return $LASTEXITCODE -eq 0
+    }
+    catch {
+        return $false
+    }
+}
+
+if (($usingDefaultPython -and !$SkipBootstrap) -and ($ForceRecreateVenv -or $UpdateEnvironment -or !(Test-PythonExeRuns -Path $PythonExe))) {
+    $setupArgs = @{ Profile = $SetupProfile }
+    if ($ForceRecreateVenv) {
+        $setupArgs.ForceRecreate = $true
+    }
+    & (Join-Path $PSScriptRoot "setup_forecast_environment.ps1") @setupArgs
     if ($LASTEXITCODE -ne 0) {
         throw "Environment bootstrap failed."
     }
@@ -48,7 +89,9 @@ $FiveMinArg = $(if ($DisableFiveMinLoad) { " --disable-five-min-load" } else { "
 $LocalWeatherArg = $(if ($UseLocalWeatherCalibration) { " --use-local-weather-calibration" } else { "" })
 $FixedOriginsArg = $(if ([string]::IsNullOrWhiteSpace($FixedOriginsFile)) { "" } else { " --replay-fixed-origins-file `"$FixedOriginsFile`"" })
 $ReplayMaxOriginsArg = $(if ($ReplayMaxOrigins -gt 0) { " --replay-max-origins $ReplayMaxOrigins" } else { "" })
-$MainCommand = "`"$PythonExe`" -u -m forecasting.main --save-csv --rolling-origin-replay --safe-performance$FiveMinArg$LocalWeatherArg$FixedOriginsArg$ReplayMaxOriginsArg"
+$ReplayProcessesArg = $(if ($ReplayProcesses -gt 0) { " --replay-processes $ReplayProcesses" } else { "" })
+$NoSaveSqlArg = $(if ($NoSaveSql) { " --no-save-sql" } else { "" })
+$MainCommand = "`"$PythonExe`" -u -m forecasting.main --save-csv --rolling-origin-replay --safe-performance$FiveMinArg$LocalWeatherArg$FixedOriginsArg$ReplayMaxOriginsArg$ReplayProcessesArg$NoSaveSqlArg"
 
 $startedAt = Get-Date
 @{
@@ -57,11 +100,19 @@ $startedAt = Get-Date
     started_at = $startedAt.ToString("o")
     command = $MainCommand
     validation_command = "`"$PythonExe`" -u scripts\validate_weather_interval_coverage.py --replay-path forecast_outputs\rolling_origin_replay_results.csv --output-label $RunLabel"
+    setup_profile = $SetupProfile
+    force_recreate_venv = [bool]$ForceRecreateVenv
+    config_local = $env:FORECAST_CONFIG_LOCAL
+    cuda_device = $env:FORECAST_CUDA_DEVICE
+    data_root = $env:FORECAST_DATA_ROOT
+    solar_parquet_root = $env:FORECAST_SOLAR_PARQUET_ROOT
     log_path = $LogPath
+    no_save_sql = [bool]$NoSaveSql
     five_min_load_enabled = !$DisableFiveMinLoad
     local_weather_calibration_enabled = [bool]$UseLocalWeatherCalibration
     fixed_origins_file = $FixedOriginsFile
     replay_max_origins = $ReplayMaxOrigins
+    replay_processes = $ReplayProcesses
 } | ConvertTo-Json -Depth 4 | Set-Content -Path $StatusPath -Encoding UTF8
 
 try {
@@ -126,11 +177,19 @@ try {
         started_at = $startedAt.ToString("o")
         finished_at = $finishedAt.ToString("o")
         elapsed_minutes = [Math]::Round(($finishedAt - $startedAt).TotalMinutes, 2)
+        setup_profile = $SetupProfile
+        force_recreate_venv = [bool]$ForceRecreateVenv
+        config_local = $env:FORECAST_CONFIG_LOCAL
+        cuda_device = $env:FORECAST_CUDA_DEVICE
+        data_root = $env:FORECAST_DATA_ROOT
+        solar_parquet_root = $env:FORECAST_SOLAR_PARQUET_ROOT
         log_path = $LogPath
+        no_save_sql = [bool]$NoSaveSql
         five_min_load_enabled = !$DisableFiveMinLoad
         local_weather_calibration_enabled = [bool]$UseLocalWeatherCalibration
         fixed_origins_file = $FixedOriginsFile
         replay_max_origins = $ReplayMaxOrigins
+        replay_processes = $ReplayProcesses
     } | ConvertTo-Json -Depth 4 | Set-Content -Path $StatusPath -Encoding UTF8
 
     exit $exitCode
@@ -144,11 +203,19 @@ catch {
         started_at = $startedAt.ToString("o")
         finished_at = $finishedAt.ToString("o")
         elapsed_minutes = [Math]::Round(($finishedAt - $startedAt).TotalMinutes, 2)
+        setup_profile = $SetupProfile
+        force_recreate_venv = [bool]$ForceRecreateVenv
+        config_local = $env:FORECAST_CONFIG_LOCAL
+        cuda_device = $env:FORECAST_CUDA_DEVICE
+        data_root = $env:FORECAST_DATA_ROOT
+        solar_parquet_root = $env:FORECAST_SOLAR_PARQUET_ROOT
         log_path = $LogPath
+        no_save_sql = [bool]$NoSaveSql
         five_min_load_enabled = !$DisableFiveMinLoad
         local_weather_calibration_enabled = [bool]$UseLocalWeatherCalibration
         fixed_origins_file = $FixedOriginsFile
         replay_max_origins = $ReplayMaxOrigins
+        replay_processes = $ReplayProcesses
     } | ConvertTo-Json -Depth 4 | Set-Content -Path $StatusPath -Encoding UTF8
     throw
 }

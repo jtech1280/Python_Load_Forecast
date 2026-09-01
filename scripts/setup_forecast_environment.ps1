@@ -2,6 +2,7 @@ param(
     [string]$PythonExe = "",
     [ValidateSet("server", "gpu-cu12")]
     [string]$Profile = "server",
+    [switch]$ForceRecreate,
     [switch]$SkipInstall,
     [switch]$SkipGpuValidation
 )
@@ -11,6 +12,7 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 
 $VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+$VenvDir = Join-Path $RepoRoot ".venv"
 $RequirementsByProfile = @{
     "server" = (Join-Path $RepoRoot "requirements-server-lock.txt")
     "gpu-cu12" = (Join-Path $RepoRoot "requirements-gpu-cu12-lock.txt")
@@ -69,6 +71,32 @@ function Resolve-BasePython {
     throw "No usable Python 3.12+ interpreter found. Install Python 3.12+ or pass -PythonExe C:\path\to\python.exe."
 }
 
+function Test-VenvPython {
+    if (!(Test-Path $VenvPython)) {
+        return $false
+    }
+    try {
+        & $VenvPython -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)" *> $null
+        return $LASTEXITCODE -eq 0
+    }
+    catch {
+        return $false
+    }
+}
+
+function Remove-BrokenRepoVenv {
+    $repoFull = [System.IO.Path]::GetFullPath($RepoRoot).TrimEnd('\')
+    $venvFull = [System.IO.Path]::GetFullPath($VenvDir).TrimEnd('\')
+    $expectedPrefix = $repoFull + [System.IO.Path]::DirectorySeparatorChar
+
+    if ((Split-Path -Leaf $venvFull) -ne ".venv" -or !$venvFull.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to remove unexpected virtual environment path: $venvFull"
+    }
+
+    Write-Warning "Removing stale or broken repo-local virtual environment: $venvFull"
+    Remove-Item -LiteralPath $venvFull -Recurse -Force
+}
+
 function Write-GpuDriverProbe {
     if ($Profile -ne "gpu-cu12") {
         return
@@ -91,6 +119,13 @@ function Write-GpuDriverProbe {
 }
 
 Write-GpuDriverProbe
+
+if ($ForceRecreate -and (Test-Path $VenvDir)) {
+    Remove-BrokenRepoVenv
+}
+elseif ((Test-Path $VenvPython) -and !(Test-VenvPython)) {
+    Remove-BrokenRepoVenv
+}
 
 if (!(Test-Path $VenvPython)) {
     $basePython = Resolve-BasePython

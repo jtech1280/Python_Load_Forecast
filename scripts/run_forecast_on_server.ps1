@@ -2,14 +2,20 @@ param(
     [string]$RunLabel = "",
     [ValidateSet("safe", "gpu-priority", "cpu-only")]
     [string]$BackendMode = "safe",
+    [ValidateSet("server", "gpu-cu12")]
+    [string]$SetupProfile = "server",
+    [string]$ServerConfigLocal = "",
+    [string]$CudaDevice = "0",
     [string]$PythonExe = "",
     [switch]$UpdateEnvironment,
+    [switch]$ForceRecreateVenv,
     [switch]$SkipBootstrap,
     [switch]$SkipSolarForecast,
     [switch]$AllowStaleSolarForecast,
     [switch]$NoSaveSql,
     [switch]$RollingOriginReplay,
     [int]$ReplayMaxOrigins = 0,
+    [int]$ReplayProcesses = 0,
     [switch]$SkipDiagnostics,
     [switch]$RunDashboard,
     [int]$DashboardPort = 8050
@@ -20,6 +26,21 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 & (Join-Path $PSScriptRoot "import_forecast_env.ps1") -RepoRoot $RepoRoot
 
+if (![string]::IsNullOrWhiteSpace($ServerConfigLocal)) {
+    if (![System.IO.Path]::IsPathRooted($ServerConfigLocal)) {
+        $ServerConfigLocal = Join-Path $RepoRoot $ServerConfigLocal
+    }
+    if (!(Test-Path $ServerConfigLocal)) {
+        throw "Server override config not found: $ServerConfigLocal"
+    }
+    $env:FORECAST_CONFIG_LOCAL = $ServerConfigLocal
+}
+
+if (![string]::IsNullOrWhiteSpace($CudaDevice)) {
+    $env:FORECAST_CUDA_DEVICE = $CudaDevice
+    $env:CUDA_VISIBLE_DEVICES = $CudaDevice
+}
+
 if ([string]::IsNullOrWhiteSpace($RunLabel)) {
     $RunLabel = "forecast_" + (Get-Date -Format "yyyyMMdd_HHmmss")
 }
@@ -29,8 +50,26 @@ if ($usingDefaultPython) {
     $PythonExe = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 }
 
-if (($usingDefaultPython -and !$SkipBootstrap) -and ((!(Test-Path $PythonExe)) -or $UpdateEnvironment)) {
-    & (Join-Path $PSScriptRoot "setup_forecast_environment.ps1")
+function Test-PythonExeRuns {
+    param([string]$Path)
+    if (!(Test-Path $Path)) {
+        return $false
+    }
+    try {
+        & $Path -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)" *> $null
+        return $LASTEXITCODE -eq 0
+    }
+    catch {
+        return $false
+    }
+}
+
+if (($usingDefaultPython -and !$SkipBootstrap) -and ($ForceRecreateVenv -or $UpdateEnvironment -or !(Test-PythonExeRuns -Path $PythonExe))) {
+    $setupArgs = @{ Profile = $SetupProfile }
+    if ($ForceRecreateVenv) {
+        $setupArgs.ForceRecreate = $true
+    }
+    & (Join-Path $PSScriptRoot "setup_forecast_environment.ps1") @setupArgs
     if ($LASTEXITCODE -ne 0) {
         throw "Environment bootstrap failed."
     }
@@ -76,6 +115,7 @@ if ($AllowStaleSolarForecast) { $argsList += "--allow-stale-solar-forecast" }
 if ($NoSaveSql) { $argsList += "--no-save-sql" }
 if ($RollingOriginReplay) { $argsList += "--rolling-origin-replay" }
 if ($ReplayMaxOrigins -gt 0) { $argsList += @("--replay-max-origins", "$ReplayMaxOrigins") }
+if ($ReplayProcesses -gt 0) { $argsList += @("--replay-processes", "$ReplayProcesses") }
 if ($SkipDiagnostics) { $argsList += "--skip-diagnostics" }
 if ($RunDashboard) { $argsList += @("--run-dashboard", "--dashboard-port", "$DashboardPort") }
 
@@ -90,12 +130,20 @@ $commandText = "`"$PythonExe`" " + (($argsList | ForEach-Object {
     started_at = $startedAt.ToString("o")
     command = $commandText
     backend_mode = $BackendMode
+    setup_profile = $SetupProfile
+    force_recreate_venv = [bool]$ForceRecreateVenv
+    config_local = $env:FORECAST_CONFIG_LOCAL
+    cuda_device = $env:FORECAST_CUDA_DEVICE
+    data_root = $env:FORECAST_DATA_ROOT
+    solar_parquet_root = $env:FORECAST_SOLAR_PARQUET_ROOT
     log_path = $LogPath
     output_dir = $OutputDir
+    no_save_sql = [bool]$NoSaveSql
     skip_solar_forecast = [bool]$SkipSolarForecast
     allow_stale_solar_forecast = [bool]$AllowStaleSolarForecast
     rolling_origin_replay = [bool]$RollingOriginReplay
     replay_max_origins = $ReplayMaxOrigins
+    replay_processes = $ReplayProcesses
 } | ConvertTo-Json -Depth 4 | Set-Content -Path $StatusPath -Encoding UTF8
 
 Write-Host "Starting forecast: $RunLabel"
@@ -116,12 +164,20 @@ try {
         elapsed_minutes = [Math]::Round(($finishedAt - $startedAt).TotalMinutes, 2)
         command = $commandText
         backend_mode = $BackendMode
+        setup_profile = $SetupProfile
+        force_recreate_venv = [bool]$ForceRecreateVenv
+        config_local = $env:FORECAST_CONFIG_LOCAL
+        cuda_device = $env:FORECAST_CUDA_DEVICE
+        data_root = $env:FORECAST_DATA_ROOT
+        solar_parquet_root = $env:FORECAST_SOLAR_PARQUET_ROOT
         log_path = $LogPath
         output_dir = $OutputDir
+        no_save_sql = [bool]$NoSaveSql
         skip_solar_forecast = [bool]$SkipSolarForecast
         allow_stale_solar_forecast = [bool]$AllowStaleSolarForecast
         rolling_origin_replay = [bool]$RollingOriginReplay
         replay_max_origins = $ReplayMaxOrigins
+        replay_processes = $ReplayProcesses
     } | ConvertTo-Json -Depth 4 | Set-Content -Path $StatusPath -Encoding UTF8
 
     Write-Host "Forecast finished with exit code $exitCode"
@@ -138,8 +194,17 @@ catch {
         elapsed_minutes = [Math]::Round(($finishedAt - $startedAt).TotalMinutes, 2)
         command = $commandText
         backend_mode = $BackendMode
+        setup_profile = $SetupProfile
+        force_recreate_venv = [bool]$ForceRecreateVenv
+        config_local = $env:FORECAST_CONFIG_LOCAL
+        cuda_device = $env:FORECAST_CUDA_DEVICE
+        data_root = $env:FORECAST_DATA_ROOT
+        solar_parquet_root = $env:FORECAST_SOLAR_PARQUET_ROOT
         log_path = $LogPath
         output_dir = $OutputDir
+        rolling_origin_replay = [bool]$RollingOriginReplay
+        replay_max_origins = $ReplayMaxOrigins
+        replay_processes = $ReplayProcesses
     } | ConvertTo-Json -Depth 4 | Set-Content -Path $StatusPath -Encoding UTF8
     throw
 }

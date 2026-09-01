@@ -123,6 +123,38 @@ class PathHelperTests(unittest.TestCase):
             )
 
 
+class BuildCachePipelineInputsTests(unittest.TestCase):
+    def test_build_cache_reuses_cached_pipeline_inputs(self):
+        config = {
+            "calibration": {},
+            "training": {"rolling_origin_replay": {"parallel": {"enabled": False}}},
+        }
+        train_df = pd.DataFrame(
+            {
+                "DT": pd.date_range("2026-07-01", periods=4, freq="h"),
+                "Actual_MWH": [1.0, 2.0, 3.0, 4.0],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            with (
+                patch(
+                    "forecasting.forecast.forecast_pipeline.run_pipeline",
+                    return_value={"historical_fit_df": train_df, "features": ["Hour"]},
+                ) as mock_pipeline,
+                patch.object(
+                    ablate,
+                    "build_raw_origin_bundle_cache",
+                    return_value=[cache_dir / "origin_001_20260701.pkl"],
+                ) as mock_build,
+            ):
+                ablate.build_cache(config, cache_dir, origin_limit=None)
+                ablate.build_cache(config, cache_dir, origin_limit=None)
+
+        self.assertEqual(mock_pipeline.call_count, 1)
+        self.assertEqual(mock_build.call_count, 2)
+
+
 class RunAblationSmokeTests(unittest.TestCase):
     def setUp(self):
         rng = np.random.default_rng(13)

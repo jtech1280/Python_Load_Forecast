@@ -13,7 +13,9 @@ from forecasting.tuning.calibration_search import (
     build_raw_origin_bundle_cache,
     build_raw_origin_bundles,
     load_raw_origin_bundles,
+    load_raw_origin_pipeline_inputs,
     save_raw_origin_bundles,
+    save_raw_origin_pipeline_inputs,
     score_bundles,
 )
 
@@ -136,6 +138,44 @@ class RawOriginBundlePersistenceTests(unittest.TestCase):
         self.assertEqual(
             load_raw_origin_bundles("/nonexistent/path/does/not/exist"), []
         )
+
+    def test_pipeline_input_cache_round_trips_for_same_config(self):
+        train_df = pd.DataFrame(
+            {"DT": pd.date_range("2026-07-01", periods=2, freq="h"), "Load": [1.0, 2.0]}
+        )
+        features = ["Hour", "Temperature"]
+        config = {"model": {"xgboost": {"tree_method": "hist"}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            path = save_raw_origin_pipeline_inputs(train_df, features, config, cache_dir)
+            self.assertTrue(path.exists())
+
+            loaded = load_raw_origin_pipeline_inputs(config, cache_dir)
+
+        self.assertIsNotNone(loaded)
+        loaded_df, loaded_features = loaded
+        pd.testing.assert_frame_equal(loaded_df, train_df)
+        self.assertEqual(loaded_features, features)
+
+    def test_pipeline_input_cache_ignores_different_config(self):
+        train_df = pd.DataFrame(
+            {"DT": pd.date_range("2026-07-01", periods=2, freq="h"), "Load": [1.0, 2.0]}
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            save_raw_origin_pipeline_inputs(
+                train_df,
+                ["Hour"],
+                {"model": {"xgboost": {"max_depth": 3}}},
+                cache_dir,
+            )
+
+            loaded = load_raw_origin_pipeline_inputs(
+                {"model": {"xgboost": {"max_depth": 4}}},
+                cache_dir,
+            )
+
+        self.assertIsNone(loaded)
 
 
 class ExtendedLookbackWiringTests(unittest.TestCase):
@@ -308,6 +348,93 @@ class ExtendedLookbackWiringTests(unittest.TestCase):
             self.assertEqual(mock_backtest.call_count, 2)
             self.assertEqual(len(paths), 2)
             self.assertTrue(all(path.exists() for path in paths))
+            loaded = load_raw_origin_bundles(cache_dir)
+            self.assertEqual(sorted(b.origin_number for b in loaded), [1, 2])
+
+    def test_build_raw_origin_bundle_cache_reuses_existing_bundles(self):
+        dts = [pd.Timestamp("2026-07-01"), pd.Timestamp("2026-07-02")]
+        config = {
+            "calibration": {},
+            "training": {"rolling_origin_replay": {"parallel": {"enabled": False}}},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            existing = _minimal_bundle(1)
+            existing.origin_dt = dts[0]
+            save_raw_origin_bundles([existing], cache_dir)
+
+            with (
+                patch(
+                    "forecasting.tuning.calibration_search._origin_candidates",
+                    return_value=dts,
+                ),
+                patch(
+                    "forecasting.tuning.calibration_search.run_rolling_backtest",
+                    return_value=pd.DataFrame({"DT": [dts[0]]}),
+                ) as mock_backtest,
+                patch(
+                    "forecasting.tuning.calibration_search._origin_raw_forecasts",
+                    side_effect=lambda work, features, config, origin_dt, horizon_days, origin_number: (
+                        pd.DataFrame({"DT": [origin_dt]}),
+                        pd.DataFrame(),
+                        {},
+                        {},
+                    ),
+                ),
+            ):
+                paths = build_raw_origin_bundle_cache(
+                    pd.DataFrame({"DT": dts}),
+                    features=[],
+                    config=config,
+                    cache_dir=cache_dir,
+                )
+
+            self.assertEqual(mock_backtest.call_count, 1)
+            self.assertEqual(len(paths), 2)
+            loaded = load_raw_origin_bundles(cache_dir)
+            self.assertEqual(sorted(b.origin_number for b in loaded), [1, 2])
+
+    def test_build_raw_origin_bundle_cache_can_rebuild_existing_bundles(self):
+        dts = [pd.Timestamp("2026-07-01"), pd.Timestamp("2026-07-02")]
+        config = {
+            "calibration": {},
+            "training": {"rolling_origin_replay": {"parallel": {"enabled": False}}},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            existing = _minimal_bundle(1)
+            existing.origin_dt = dts[0]
+            save_raw_origin_bundles([existing], cache_dir)
+
+            with (
+                patch(
+                    "forecasting.tuning.calibration_search._origin_candidates",
+                    return_value=dts,
+                ),
+                patch(
+                    "forecasting.tuning.calibration_search.run_rolling_backtest",
+                    return_value=pd.DataFrame({"DT": [dts[0]]}),
+                ) as mock_backtest,
+                patch(
+                    "forecasting.tuning.calibration_search._origin_raw_forecasts",
+                    side_effect=lambda work, features, config, origin_dt, horizon_days, origin_number: (
+                        pd.DataFrame({"DT": [origin_dt]}),
+                        pd.DataFrame(),
+                        {},
+                        {},
+                    ),
+                ),
+            ):
+                paths = build_raw_origin_bundle_cache(
+                    pd.DataFrame({"DT": dts}),
+                    features=[],
+                    config=config,
+                    cache_dir=cache_dir,
+                    skip_existing=False,
+                )
+
+            self.assertEqual(mock_backtest.call_count, 2)
+            self.assertEqual(len(paths), 2)
             loaded = load_raw_origin_bundles(cache_dir)
             self.assertEqual(sorted(b.origin_number for b in loaded), [1, 2])
 

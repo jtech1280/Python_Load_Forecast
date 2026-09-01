@@ -87,7 +87,9 @@ from forecasting.diagnostics.forecast_diagnostics import (
 from forecasting.tuning.calibration_search import (
     RawOriginBundle,
     build_raw_origin_bundle_cache,
+    load_raw_origin_pipeline_inputs,
     load_raw_origin_bundles,
+    save_raw_origin_pipeline_inputs,
     score_bundles,
 )
 
@@ -218,18 +220,42 @@ def _print_progress(label: str, advance: int = 0, total: int | None = None) -> N
     print(f"[{stamp}] {label}", flush=True)
 
 
-def build_cache(config: dict, cache_dir: Path, origin_limit: int | None) -> None:
-    from forecasting.forecast.forecast_pipeline import run_pipeline
+def build_cache(
+    config: dict,
+    cache_dir: Path,
+    origin_limit: int | None,
+    *,
+    skip_existing: bool = True,
+    rebuild_pipeline_inputs: bool = False,
+) -> None:
+    cached_inputs = None
+    if not rebuild_pipeline_inputs:
+        cached_inputs = load_raw_origin_pipeline_inputs(config, cache_dir)
 
-    print(
-        "Running the full pipeline once to build train_df/features for the raw-forecast cache "
-        "(this step trains the production XGB/LGB/CatBoost models on the full history and was "
-        "previously silent end-to-end -- now prints each pipeline stage as it starts)...",
-        flush=True,
-    )
-    results = run_pipeline(config, progress_callback=_print_progress)
-    train_df = results["historical_fit_df"]
-    features = results.get("features", [])
+    if cached_inputs is not None:
+        train_df, features = cached_inputs
+        print(
+            f"[{time.strftime('%H:%M:%S')}] Loaded cached pipeline inputs from {cache_dir} "
+            f"({len(train_df)} training rows, {len(features)} features).",
+            flush=True,
+        )
+    else:
+        from forecasting.forecast.forecast_pipeline import run_pipeline
+
+        print(
+            "Running the full pipeline once to build train_df/features for the raw-forecast cache "
+            "(this step trains the production XGB/LGB/CatBoost models on the full history and was "
+            "previously silent end-to-end -- now prints each pipeline stage as it starts)...",
+            flush=True,
+        )
+        results = run_pipeline(config, progress_callback=_print_progress)
+        train_df = results["historical_fit_df"]
+        features = results.get("features", [])
+        path = save_raw_origin_pipeline_inputs(train_df, features, config, cache_dir)
+        print(
+            f"[{time.strftime('%H:%M:%S')}] Saved pipeline inputs for future resumes: {path}",
+            flush=True,
+        )
     print(
         f"[{time.strftime('%H:%M:%S')}] Pipeline done: {len(train_df)} training rows "
         f"({train_df['DT'].min()} to {train_df['DT'].max()}), {len(features)} features. "
@@ -242,6 +268,7 @@ def build_cache(config: dict, cache_dir: Path, origin_limit: int | None) -> None
         config,
         cache_dir=cache_dir,
         origin_limit=origin_limit,
+        skip_existing=skip_existing,
     )
     if not paths:
         raise SystemExit(
@@ -443,6 +470,16 @@ def main() -> int:
         help="Cap the number of origins used when building the cache (useful for a quick smoke test)",
     )
     parser.add_argument(
+        "--rebuild-existing-cache",
+        action="store_true",
+        help="Rebuild origin bundles even when origin_*.pkl files already exist in --cache-dir.",
+    )
+    parser.add_argument(
+        "--rebuild-pipeline-input-cache",
+        action="store_true",
+        help="Rerun the full pipeline setup even when cached train_df/features match the config.",
+    )
+    parser.add_argument(
         "--stages",
         action="append",
         dest="stages",
@@ -468,7 +505,13 @@ def main() -> int:
     config = load_forecast_config(args.config)
 
     if args.build_cache:
-        build_cache(config, args.cache_dir, args.origin_limit)
+        build_cache(
+            config,
+            args.cache_dir,
+            args.origin_limit,
+            skip_existing=not args.rebuild_existing_cache,
+            rebuild_pipeline_inputs=args.rebuild_pipeline_input_cache,
+        )
         return 0
 
     if not args.cache_dir.exists():

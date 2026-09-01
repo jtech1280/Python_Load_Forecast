@@ -1,0 +1,3006 @@
+project:
+  name: V12.9 Weather-Realism Peak-Risk Hardening
+  timezone: America/Los_Angeles
+  output_dir: ${FORECAST_OUTPUT_DIR:-forecast_outputs}
+paths:
+  data_root: ${FORECAST_DATA_ROOT}
+sql:
+  dsn_name: Informatica LRS
+  history_query: 'SELECT *
+
+    FROM [Informatica].[dbo].[METRIX_HRLY_SYSTEM_VW]
+
+    ORDER BY YEAR, MONTH, DAY
+
+    '
+actuals_import:
+  limit_to_prior_day_he24: true
+  cutoff_days_back: 1
+  cutoff_hour_ending: 24
+output_sql:
+  enabled: true
+  dashboard_read_enabled: true
+  dsn_name: Forecast_DB
+  database: ''
+  schema: Forecasting
+  run_table: LoadForecastRun
+  forecast_table: LoadForecastOutput
+  backtest_table: LoadForecastBacktest
+  weather_table: LoadForecastWeather
+  forecast_weather_archive_table: LoadForecastWeatherArchive
+  replay_tables:
+    rolling_origin_replay_summary: LoadForecastReplaySummary
+    rolling_origin_replay_results: LoadForecastReplayResult
+    rolling_origin_replay_origin_coverage: LoadForecastReplayOriginCoverage
+    rolling_origin_replay_scorecard: LoadForecastReplayScorecard
+    rolling_origin_replay_weather_realism_scorecard: LoadForecastReplayWeatherRealismScorecard
+    rolling_origin_replay_weather_input_error_by_lead: LoadForecastReplayWeatherInputErrorByLead
+    rolling_origin_replay_weather_input_sensitivity_scorecard: LoadForecastReplayWeatherInputSensitivityScorecard
+    rolling_origin_replay_weather_input_sensitivity_detail: LoadForecastReplayWeatherInputSensitivityDetail
+    rolling_origin_replay_stage_metrics: LoadForecastReplayStageMetric
+    rolling_origin_replay_origin_metrics_by_stage: LoadForecastReplayOriginMetricByStage
+    rolling_origin_replay_scored_season_metrics_by_stage: LoadForecastReplayScoredSeasonMetricByStage
+    rolling_origin_replay_origin_season_metrics_by_stage: LoadForecastReplayOriginSeasonMetricByStage
+    rolling_origin_replay_horizon_metrics_by_stage: LoadForecastReplayHorizonMetricByStage
+    rolling_origin_replay_peak_window_metrics_by_stage: LoadForecastReplayPeakWindowMetricByStage
+    rolling_origin_replay_peak_window_expansion_scorecard: LoadForecastReplayPeakWindowExpansionScorecard
+    rolling_origin_replay_peak_window_14to20_metrics_by_stage: LoadForecastReplayPeakWindow14to20MetricByStage
+    rolling_origin_replay_extreme_heat_peak_scorecard: LoadForecastReplayExtremeHeatPeakScorecard
+    rolling_origin_replay_extreme_heat_peak_metrics_by_stage: LoadForecastReplayExtremeHeatPeakMetricByStage
+    rolling_origin_replay_hot_peak_metrics_by_stage: LoadForecastReplayHotPeakMetricByStage
+    rolling_origin_replay_hot_peak_candidate_metrics_by_stage: LoadForecastReplayHotPeakCandidateMetricByStage
+    rolling_origin_replay_hot_peak_candidate_scorecard: LoadForecastReplayHotPeakCandidateScorecard
+    rolling_origin_replay_hot_ramp_peak_metrics_by_stage: LoadForecastReplayHotRampPeakMetricByStage
+    rolling_origin_replay_hot_ramp_peak_candidate_scorecard: LoadForecastReplayHotRampPeakCandidateScorecard
+    rolling_origin_replay_heat_persistence_peak_metrics_by_stage: LoadForecastReplayHeatPersistencePeakMetricByStage
+    rolling_origin_replay_heat_persistence_peak_candidate_scorecard: LoadForecastReplayHeatPersistencePeakCandidateScorecard
+    rolling_origin_replay_shoulder_heat_metrics_by_stage: LoadForecastReplayShoulderHeatMetricByStage
+    rolling_origin_replay_cloud_solar_midday_metrics_by_stage: LoadForecastReplayCloudSolarMiddayMetricByStage
+    rolling_origin_replay_weekend_metrics_by_stage: LoadForecastReplayWeekendMetricByStage
+    rolling_origin_replay_holiday_metrics_by_stage: LoadForecastReplayHolidayMetricByStage
+    rolling_origin_replay_long_horizon_metrics_by_stage: LoadForecastReplayLongHorizonMetricByStage
+    rolling_origin_replay_delta_breeze_shape_metrics_by_stage: LoadForecastReplayDeltaBreezeShapeMetricByStage
+    rolling_origin_replay_daily_peak_shadow_window_scorecard: LoadForecastReplayDailyPeakShadowWindowScorecard
+    rolling_origin_replay_daily_peak_miss_by_stage: LoadForecastReplayDailyPeakMissByStage
+    rolling_origin_replay_daily_peak_he18_20_miss_by_stage: LoadForecastReplayDailyPeakHE18to20MissByStage
+    rolling_origin_replay_heat_analog_shadow_metrics: LoadForecastReplayHeatAnalogShadowMetric
+    rolling_origin_replay_heat_analog_shadow_detail: LoadForecastReplayHeatAnalogShadowDetail
+    rolling_origin_replay_focused_guard_rule_audit: LoadForecastReplayFocusedGuardRuleAudit
+    rolling_origin_replay_timing: LoadForecastReplayTiming
+    production_readiness_scorecard: LoadForecastProductionReadinessScorecard
+  chunksize: 10
+five_min_load:
+  enabled: true
+  dsn_name: PowerSupply
+  query: "SELECT\n  StartPST,\n  EndPST,\n  TimeFrameName,\n  Interval,\n  Quantity,\n\
+    \  QualityName\nFROM PowerSupply.Measurements.Load_Native\nWHERE SourceTypeName\
+    \ = 'PI_AF'\n  AND LocationName = 'RsvlCityGate'\n  AND TimeFrameName = '5min'\n\
+    \  AND MeasurementTypeName = 'SystemLoad'\n  AND StartPST >= DATEADD(day, -180,\
+    \ GETDATE())\nORDER BY StartPST\n"
+  max_carry_forward_hours: 24
+  future_model_features_enabled: false
+  use_as_recent_hourly_load: true
+  respect_actuals_import_cutoff: false
+  min_completed_intervals_per_hour: 10
+  replace_overlap_hours: 0
+local_weather:
+  enabled: true
+  dsn_name: PowerSupply
+  query: "SELECT  'BERRY_ST' AS STATIONID,\n        'Temperature' AS CONCEPTID,\n\
+    \        [PacificStandardTime] AS DT,\n        [Value] AS READING\n  FROM [PowerSupply].[Measurements].[Weather_Hourly]\n\
+    \  WHERE LocationName = 'Berry Sub'\n  AND PacificStandardTime >= '2005-05-14'\n\
+    ORDER BY PacificStandardTime\n"
+  temperature_calibration:
+    enabled: false
+    blend: 1.0
+    cap_f: 8.0
+    max_abs_delta_f: 25.0
+    min_count: 24
+    dynamic_enabled: true
+    dynamic_window_hours: 24
+    dynamic_cap_f: 6.0
+    dynamic_blend: 0.8
+    dynamic_decay_hours: 48.0
+openmeteo:
+  latitude: 38.7521
+  longitude: -121.288
+  hourly_vars:
+  - temperature_2m
+  - relative_humidity_2m
+  - cloud_cover
+  - wind_speed_10m
+  - wind_direction_10m
+  - precipitation
+  - shortwave_radiation
+  - is_day
+  temperature_unit: fahrenheit
+  wind_speed_unit: mph
+  precipitation_unit: inch
+  timezone: America/Los_Angeles
+  forecast_past_hours: 36
+  historical_url: https://archive-api.open-meteo.com/v1/archive
+  forecast_url: https://api.open-meteo.com/v1/forecast
+  previous_runs_url: https://previous-runs-api.open-meteo.com/v1/forecast
+  historical_start: '2020-01-01'
+  historical_end: null
+  historical_revision_window_days: 8
+  forecast_days: 16
+  cache_dir: ${FORECAST_WEATHER_CACHE_DIR:-weather_cache}
+  forecast_import_policy:
+    enabled: true
+    target_local_time: 06:30
+    import_window_start_local: 06:00
+    import_window_end_local: 07:45
+    daily_cache_stem: forecast_weather_gfs_06z
+  gfs_run_lock:
+    enabled: true
+    single_runs_url: https://single-runs-api.open-meteo.com/v1/forecast
+    model: gfs_seamless
+    run_hour_utc: 6
+    latest_cache_stem: forecast_weather_gfs_06z_latest
+    allow_import_outside_window: true
+    allow_previous_day_fallback: true
+    allow_standard_forecast_fallback: false
+    allow_forecast_results_fallback: false
+  ensemble_outlier_guard:
+    enabled: false
+    ensemble_url: https://ensemble-api.open-meteo.com/v1/ensemble
+    model: gfs_seamless
+    min_deviation_f: 10.0
+    min_members: 5
+  ssl_verify: true
+  ssl_use_os_truststore: true
+  ssl_ca_bundle: null
+btm:
+  mode: hardcoded
+  tsv_path: ''
+  sql_table: '[Informatica].[dbo].[BTM_SOLAR_MONTHLY_INSTALLATIONS]'
+  extend_future_months: 36
+  current_nameplate_mw: 63.5
+  max_observed_impact_mw: 23.0
+solar:
+  parquet_root: ${FORECAST_SOLAR_PARQUET_ROOT}
+  parquet_root_candidates:
+  - ${FORECAST_DATA_ROOT}
+  - D:/PY_LRS
+  - C:/PY_LRS
+  weather_cache_dir: ${FORECAST_SOLAR_WEATHER_CACHE_DIR:-weather_cache/solar_weather}
+  driver: ${FORECAST_SOLAR_DRIVER:-ODBC Driver 17 for SQL Server}
+  dest_server: ${FORECAST_SOLAR_DEST_SERVER:-re-lrs-db-1}
+  dest_db: ${FORECAST_SOLAR_DEST_DB:-Forecast}
+  production_source: ${FORECAST_SOLAR_PRODUCTION_SOURCE:-rec-parquet}
+training:
+  train_start_date: '2020-01-01'
+  backtest_days: 45
+  seasonal_backtests: false
+  rolling_origin_replay:
+    enabled: false
+    parallel:
+      enabled: true
+      processes: 4
+      serial_when_catboost_gpu: true
+    horizon_days: 16
+    calibration_days: 45
+    origin_selection: fixed
+    origin_step_days: 28
+    max_origins: 27
+    fixed_origins:
+    - '2024-10-13'
+    - '2024-11-09 23:00:00-08:00'
+    - '2025-03-30'
+    - '2025-04-27'
+    - '2025-05-25'
+    - '2025-06-22'
+    - '2025-07-20'
+    - '2025-08-17'
+    - '2025-09-14'
+    - '2025-10-12'
+    - '2025-11-08 23:00:00-08:00'
+    - '2025-12-06 23:00:00-08:00'
+    - '2026-01-03 23:00:00-08:00'
+    - '2026-01-31 23:00:00-08:00'
+    - '2026-02-28 23:00:00-08:00'
+    - '2026-03-29'
+    - '2026-04-26'
+    - '2026-05-24'
+    - '2026-05-28'
+    - '2026-05-29'
+    - '2026-07-06'
+    - '2026-07-07'
+    - '2026-07-20'
+    - '2026-07-21'
+    - '2026-07-27'
+    - '2026-07-28'
+    - '2026-07-29'
+    origins_per_season: 4
+    scorecard_min_origins_per_season: 3
+    min_train_days: 365
+    skip_prophet: true
+    skip_calibration_prophet: true
+    skip_catboost: false
+    log_timing: true
+    allow_concurrent: false
+    weather_realism:
+      enabled: true
+      max_previous_days: 7
+features:
+  record_breaking_heat:
+    enabled: false
+    percentile: 95.0
+    day_of_year_window_days: 10
+    min_reference_years: 3
+    active_months:
+    - 6
+    - 7
+    - 8
+    - 9
+hardware:
+  performance_mode: max
+  cpu_threads: -1
+  max_workers: -1
+  set_thread_env: true
+  overwrite_thread_env: false
+  parallel_tree_training: true
+  force_parallel_cpu_training: false
+  use_gpu: true
+  xgb_gpu_api: auto
+  fallback_to_cpu: true
+  use_lgb_gpu: false
+model:
+  ensemble_weights:
+    xgb: 0.1
+    lgb: 0.55
+    prophet: 0.0
+    catboost: 0.35
+  early_stopping:
+    enabled: true
+    validation_days: 45
+    min_train_rows: 2000
+    rounds: 75
+    metric: mae
+  monotonic_constraints:
+    enabled: true
+  xgb:
+    n_estimators: 1400
+    max_depth: 8
+    learning_rate: 0.025
+    min_child_weight: 3
+    subsample: 0.85
+    colsample_bytree: 0.85
+    reg_lambda: 2.0
+    reg_alpha: 0.05
+    gamma: 0.0
+    tree_method: hist
+    device: cuda
+    gpu_api: auto
+    random_state: 42
+    n_jobs: -1
+  sample_weight:
+    peak_q90: 0.9
+    peak_q95: 0.95
+    peak_q90_weight: 1.8
+    peak_q95_weight: 3.0
+    hot_day_min_f: 90.0
+    hot_peak_hours:
+    - 16
+    - 17
+    - 18
+    - 19
+    - 20
+    hot_peak_weight: 1.9
+    non_business_hot_peak_weight: 1.35
+    peak_window_hours:
+    - 14
+    - 15
+    - 16
+    - 17
+    - 18
+    peak_window_min_maxtemp_f: 75.0
+    peak_window_weight: 1.18
+    recency_end_weight: 1.35
+    max_weight: 9.0
+  asymmetric_loss:
+    enabled: false
+    under_forecast_penalty_multiplier: 2.0
+  lgb:
+    use_gpu: false
+    device_type: gpu
+    n_estimators: 1200
+    learning_rate: 0.025
+    num_leaves: 96
+    min_child_samples: 25
+    subsample: 0.85
+    colsample_bytree: 0.85
+    reg_lambda: 2.0
+    reg_alpha: 0.05
+    random_state: 42
+    n_jobs: -1
+  catboost:
+    enabled: true
+    blend_into_production: true
+    iterations: 1400
+    depth: 8
+    learning_rate: 0.025
+    l2_leaf_reg: 4.0
+    loss_function: RMSE
+    random_seed: 42
+    require_gpu: ${FORECAST_CATBOOST_REQUIRE_GPU:-true}
+    task_type: ${FORECAST_CATBOOST_TASK_TYPE:-GPU}
+    devices: '0'
+    gpu_eval_metric: RMSE
+    thread_count: -1
+    gpu_ram_part: 0.2
+  prophet:
+    enabled: true
+    blend_into_production: false
+    growth: linear
+    seasonality_mode: multiplicative
+    yearly_seasonality: true
+    weekly_seasonality: true
+    daily_seasonality: true
+    changepoint_prior_scale: 0.08
+    seasonality_prior_scale: 6.0
+    holidays_prior_scale: 5.0
+    interval_width: 0.8
+    add_roseville_holidays: true
+    holiday_years_forward: 3
+    add_monthly_seasonality: true
+    monthly_period_days: 30.5
+    monthly_fourier_order: 5
+    add_annual_peak_seasonality: true
+    annual_peak_period_days: 365.25
+    annual_peak_fourier_order: 12
+    standardize_regressors: true
+    regressor_prior_scale: 0.25
+    min_train_rows: 1440
+    max_train_rows: 13140
+    fit_algorithm: LBFGS
+    fit_iter: 10000
+forecast:
+  horizons:
+    next_day_hours: 24
+    next_week_days: 7
+    full_days: 16
+  require_full_window: false
+quality:
+  valid_temp_min_f: 10.0
+  valid_temp_max_f: 120.0
+  max_interpolation_gap_hours: 3
+  weather_timestamp_shift_hours: 0
+bands:
+  default_percent_band: 0.055
+  band_floor_mwh: 4.0
+  band_scale: 0.55
+  residual_based: true
+  hot_bucket_band_floor:
+    enabled: true
+    rules:
+    - name: hot_95_to_100_overnight_min_band
+      min_daily_max_temp_f: 95.0
+      max_daily_max_temp_f: 100.0
+      hour_groups:
+      - Overnight
+      min_band_mwh: 5.5
+    - name: hot_100_plus_overnight_min_band
+      min_daily_max_temp_f: 100.0
+      hour_groups:
+      - Overnight
+      min_band_mwh: 7.5
+    - name: hot_100_plus_early_overnight_min_band
+      min_daily_max_temp_f: 100.0
+      hours:
+      - 0
+      - 1
+      min_band_mwh: 13.0
+    - name: hot_100_plus_late_evening_min_band
+      min_daily_max_temp_f: 100.0
+      hour_groups:
+      - LateEvening
+      min_band_mwh: 15.0
+  weather_input_risk:
+    enabled: true
+    max_day: 16
+    day1_multiplier: 1.45
+    days2to3_multiplier: 1.6
+    days4to7_multiplier: 3.0
+    days8to16_multiplier: 3.5
+    cloudy_solar_multiplier: 1.45
+    hot_peak_multiplier: 1.6
+    shoulder_heat_multiplier: 1.45
+    high_temp_min_maxtemp_f: 95.0
+    high_temp_multiplier: 2.2
+    cap_multiplier: 6.0
+  weather_scenarios:
+    enabled: true
+    cap_scenario_deltas: true
+    delta_caps:
+      default_mwh: 18.0
+      cloud_solar_mwh: 14.0
+      hot_peak_mwh: 22.0
+      days8to16_mwh: 16.0
+      hot_peak_min_maxtemp_f: 90.0
+      cloud_solar_min_loss_mw: 1.25
+    scenarios:
+    - name: warmer
+      temperature_delta_f: 3.0
+    - name: hot_stress_5f
+      temperature_delta_f: 5.0
+    - name: cooler
+      temperature_delta_f: -3.0
+    - name: cloudier_solar_loss
+      cloud_cover_delta_norm: 0.3
+      ghi_multiplier: 0.65
+    - name: severe_cloud_solar_loss
+      cloud_cover_delta_norm: 0.45
+      ghi_multiplier: 0.5
+    - name: clearer_high_solar
+      cloud_cover_delta_norm: -0.3
+      ghi_multiplier: 1.15
+  conformal_weather:
+    enabled: true
+    quantile: 0.8
+    safety_multiplier: 1.0
+    scenario_spread_multiplier: 1.0
+    horizon_safety_multipliers:
+      Day1: 0.85
+    normal_only_safety_multiplier: 0.92
+    allow_narrowing: false
+    min_group_rows: 20
+    min_global_rows: 50
+    min_fraction_of_multiplier_band: 0.0
+anomaly_exclusions:
+  enabled: true
+  events:
+  - name: 2026-07-15 DER dispatch
+    date: '2026-07-15'
+    he_start: 18
+    he_end: 21
+calibration:
+  seasonal_enabled: true
+  rare_event_artifact_lookback_days: null
+  rare_event_artifact_lookback_days_search: 730
+  stage_selector:
+    enabled: true
+    day1_stage: targeted_meta
+    days2to3_stage: recent_corrected
+    days4to7_stage: recent_corrected
+    non_horizon_apply_bias_uplift: false
+    non_horizon_apply_hot_uplift: false
+    suppress_bias_uplift_for_stage_overrides: true
+    suppress_hot_uplift_for_stage_overrides: true
+    day1_peak_risk_weight: 0.4
+    hot_peak_min_maxtemp_f: 90.0
+    hot_peak_final_stack_override: false
+    peak_window_stage_override:
+      enabled: false
+      hours:
+      - 14
+      - 15
+      - 16
+      - 17
+      - 18
+      min_forecast_day: 1
+      max_forecast_day: 16
+      min_maxtemp_f: -999.0
+      stage: recent_corrected
+      exclude_hot_peak: true
+      suppress_bias_uplift: true
+      suppress_hot_uplift: true
+    cloud_solar_stage_override:
+      enabled: true
+      hours:
+      - 10
+      - 11
+      - 12
+      - 13
+      - 14
+      - 15
+      - 16
+      min_forecast_day: 1
+      max_forecast_day: 1
+      min_cloud_cover_norm: 0.6
+      min_solar_loss_mw: 1.25
+      stage: peak_risk
+      suppress_bias_uplift: true
+      suppress_hot_uplift: true
+    cloud_solar_raw_override:
+      enabled: false
+      hours:
+      - 10
+      - 11
+      - 12
+      - 13
+      min_cloud_cover_norm: 0.6
+      min_solar_loss_mw: 1.25
+      stage: raw
+      suppress_bias_uplift: true
+      suppress_hot_uplift: true
+    conditional_stage_overrides:
+    - name: day1_summer_hot_peak_peak_risk_override
+      enabled: false
+      seasons:
+      - Summer
+      hours:
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      min_maxtemp_f: 103.0
+      min_forecast_day: 1
+      max_forecast_day: 1
+      stage: peak_risk
+      only_if_stage_above_current: true
+    - name: summer_high_temp_raw_override
+      enabled: true
+      seasons:
+      - Summer
+      hours:
+      - 9
+      - 10
+      - 11
+      - 12
+      - 13
+      min_daily_max_temp_bucket: 6
+      min_forecast_day: 1
+      max_forecast_day: 16
+      stage: raw
+    long_horizon_peak_hot_month_correction:
+      enabled: true
+      min_forecast_day: 8
+      max_forecast_day: 16
+      peak_hours:
+      - 14
+      - 15
+      - 16
+      - 17
+      - 18
+      hot_hours:
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      hot_min_maxtemp_f: 90.0
+      hot_min_maxtemp_f_by_month:
+        '5': 93.0
+      peak_cap_mwh: 8.0
+      hot_cap_mwh: 12.0
+      peak_exclude_holidays: true
+      hot_exclude_holidays: true
+      peak_month_offsets_mwh:
+        '1': 0.0
+        '2': 0.8
+        '3': 0.0
+        '4': -1.54
+        '5': 0.0
+        '6': -2.12
+        '7': 7.76
+        '8': -1.39
+        '9': -6.44
+        '10': 2.21
+        '11': 5.75
+        '12': -1.16
+      peak_month_forecast_day_scales:
+        '9':
+          '8': 0.0
+          '9': 0.0
+          '10': 0.0
+          '13': 0.0
+      hot_month_offsets_mwh:
+        '5': -14.76
+        '6': 0.0
+        '7': 9.07
+        '8': 0.11
+        '9': 0.0
+    focused_shape_residual_learner:
+      enabled: false
+      shadow_mode: false
+      model_version: focused_shape_residual_guarded_promotion_v2
+      min_rows: 168
+      target_clip_mwh: 35.0
+      blend: 0.495
+      cap_mwh: 12.0
+      apply_correction_to_reference_forecast: true
+      promotion_delta_guard:
+        enabled: true
+        reference_col: current_final
+        max_abs_delta_vs_reference_mwh: 8.0
+        risk_slice_max_abs_delta_vs_reference_mwh: 5.0
+        include_peak_window: true
+        peak_window_hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        include_hot_peak: true
+        hot_peak_hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        hot_peak_min_maxtemp_f: 90.0
+      min_abs_correction_mwh: 0.25
+      learning_rate: 0.04
+      max_iter: 120
+      max_leaf_nodes: 16
+      min_samples_leaf: 16
+      l2_regularization: 5.0
+      random_state: 42
+      scope:
+        use_focused_guard_rule_union: false
+        include_disabled_rules: false
+        use_runtime_rule_context: true
+        require_scope_for_application: true
+        include_hot_peak: true
+        hot_peak_min_maxtemp_f: 90.0
+        hot_peak_hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        - 21
+        include_cloud_solar: true
+        cloud_solar_hours:
+        - 10
+        - 11
+        - 12
+        - 13
+        - 14
+        - 15
+        - 16
+        cloud_solar_min_cloud_cover_norm: 0.6
+        cloud_solar_min_solar_loss_mw: 1.25
+        include_delta_breeze: true
+        delta_breeze_hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        - 21
+        - 22
+        delta_breeze_min_maxtemp_f: 95.0
+        delta_breeze_max_cloud_cover_norm: 0.35
+        delta_breeze_min_forecast_drop_next3hr_f: 6.0
+        include_long_horizon_heat: true
+        long_horizon_min_forecast_day: 8
+        long_horizon_max_forecast_day: 16
+        long_horizon_min_maxtemp_f: 75.0
+        long_horizon_min_hour: 10
+        long_horizon_max_hour: 22
+    daily_peak_shadow_model:
+      enabled: true
+      shadow_mode: true
+      model_version: daily_peak_shadow_v1
+      min_days: 30
+      min_application_forecast_day: 2
+      max_application_forecast_day: 5
+      min_peak_window_rows_per_day: 4
+      peak_hours:
+      - 14
+      - 15
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      - 21
+      adjustment_hours:
+      - 14
+      - 15
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      - 21
+      out_of_sample_eval_enabled: true
+      holdout_eval_step_days: 7
+      target_clip_mwh: 35.0
+      blend: 0.45
+      cap_mwh: 10.0
+      min_abs_correction_mwh: 0.5
+      spread_hours: 0.65
+      timing_model_enabled: true
+      timing_blend: 0.5
+      target_timing_clip_hours: 4.0
+      max_timing_shift_hours: 3.0
+      learning_rate: 0.04
+      max_iter: 120
+      max_leaf_nodes: 16
+      min_samples_leaf: 8
+      timing_min_samples_leaf: 8
+      l2_regularization: 5.0
+      random_state: 42
+    focused_scorecard_guard:
+      enabled: true
+      total_cap_mwh: 30.0
+      rule_health:
+        enabled: true
+        min_scored_rows: 1
+        max_rule_only_delta_mae_mwh: 0.0
+        max_current_stack_delta_mae_mwh: 0.0
+      rules:
+      - name: june_recent_85_93_clear_afternoon_backoff
+        adjustment_mwh: -3.0
+        allow_without_forecast_day: true
+        months:
+        - 6
+        hours:
+        - 13
+        - 14
+        - 15
+        - 16
+        - 17
+        min_maxtemp_f: 85.0
+        max_maxtemp_f: 93.0
+        max_cloud_cover_norm: 0.2
+      - name: june_recent_100_105_hot_evening_lift
+        adjustment_mwh: 3.0
+        allow_without_forecast_day: true
+        months:
+        - 6
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        min_maxtemp_f: 100.0
+        max_maxtemp_f: 105.0
+      - name: june_recent_98_100_low_loss_midday_backoff
+        adjustment_mwh: -8.0
+        allow_without_forecast_day: true
+        months:
+        - 6
+        hours:
+        - 12
+        - 13
+        - 14
+        - 15
+        min_maxtemp_f: 98.0
+        max_maxtemp_f: 100.0
+        min_cloud_cover_norm: 0.25
+        max_solar_loss_mw: 1.25
+        min_raw_minus_samehour_7day_mean_mwh: 15.0
+        holiday: false
+      - name: july_recent_100_plus_clear_peak_ramp_up
+        enabled: false
+        adjustment_mwh: 7.0
+        allow_without_forecast_day: true
+        months:
+        - 7
+        hours:
+        - 14
+        - 15
+        - 16
+        min_maxtemp_f: 100.0
+        max_cloud_cover_norm: 0.25
+      - name: july_recent_100_plus_clear_hot_evening_lift
+        enabled: false
+        adjustment_mwh: 8.0
+        allow_without_forecast_day: true
+        months:
+        - 7
+        hours:
+        - 17
+        - 18
+        - 19
+        - 20
+        min_maxtemp_f: 100.0
+        max_cloud_cover_norm: 0.25
+        holiday: false
+      - name: july_recent_cloudy_98_100_high_state_hot_evening_backoff
+        adjustment_mwh: -14.0
+        allow_without_forecast_day: true
+        months:
+        - 7
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        - 21
+        min_maxtemp_f: 98.0
+        max_maxtemp_f: 100.0
+        min_cloud_cover_norm: 0.6
+        min_raw_minus_samehour_7day_mean_mwh: 15.0
+        holiday: false
+      - name: july_warm_partly_cloudy_overnight_lift
+        adjustment_mwh: 2.0
+        allow_without_forecast_day: true
+        months:
+        - 7
+        hours:
+        - 0
+        - 1
+        - 2
+        - 3
+        - 4
+        min_maxtemp_f: 90.0
+        max_maxtemp_f: 100.0
+        min_cloud_cover_norm: 0.25
+        max_cloud_cover_norm: 0.85
+        holiday: false
+      - name: july_recent_95_100_clear_post_peak_decay_backoff
+        adjustment_mwh: -3.0
+        allow_without_forecast_day: true
+        months:
+        - 7
+        hours:
+        - 18
+        - 19
+        - 20
+        - 21
+        - 22
+        - 23
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 100.0
+        max_cloud_cover_norm: 0.2
+        holiday: false
+      - name: july_clear_warm_late_evening_lift
+        adjustment_mwh: 3.0
+        allow_without_forecast_day: true
+        months:
+        - 7
+        hours:
+        - 22
+        - 23
+        min_maxtemp_f: 90.0
+        max_maxtemp_f: 100.0
+        max_cloud_cover_norm: 0.5
+        holiday: false
+      - name: june_98_100_mixed_high_state_morning_midday_backoff
+        adjustment_mwh: -8.0
+        allow_without_forecast_day: true
+        months:
+        - 6
+        hours:
+        - 10
+        - 11
+        - 12
+        - 13
+        - 14
+        - 15
+        min_maxtemp_f: 98.0
+        max_maxtemp_f: 100.0
+        min_cloud_cover_norm: 0.25
+        min_raw_minus_samehour_7day_mean_mwh: 15.0
+        holiday: false
+      - name: july_recent_103_106_clear_morning_backoff
+        adjustment_mwh: -6.0
+        allow_without_forecast_day: true
+        months:
+        - 7
+        hours:
+        - 6
+        - 7
+        - 8
+        - 9
+        - 10
+        min_maxtemp_f: 103.0
+        max_maxtemp_f: 106.0
+        max_cloud_cover_norm: 0.25
+        holiday: false
+      - name: july_recent_103_106_hot_peak_lift
+        adjustment_mwh: 8.0
+        allow_without_forecast_day: true
+        months:
+        - 7
+        hours:
+        - 14
+        - 15
+        - 16
+        - 18
+        - 19
+        min_explicit_forecast_day: 1
+        max_explicit_forecast_day: 3
+        min_maxtemp_f: 103.0
+        max_maxtemp_f: 106.0
+        max_cloud_cover_norm: 0.4
+        holiday: false
+      - name: july_recent_90_93_post_heatwave_morning_lift
+        adjustment_mwh: 2.0
+        allow_without_forecast_day: true
+        months:
+        - 7
+        hours:
+        - 6
+        - 7
+        - 8
+        - 9
+        min_maxtemp_f: 90.0
+        max_maxtemp_f: 93.0
+        max_cloud_cover_norm: 0.25
+        max_raw_minus_samehour_yesterday_mwh: -3.0
+        holiday: false
+      - name: july_recent_90_93_post_heatwave_midday_lift
+        adjustment_mwh: 8.0
+        allow_without_forecast_day: true
+        months:
+        - 7
+        hours:
+        - 10
+        - 11
+        - 12
+        - 13
+        - 14
+        - 15
+        - 16
+        min_maxtemp_f: 90.0
+        max_maxtemp_f: 93.0
+        max_cloud_cover_norm: 0.15
+        max_raw_minus_samehour_yesterday_mwh: -20.0
+        holiday: false
+      - name: july_recent_weekend_95_97_overcast_evening_backoff
+        adjustment_mwh: -8.0
+        allow_without_forecast_day: true
+        months:
+        - 7
+        hours:
+        - 20
+        - 21
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 97.0
+        min_cloud_cover_norm: 0.9
+        weekend: true
+      - name: june_recent_clear_98_100_peak_backoff
+        adjustment_mwh: -4.0
+        allow_without_forecast_day: true
+        months:
+        - 6
+        hours:
+        - 16
+        - 17
+        - 18
+        min_maxtemp_f: 98.0
+        max_maxtemp_f: 100.0
+        max_cloud_cover_norm: 0.1
+        holiday: false
+      - name: june_recent_95_98_clear_post_heatwave_midday_backoff
+        adjustment_mwh: -8.0
+        allow_without_forecast_day: true
+        months:
+        - 6
+        hours:
+        - 10
+        - 11
+        - 12
+        - 13
+        - 14
+        - 15
+        - 16
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 98.0
+        max_cloud_cover_norm: 0.1
+        max_raw_minus_samehour_yesterday_mwh: -15.0
+        holiday: false
+      - name: july_recent_95_98_partly_cloudy_peak_lift
+        adjustment_mwh: 6.0
+        allow_without_forecast_day: true
+        months:
+        - 7
+        hours:
+        - 16
+        - 17
+        - 18
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 98.0
+        min_cloud_cover_norm: 0.3
+        max_cloud_cover_norm: 0.6
+        holiday: false
+      - name: july_recent_98_100_cloudy_midday_lift
+        adjustment_mwh: 4.0
+        allow_without_forecast_day: true
+        months:
+        - 7
+        hours:
+        - 10
+        - 11
+        - 12
+        - 13
+        min_maxtemp_f: 98.0
+        max_maxtemp_f: 100.0
+        min_cloud_cover_norm: 0.6
+        holiday: false
+      - name: july_recent_98_100_post_heatwave_midday_backoff
+        adjustment_mwh: -2.0
+        allow_without_forecast_day: true
+        months:
+        - 7
+        hours:
+        - 10
+        - 11
+        - 12
+        - 13
+        min_maxtemp_f: 98.0
+        max_maxtemp_f: 100.0
+        max_raw_minus_samehour_yesterday_mwh: -15.0
+        holiday: false
+      - name: july_recent_85_90_clear_high_state_afternoon_lift
+        adjustment_mwh: 11.0
+        allow_without_forecast_day: true
+        months:
+        - 7
+        hours:
+        - 11
+        - 12
+        - 13
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        - 21
+        - 22
+        min_maxtemp_f: 85.0
+        max_maxtemp_f: 90.0
+        max_cloud_cover_norm: 0.15
+        max_raw_minus_samehour_yesterday_mwh: -40.0
+        holiday: false
+      - name: july_recent_95_99_partly_cloudy_high_state_peak_lift
+        adjustment_mwh: 8.0
+        allow_without_forecast_day: true
+        months:
+        - 7
+        hours:
+        - 12
+        - 13
+        - 14
+        - 15
+        - 16
+        - 17
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 99.0
+        min_cloud_cover_norm: 0.3
+        max_cloud_cover_norm: 0.85
+        max_raw_minus_samehour_7day_mean_mwh: -10.0
+        holiday: false
+      - name: july_recent_100_plus_clear_late_evening_decay_backoff
+        adjustment_mwh: -6.0
+        allow_without_forecast_day: true
+        months:
+        - 7
+        hours:
+        - 21
+        - 22
+        - 23
+        - 0
+        min_maxtemp_f: 100.0
+        max_cloud_cover_norm: 0.2
+        min_raw_minus_samehour_7day_mean_mwh: 40.0
+        holiday: false
+      - name: july_recent_95_98_clear_post_heatwave_midday_backoff
+        adjustment_mwh: -6.0
+        allow_without_forecast_day: true
+        months:
+        - 7
+        hours:
+        - 10
+        - 11
+        - 12
+        - 13
+        - 14
+        - 15
+        - 16
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 98.0
+        max_cloud_cover_norm: 0.15
+        max_raw_minus_samehour_yesterday_mwh: 0.0
+        holiday: false
+      - name: shoulder_heat_days2to7_bias_up
+        adjustment_mwh: 1.0
+        seasons:
+        - Spring
+        - Fall
+        hours:
+        - 12
+        - 13
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        - 21
+        - 22
+        min_forecast_day: 2
+        max_forecast_day: 7
+        min_maxtemp_f: 75.0
+        max_maxtemp_f: 93.0
+        holiday: false
+      - name: shoulder_heat_days8to16_bias_up
+        adjustment_mwh: 1.25
+        seasons:
+        - Spring
+        - Fall
+        hours:
+        - 12
+        - 13
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        - 21
+        - 22
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 75.0
+        max_maxtemp_f: 93.0
+        holiday: false
+      - name: june_long_hot_100_105_morning_ramp_up
+        enabled: false
+        adjustment_mwh: 2.0
+        months:
+        - 6
+        hours:
+        - 8
+        - 9
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 100.0
+        max_maxtemp_f: 105.0
+      - name: june_long_hot_100_105_core_ramp_up
+        adjustment_mwh: 10.0
+        months:
+        - 6
+        hours:
+        - 10
+        - 11
+        - 12
+        - 13
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 100.0
+        max_maxtemp_f: 105.0
+        min_forecast_mwh: 230.0
+      - name: june_long_hot_100_105_peak_ramp_up
+        adjustment_mwh: 8.0
+        months:
+        - 6
+        hours:
+        - 14
+        - 15
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 100.0
+        max_maxtemp_f: 105.0
+        min_forecast_mwh: 265.0
+      - name: june_long_hot_100_105_peak_finish_up
+        adjustment_mwh: 1.5
+        months:
+        - 6
+        hours:
+        - 16
+        - 17
+        - 18
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 100.0
+        max_maxtemp_f: 105.0
+      - name: june_long_100_plus_evening_finish_up
+        enabled: false
+        adjustment_mwh: 5.0
+        months:
+        - 6
+        hours:
+        - 19
+        - 20
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 100.0
+        min_forecast_mwh: 260.0
+      - name: june_long_cloudy_mild_peak_window_up
+        adjustment_mwh: 8.0
+        months:
+        - 6
+        hours:
+        - 14
+        - 15
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 80.0
+        max_maxtemp_f: 90.0
+        min_cloud_cover_norm: 0.8
+        min_solar_loss_mw: 0.5
+        weekend: false
+        holiday: false
+      - name: june_long_cloudy_mild_peak_window_extra_up
+        enabled: false
+        adjustment_mwh: 8.0
+        months:
+        - 6
+        hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 75.0
+        max_maxtemp_f: 90.0
+        min_cloud_cover_norm: 0.8
+        holiday: false
+      - name: june_long_clear_hot_peak_window_up
+        adjustment_mwh: 0.0
+        months:
+        - 6
+        hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 90.0
+        max_maxtemp_f: 95.0
+        max_cloud_cover_norm: 0.2
+        max_solar_loss_mw: 0.5
+        weekend: false
+        holiday: false
+      - name: june_long_mild_hot_peak_backoff
+        adjustment_mwh: -10.0
+        months:
+        - 6
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 90.0
+        max_maxtemp_f: 92.5
+        holiday: false
+      - name: june_recent_hot_midday_peak_backoff
+        adjustment_mwh: 0.0
+        months:
+        - 6
+        hours:
+        - 12
+        - 13
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 100.0
+        holiday: false
+      - name: june_july_clear_hot_raw_level_backoff
+        enabled: false
+        adjustment_mwh: -5.0
+        months:
+        - 6
+        - 7
+        hours:
+        - 13
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        min_maxtemp_f: 90.0
+        max_maxtemp_f: 100.0
+        max_cloud_cover_norm: 0.2
+        min_raw_minus_samehour_7day_mean_mwh: 15.0
+        min_raw_minus_samehour_yesterday_mwh: 0.0
+      - name: june_days4to7_mild_hot_evening_recovery_up
+        adjustment_mwh: 28.0
+        months:
+        - 6
+        hours:
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 4
+        max_forecast_day: 7
+        min_maxtemp_f: 90.0
+        max_maxtemp_f: 92.5
+        max_total_cap_mwh: 28.0
+        holiday: false
+      - name: june_days4to7_mild_hot_early_peak_recovery_up
+        adjustment_mwh: 20.0
+        months:
+        - 6
+        hours:
+        - 14
+        - 15
+        - 16
+        min_forecast_day: 4
+        max_forecast_day: 7
+        min_maxtemp_f: 90.0
+        max_maxtemp_f: 92.5
+        holiday: false
+      - name: june_days4to7_hot_peak_recovery_up
+        enabled: false
+        adjustment_mwh: 14.0
+        months:
+        - 6
+        hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        min_forecast_day: 4
+        max_forecast_day: 7
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 100.0
+        holiday: false
+      - name: june_days4to7_hot_evening_finish_recovery_up
+        adjustment_mwh: 12.0
+        months:
+        - 6
+        hours:
+        - 19
+        - 20
+        min_forecast_day: 4
+        max_forecast_day: 7
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 100.0
+        holiday: false
+      - name: june_days4to7_clear_98_100_hot_recovery_trim_down
+        adjustment_mwh: -14.0
+        months:
+        - 6
+        hours:
+        - 19
+        - 20
+        min_forecast_day: 4
+        max_forecast_day: 7
+        min_maxtemp_f: 98.0
+        max_maxtemp_f: 100.0
+        max_cloud_cover_norm: 0.2
+        holiday: false
+      - name: june_long_95_100_evening_recovery_up
+        enabled: false
+        adjustment_mwh: 12.0
+        months:
+        - 6
+        hours:
+        - 19
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 100.0
+        holiday: false
+      - name: june_long_95_100_low_forecast_hot_extra_up
+        adjustment_mwh: 2.0
+        months:
+        - 6
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 100.0
+        max_forecast_mwh: 245.0
+        holiday: false
+      - name: june_long_98_100_clear_high_state_overstack_backoff
+        adjustment_mwh: -6.0
+        months:
+        - 6
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 98.0
+        max_maxtemp_f: 100.0
+        max_cloud_cover_norm: 0.1
+        min_raw_minus_samehour_7day_mean_mwh: 10.0
+        max_raw_minus_samehour_7day_mean_mwh: 25.0
+        holiday: false
+      - name: june_long_95_100_solar_loss_peak_extra_up
+        adjustment_mwh: 12.0
+        months:
+        - 6
+        hours:
+        - 16
+        - 17
+        - 18
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 100.0
+        min_solar_loss_mw: 0.5
+        holiday: false
+      - name: june_long_90_92_clear_hot_extra_backoff
+        adjustment_mwh: -12.0
+        months:
+        - 6
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 90.0
+        max_maxtemp_f: 92.5
+        max_cloud_cover_norm: 0.2
+        max_solar_loss_mw: 0.5
+        holiday: false
+      - name: june_long_90_95_cloudy_peak_extra_up
+        adjustment_mwh: 3.0
+        months:
+        - 6
+        hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 90.0
+        max_maxtemp_f: 95.0
+        min_cloud_cover_norm: 0.6
+        holiday: false
+      - name: june_long_mild_clear_weekend_peak_down
+        adjustment_mwh: -8.0
+        months:
+        - 6
+        hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 80.0
+        max_maxtemp_f: 90.0
+        max_cloud_cover_norm: 0.3
+        weekend: true
+        holiday: false
+      - name: june_extreme_heat_morning_ramp_up
+        adjustment_mwh: 7.0
+        months:
+        - 6
+        hours:
+        - 8
+        - 9
+        min_forecast_day: 1
+        max_forecast_day: 16
+        min_maxtemp_f: 105.0
+      - name: june_extreme_heat_midday_ramp_up
+        adjustment_mwh: 10.0
+        months:
+        - 6
+        hours:
+        - 10
+        - 11
+        - 12
+        - 13
+        - 14
+        - 15
+        min_forecast_day: 1
+        max_forecast_day: 16
+        min_maxtemp_f: 105.0
+      - name: june_ultra_hot_peak_guard_up
+        adjustment_mwh: 5.0
+        months:
+        - 6
+        hours:
+        - 16
+        - 17
+        - 18
+        min_forecast_day: 1
+        max_forecast_day: 16
+        min_maxtemp_f: 110.0
+      - name: may_long_warm_cloudy_peak_recovery_up
+        adjustment_mwh: 12.0
+        months:
+        - 5
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        min_forecast_day: 13
+        max_forecast_day: 16
+        min_maxtemp_f: 85.0
+        max_maxtemp_f: 93.0
+        min_cloud_cover_norm: 0.25
+        holiday: false
+      - name: may_long_75_85_clear_peak_recovery_up
+        adjustment_mwh: 6.0
+        months:
+        - 5
+        hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 75.0
+        max_maxtemp_f: 85.0
+        max_cloud_cover_norm: 0.2
+        holiday: false
+      - name: may_long_85_93_early_peak_recovery_up
+        adjustment_mwh: 6.0
+        months:
+        - 5
+        hours:
+        - 14
+        - 15
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 85.0
+        max_maxtemp_f: 93.0
+        holiday: false
+      - name: may_long_85_93_hot_peak_recovery_up
+        adjustment_mwh: 8.0
+        months:
+        - 5
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        min_forecast_day: 13
+        max_forecast_day: 16
+        min_maxtemp_f: 85.0
+        max_maxtemp_f: 93.0
+        min_cloud_cover_norm: 0.25
+        holiday: false
+      - name: may_days4to7_100plus_peak_recovery_up
+        adjustment_mwh: 8.0
+        months:
+        - 5
+        hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        min_forecast_day: 4
+        max_forecast_day: 7
+        min_maxtemp_f: 100.0
+        holiday: false
+      - name: may_long_hot_93_97_down
+        adjustment_mwh: -4.0
+        months:
+        - 5
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 93.0
+        max_maxtemp_f: 97.0
+      - name: may_long_92_95_clear_high_state_hot_recovery_up
+        enabled: false
+        adjustment_mwh: 8.0
+        months:
+        - 5
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 92.5
+        max_maxtemp_f: 95.0
+        max_cloud_cover_norm: 0.1
+        min_raw_minus_samehour_7day_mean_mwh: 50.0
+        holiday: false
+      - name: july_holiday_hot_peak_down
+        adjustment_mwh: -10.0
+        months:
+        - 7
+        hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 1
+        max_forecast_day: 16
+        min_maxtemp_f: 90.0
+        holiday: true
+      - name: july_holiday_warm_peak_down
+        adjustment_mwh: -22.0
+        months:
+        - 7
+        hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 1
+        max_forecast_day: 16
+        min_maxtemp_f: 85.0
+        max_maxtemp_f: 90.0
+        holiday: true
+      - name: july_days2to3_cloudy_warm_evening_up
+        adjustment_mwh: 18.0
+        months:
+        - 7
+        hours:
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 2
+        max_forecast_day: 3
+        min_maxtemp_f: 80.0
+        max_maxtemp_f: 90.0
+        min_cloud_cover_norm: 0.8
+        holiday: false
+      - name: july_long_95_98_peak_recovery_up
+        adjustment_mwh: 8.0
+        months:
+        - 7
+        hours:
+        - 13
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        - 21
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 98.0
+        holiday: false
+      - name: july_long_95_98_low_state_peak_backoff
+        adjustment_mwh: -4.0
+        months:
+        - 7
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 98.0
+        max_raw_minus_samehour_7day_mean_mwh: 12.0
+        holiday: false
+      - name: july_long_95_98_clear_low_mid_state_extra_backoff
+        enabled: false
+        adjustment_mwh: -7.0
+        months:
+        - 7
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 98.0
+        max_cloud_cover_norm: 0.1
+        max_raw_minus_samehour_7day_mean_mwh: 12.0
+        holiday: false
+      - name: july_long_90_94_peak_window_backoff
+        adjustment_mwh: 0.0
+        months:
+        - 7
+        hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 90.0
+        max_maxtemp_f: 94.0
+        holiday: false
+      - name: july_long_mild_hot_peak_soft_down
+        adjustment_mwh: -1.0
+        months:
+        - 7
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 90.0
+        max_maxtemp_f: 95.0
+        holiday: false
+      - name: july_long_92_95_low_state_hot_backoff
+        adjustment_mwh: -8.0
+        months:
+        - 7
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 92.5
+        max_maxtemp_f: 95.0
+        max_raw_minus_samehour_7day_mean_mwh: -25.0
+        holiday: false
+      - name: july_long_92_95_clear_high_state_hot_recovery_up
+        enabled: false
+        adjustment_mwh: 6.0
+        months:
+        - 7
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 92.5
+        max_maxtemp_f: 95.0
+        max_cloud_cover_norm: 0.1
+        min_raw_minus_samehour_7day_mean_mwh: 10.0
+        max_raw_minus_samehour_7day_mean_mwh: 25.0
+        holiday: false
+      - name: july_long_clear_hot_peak_ramp_up
+        adjustment_mwh: 2.0
+        months:
+        - 7
+        hours:
+        - 16
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 94.0
+        max_maxtemp_f: 98.0
+        max_cloud_cover_norm: 0.2
+        max_solar_loss_mw: 0.5
+        max_forecast_mwh: 245.0
+        max_prior_total_adjustment_mwh: 4.0
+        holiday: false
+      - name: august_day4to7_highload_peak_up
+        adjustment_mwh: 5.0
+        months:
+        - 8
+        hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        min_forecast_day: 4
+        max_forecast_day: 7
+        min_maxtemp_f: 95.0
+        min_forecast_mwh: 260.0
+      - name: august_long_100_plus_peak_finish_up
+        adjustment_mwh: 5.0
+        months:
+        - 8
+        hours:
+        - 16
+        - 17
+        - 18
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 100.0
+        min_forecast_mwh: 270.0
+        min_raw_minus_samehour_7day_mean_mwh: 20.0
+      - name: august_long_clear_hot_high_forecast_backoff
+        adjustment_mwh: -25.0
+        months:
+        - 8
+        hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        min_forecast_day: 8
+        max_forecast_day: 12
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 97.0
+        max_cloud_cover_norm: 0.3
+        max_solar_loss_mw: 0.5
+        min_forecast_mwh: 260.0
+        max_total_cap_mwh: 60.0
+        holiday: false
+      - name: august_days8to12_clear_hot_midafternoon_backoff
+        adjustment_mwh: -32.0
+        months:
+        - 8
+        hours:
+        - 14
+        - 15
+        min_forecast_day: 8
+        max_forecast_day: 12
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 97.0
+        max_cloud_cover_norm: 0.3
+        max_solar_loss_mw: 0.5
+        min_forecast_mwh: 230.0
+        max_total_cap_mwh: 60.0
+        holiday: false
+      - name: august_days8to12_clear_hot_noon_backoff
+        adjustment_mwh: -24.0
+        months:
+        - 8
+        hours:
+        - 12
+        - 13
+        min_forecast_day: 8
+        max_forecast_day: 12
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 99.0
+        max_cloud_cover_norm: 0.3
+        max_solar_loss_mw: 0.5
+        min_forecast_mwh: 210.0
+        max_total_cap_mwh: 60.0
+        holiday: false
+      - name: august_long_95_100_clear_peak_soft_backoff
+        adjustment_mwh: -4.0
+        months:
+        - 8
+        hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 100.0
+        max_cloud_cover_norm: 0.2
+        max_solar_loss_mw: 0.5
+        holiday: false
+      - name: august_long_95_98_high_state_rebound_up
+        adjustment_mwh: 10.0
+        months:
+        - 8
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 98.0
+        max_cloud_cover_norm: 0.2
+        min_raw_minus_samehour_7day_mean_mwh: 15.0
+        holiday: false
+      - name: august_long_95_97_low_state_he17_18_rebound_up
+        adjustment_mwh: 7.0
+        months:
+        - 8
+        hours:
+        - 17
+        - 18
+        min_forecast_day: 8
+        max_forecast_day: 12
+        min_maxtemp_f: 95.0
+        max_maxtemp_f: 97.0
+        max_cloud_cover_norm: 0.2
+        max_raw_minus_samehour_7day_mean_mwh: -15.0
+        holiday: false
+      - name: august_long_clear_hot_rebound_up
+        adjustment_mwh: 7.0
+        months:
+        - 8
+        hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        min_forecast_day: 11
+        max_forecast_day: 16
+        min_maxtemp_f: 97.0
+        max_maxtemp_f: 98.0
+        max_cloud_cover_norm: 0.2
+        max_solar_loss_mw: 0.5
+        max_forecast_mwh: 255.0
+        holiday: false
+      - name: september_day4to7_mild_peak_down
+        adjustment_mwh: 0.0
+        months:
+        - 9
+        hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        min_forecast_day: 4
+        max_forecast_day: 7
+        max_maxtemp_f: 95.0
+      - name: september_day4to7_cloudy_92_95_hot_down
+        adjustment_mwh: -14.0
+        months:
+        - 9
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 4
+        max_forecast_day: 7
+        min_maxtemp_f: 92.5
+        max_maxtemp_f: 95.0
+        min_cloud_cover_norm: 0.8
+        holiday: false
+      - name: september_long_90_92_cloudy_low_state_hot_backoff
+        adjustment_mwh: -8.0
+        months:
+        - 9
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 90.0
+        max_maxtemp_f: 92.5
+        min_cloud_cover_norm: 0.9
+        max_raw_minus_samehour_7day_mean_mwh: -15.0
+        holiday: false
+      - name: march_long_65_85_clear_peak_recovery_up
+        adjustment_mwh: 6.0
+        months:
+        - 3
+        hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 75.0
+        max_maxtemp_f: 85.0
+        max_cloud_cover_norm: 0.2
+        holiday: false
+      - name: november_long_cloudy_mild_peak_recovery_up
+        enabled: false
+        adjustment_mwh: 3.0
+        months:
+        - 11
+        hours:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 18
+        min_forecast_day: 8
+        max_forecast_day: 16
+        min_maxtemp_f: 55.0
+        max_maxtemp_f: 65.0
+        min_cloud_cover_norm: 0.6
+        holiday: false
+    underforecast_bias_uplift_mwh: 0.0
+    hot_peak_uplift:
+      enabled: false
+      min_forecast_day: 2
+      max_forecast_day: 16
+      min_maxtemp_f: 90.0
+      hours:
+      - 14
+      - 15
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      base_uplift_mwh: 0.0
+      max_uplift_mwh: 3.0
+      horizon_uplift_mwh:
+        Days2to7: 2.25
+        Days8to16: 2.25
+      temp_bucket_uplift_mwh:
+        '4': 1.25
+        '5': 2.0
+        '6': 2.5
+        '7': 3.0
+    ultra_extreme_heat_wave_uplift:
+      enabled: false
+      min_forecast_day: 2
+      max_forecast_day: 7
+      min_maxtemp_f: 110.0
+      ramp_full_maxtemp_f: 115.0
+      max_uplift_mwh: 18.0
+      hour_uplift_mwh:
+        '10': 18.0
+        '11': 18.0
+        '12': 18.0
+        '13': 18.0
+        '14': 18.0
+        '15': 18.0
+        '16': 18.0
+        '17': 10.0
+  targeted_residual_meta:
+    enabled: true
+    min_rows: 336
+    min_event_rows: 48
+    global_blend: 0.35
+    event_blend: 0.45
+    global_cap_mwh: 6.0
+    event_cap_mwh: 5.0
+    total_cap_mwh: 8.0
+    hot_peak_min_maxtemp_f: 90.0
+    hot_peak_hours:
+    - 16
+    - 17
+    - 18
+    - 19
+    - 20
+    hot_peak_scale: 0.0
+    min_samples_leaf: 24
+    event_min_samples_leaf: 12
+    learning_rate: 0.05
+    max_iter: 80
+    max_leaf_nodes: 8
+    l2_regularization: 3.0
+    solar_cloud_min_loss_mw: 1.25
+    random_state: 42
+  heat_peak_enabled: false
+  blend: 0.85
+  cap_mwh: 22.0
+  shrink_k: 24.0
+  level_weights:
+    global: 0.05
+    hour: 0.08
+    season_hour: 0.12
+    season_hourgroup_maxtemp: 0.18
+    season_hour_maxtemp: 0.2
+    season_month_hour_maxtemp: 0.18
+    season_cloud_hourgroup: 0.09
+    season_solar_hourgroup: 0.05
+    temp_cloud_hourgroup: 0.05
+  residual_calibration_hot_peak:
+    min_maxtemp_f: 90.0
+    hours:
+    - 16
+    - 17
+    - 18
+    - 19
+    - 20
+    default_scale: 1.0
+    season_scales:
+      Spring: 1.0
+      Summer: 1.0
+  heat_peak_min_maxtemp_f: 88.0
+  heat_peak_hours:
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 20
+  heat_peak_blend: 0.5
+  heat_peak_cap_mwh: 12.0
+  heat_peak_shrink_k: 18.0
+  warm_ramp_enabled: true
+  warm_ramp_min_maxtemp_f: 75.0
+  warm_ramp_max_maxtemp_f: 93.0
+  warm_ramp_hours:
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  - 20
+  - 21
+  - 22
+  warm_ramp_blend: 0.8541597388849738
+  warm_ramp_cap_mwh: 19.45042638312704
+  warm_ramp_shrink_k: 8.0
+  warm_ramp_weighted_fallback: true
+  warm_ramp_cloud_split: true
+  hot_ramp_override:
+    enabled: false
+    hours:
+    - 17
+    - 18
+    - 19
+    - 20
+    min_forecast_day: 1
+    max_forecast_day: 16
+    min_maxtemp_f: 100.0
+    max_maxtemp_f: 109.9
+    min_consecutive_very_hot_days_95: 2
+    min_consecutive_extreme_hot_days_100: 2
+    min_dailymax_ramp_1day_f: 2.0
+    min_prior_dailymax_for_ramp_f: 95.0
+    guard_bypass_enabled: true
+    peak_risk_protected_cap_mwh: 8.0
+    scenario_lift_enabled: true
+    scenario_gap_col: WeatherScenario_hot_stress_5f_P50_MWH
+    scenario_gap_blend: 0.4
+    scenario_lift_cap_mwh: 8.0
+    total_cap_mwh: 8.0
+  day1_live_ramp_override:
+    enabled: false
+    hours:
+    - 16
+    - 17
+    - 18
+    - 19
+    - 20
+    min_forecast_day: 1
+    max_forecast_day: 1
+    min_maxtemp_f: 100.0
+    max_maxtemp_f: 115.0
+    min_latest_actual_hour: 6
+    min_pair_hours: 3
+    observation_tail_hours: 3
+    observed_delta_stat: latest
+    min_observed_delta_mwh: 15.0
+    carry_fraction: 0.9
+    cap_mwh: 16.0
+  multiday_live_heat_anchor_override:
+    enabled: false
+    hours:
+    - 16
+    - 17
+    - 18
+    - 19
+    - 20
+    anchor_hours:
+    - 16
+    - 17
+    - 18
+    - 19
+    min_forecast_day: 2
+    max_forecast_day: 7
+    min_maxtemp_f: 102.0
+    max_maxtemp_f: 115.0
+    min_anchor_maxtemp_f: 102.0
+    min_anchor_observed_delta_mwh: 20.0
+    min_anchor_live_ramp_mwh: 8.0
+    min_consecutive_extreme_hot_days_100: 2
+    anchor_discount_mwh: 5.0
+    lead_decay_mwh_per_day: 0.75
+    temp_shortfall_discount_mwh_per_f: 1.75
+    temp_excess_credit_mwh_per_f: 1.0
+    weekend_discount_mwh: 8.0
+    sunday_extra_discount_mwh: 6.0
+    hour_target_offsets_mwh:
+      16: -5.0
+      17: 0.0
+      18: 0.0
+      19: -4.0
+      20: -12.0
+    cap_mwh: 14.0
+    max_target_mwh: 365.0
+  cloud_solar_shape_enabled: false
+  cloud_solar_shape_hours:
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  cloud_solar_shape_blend: 0.82
+  cloud_solar_shape_cap_mwh: 16.0
+  cloud_solar_shape_shrink_k: 9.0
+  cloud_solar_shape_min_loss_mw: 1.25
+  cloud_solar_event_multiplier_enabled: true
+  cloud_solar_shape_level_weights:
+    event_class_hour_loss: 0.24
+    weekday_hour_cloud_loss: 0.2
+    event_class_hour_temp: 0.14
+    hour_cloud_loss: 0.14
+    season_hour_cloud_loss: 0.1
+    hour_base_loss: 0.08
+    hour_temp_loss: 0.05
+    hour_loss: 0.03
+    hour_cloud: 0.02
+  peak_risk:
+    enabled: false
+    hours:
+    - 16
+    - 17
+    - 18
+    - 19
+    - 20
+    - 21
+    min_maxtemp_f: 78.0
+    prophet_gap_threshold_mwh: 6.0
+    catboost_gap_threshold_mwh: 7.5
+    tree_gap_threshold_mwh: 3.0
+    tree_gap_signal_strength: 1.0
+    tree_gap_model_cols:
+    - XGB_Pred_MWH
+    - LGB_Pred_MWH
+    - CatBoost_Pred_MWH
+    blend: 0.55
+    cap_mwh: 10.0
+    extreme_hot_peak:
+      enabled: true
+      min_forecast_day: 2
+      max_forecast_day: 7
+      min_maxtemp_f: 110.0
+      hours:
+      - 16
+      - 17
+      - 18
+      cap_mwh: 16.0
+    positive_guard:
+      enabled: true
+      overforecast_risk:
+        enabled: true
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        - 21
+        min_maxtemp_f: 95.0
+        min_raw_minus_samehour_7day_mean_mwh: 30.0
+        min_forecast_drop_next3hr_f: 6.0
+        max_positive_correction_mwh: 0.0
+        blocked_source: peak_risk_overforecast_guard_blocked
+    min_recent_underforecast_correction_mwh: 0.0
+  weather_robustness_hedge:
+    enabled: false
+    apply_to_realized_replay: false
+    hours:
+    - 16
+    - 17
+    - 18
+    - 19
+    - 20
+    ramp_hours:
+    - 8
+    - 9
+    - 10
+    - 11
+    - 12
+    - 13
+    - 14
+    - 15
+    ramp_min_maxtemp_f: 100.0
+    ramp_min_forecast_day: 8
+    ramp_max_forecast_day: 16
+    ramp_cap_mwh: 3.5
+    ramp_max_fraction_of_warmer_delta: 0.25
+    min_maxtemp_f: 90.0
+    exclude_holidays: true
+    min_forecast_day: 1
+    max_forecast_day: 16
+    scenario_delta_f: 3.0
+    jensen_scale: 1.5
+    upper_scenario_blend: 0.2
+    cap_mwh: 8.0
+    max_fraction_of_warmer_delta: 0.7
+    mae_to_sigma_factor: 1.2533
+    sigma_ref_lead: 7
+    min_signed_bias_damping: 0.35
+    dailymax_temp_mae_by_lead_f:
+      1: 1.94
+      2: 1.0
+      3: 1.92
+      4: 2.36
+      5: 4.11
+      6: 4.69
+      7: 6.3
+      8: 6.8
+      9: 7.2
+      10: 7.55
+      11: 7.85
+      12: 8.1
+      13: 8.35
+      14: 8.55
+      15: 8.75
+      16: 8.9
+    dailymax_temp_bias_by_lead_f:
+      1: -0.59
+      2: 1.25
+      3: 1.85
+      4: 2.98
+      5: 3.94
+      6: 4.11
+      7: 3.97
+      8: 4.0
+      9: 4.0
+      10: 4.0
+      11: 4.0
+      12: 4.0
+      13: 4.0
+      14: 4.0
+      15: 4.0
+      16: 4.0
+  hot_ramp_peak_capture:
+    enabled: true
+    shadow_mode: false
+    model_version: hot_ramp_peak_capture_guarded_prod_v2
+    source: hot_ramp_peak_guarded_prod
+    min_training_days: 1
+    min_lookup_days: 1
+    allow_anchorless_shadow_fallback: true
+    train_enforce_forecast_day: false
+    train_min_maxtemp_f: 95.0
+    train_min_dailymax_ramp_1day_f: 0.0
+    min_maxtemp_f: 100.0
+    min_dailymax_ramp_1day_f: 2.0
+    strong_ramp_min_maxtemp_f: 100.0
+    strong_ramp_min_dailymax_ramp_1day_f: 3.0
+    min_forecast_day: 1
+    max_forecast_day: 7
+    hours:
+    - 16
+    - 17
+    - 18
+    - 19
+    - 20
+    max_cloud_cover_norm: 0.4
+    spread_hours: 1.0
+    peak_timing_selector:
+      enabled: true
+      required_source: xgb_component
+      timing_sources:
+      - source: xgb_component
+        column: XGB_Pred_MWH
+      - source: raw_xgb_lgb
+        column: Raw_Forecast_MWH
+      - source: recent_corrected
+        column: Recent_Corrected_Forecast_MWH
+      source_priority:
+      - xgb_component
+      - raw_xgb_lgb
+      - recent_corrected
+      consensus_required: 2
+      max_consensus_hour_spread: 1.0
+      min_peak_margin_mwh: 1.0
+      allowed_hours:
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      block_on_strong_hot_ramp: true
+      strong_hot_ramp_min_maxtemp_f: 100.0
+      strong_hot_ramp_min_dailymax_ramp_1day_f: 3.0
+      target_selected_hour_to_daily_peak: true
+      cap_nonselected_hours_to_target: true
+      max_selected_hour_extra_correction_mwh: 4.0
+    ramp_floor_mwh: 0.0
+    strong_ramp_floor_mwh: 4.0
+    cap_mwh: 9.0
+    strong_ramp_cap_mwh: 10.0
+    min_abs_correction_mwh: 0.25
+    block_negative_learned_residual: true
+    min_learned_residual_mwh: 0.0
+    anchor_support_guard_enabled: true
+    anchor_min_learned_residual_mwh: 4.0
+    anchor_min_maxtemp_f: 105.0
+    floor_requires_anchor_support: true
+    recent_anchor_days: 3
+    warmer_scenario_fraction: 0.25
+    lag24_ramp_slope_cap_mwh_per_f: 4.0
+    cooling_underway_guard:
+      enabled: true
+      mode: all
+      min_hour: 18
+      min_drop_from_dailymax_f: 5.0
+      min_forecast_drop_next3hr_f: 6.0
+      min_delta_breeze_cooling_signal: 1.0
+      min_delta_breeze_post_peak_load_decay_signal: 1.0
+      blocked_source: hot_ramp_peak_cooling_underway_blocked
+    targeted_missing_slices:
+    - name: july_long_98_100_clear_moderate_state_peak_capture
+      enabled: true
+      source: hot_ramp_peak_targeted_july_long_98_100_clear_moderate_state
+      months:
+      - 7
+      min_forecast_day: 8
+      max_forecast_day: 16
+      hours:
+      - 17
+      - 18
+      min_maxtemp_f: 98.0
+      max_maxtemp_f_exclusive: 100.0
+      max_cloud_cover_norm: 0.1
+      min_raw_minus_samehour7_mwh: 20.0
+      max_raw_minus_samehour7_mwh_exclusive: 25.0
+      correction_mwh: 6.0
+    - name: july_long_95_98_clear_positive_state_peak_capture
+      enabled: false
+      source: hot_ramp_peak_targeted_july_long_95_98_clear_positive_state
+      months:
+      - 7
+      min_forecast_day: 8
+      max_forecast_day: 16
+      hours:
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      min_maxtemp_f: 95.0
+      max_maxtemp_f_exclusive: 98.0
+      max_cloud_cover_norm: 0.1
+      min_raw_minus_samehour7_mwh: 10.0
+      correction_mwh: 6.0
+    - name: july_long_100_105_clear_high_state_peak_capture
+      enabled: true
+      source: hot_ramp_peak_targeted_july_long_100_105_clear_high_state
+      months:
+      - 7
+      min_forecast_day: 15
+      max_forecast_day: 16
+      hours:
+      - 16
+      - 17
+      min_maxtemp_f: 100.0
+      max_maxtemp_f_exclusive: 105.0
+      max_cloud_cover_norm: 0.1
+      min_raw_minus_samehour7_mwh: 25.0
+      max_raw_minus_samehour7_mwh_exclusive: 50.0
+      correction_mwh: 6.0
+    - name: june_long_100_105_clear_very_high_state_peak_capture
+      enabled: false
+      source: hot_ramp_peak_targeted_june_long_100_105_clear_very_high_state
+      months:
+      - 6
+      min_forecast_day: 8
+      max_forecast_day: 16
+      hours:
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      min_maxtemp_f: 100.0
+      max_maxtemp_f_exclusive: 105.0
+      max_cloud_cover_norm: 0.1
+      min_raw_minus_samehour7_mwh: 50.0
+      correction_mwh: 5.0
+    - name: july_days2to3_90_92_clear_neutral_state_peak_capture
+      enabled: true
+      source: hot_ramp_peak_targeted_july_days2to3_90_92_clear_neutral_state
+      months:
+      - 7
+      min_forecast_day: 2
+      max_forecast_day: 3
+      hours:
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      min_maxtemp_f: 90.0
+      max_maxtemp_f_exclusive: 92.5
+      max_cloud_cover_norm: 0.1
+      min_raw_minus_samehour7_mwh: -10.0
+      max_raw_minus_samehour7_mwh_exclusive: 10.0
+      correction_mwh: 6.0
+    - name: june_days4to7_92_95_clear_moderate_state_peak_capture
+      enabled: true
+      source: hot_ramp_peak_targeted_june_days4to7_92_95_clear_moderate_state
+      months:
+      - 6
+      min_forecast_day: 4
+      max_forecast_day: 7
+      hours:
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      min_maxtemp_f: 92.5
+      max_maxtemp_f_exclusive: 95.0
+      max_cloud_cover_norm: 0.1
+      min_raw_minus_samehour7_mwh: 10.0
+      max_raw_minus_samehour7_mwh_exclusive: 25.0
+      correction_mwh: 6.0
+    - name: july_days4to7_90_92_overcast_deep_low_state_peak_capture
+      enabled: true
+      source: hot_ramp_peak_targeted_july_days4to7_90_92_overcast_deep_low_state
+      months:
+      - 7
+      min_forecast_day: 4
+      max_forecast_day: 7
+      hours:
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      min_maxtemp_f: 90.0
+      max_maxtemp_f_exclusive: 92.5
+      min_cloud_cover_norm: 0.6
+      min_raw_minus_samehour7_mwh: -999.0
+      max_raw_minus_samehour7_mwh_exclusive: -25.0
+      correction_mwh: 12.0
+    - name: july_days4to7_90_92_overcast_deep_low_state_he14_15_peak_capture
+      enabled: true
+      source: hot_ramp_peak_targeted_july_days4to7_90_92_overcast_deep_low_state_he14_15
+      months:
+      - 7
+      min_forecast_day: 4
+      max_forecast_day: 7
+      hours:
+      - 14
+      - 15
+      min_maxtemp_f: 90.0
+      max_maxtemp_f_exclusive: 92.5
+      min_cloud_cover_norm: 0.6
+      min_raw_minus_samehour7_mwh: -999.0
+      max_raw_minus_samehour7_mwh_exclusive: -25.0
+      correction_mwh: 6.0
+    - name: july_days2to3_85_90_clear_deep_low_state_peak_capture
+      enabled: true
+      source: hot_ramp_peak_targeted_july_days2to3_85_90_clear_deep_low_state
+      months:
+      - 7
+      min_forecast_day: 2
+      max_forecast_day: 3
+      hours:
+      - 14
+      - 15
+      - 16
+      - 17
+      - 18
+      min_maxtemp_f: 85.0
+      max_maxtemp_f_exclusive: 90.0
+      max_cloud_cover_norm: 0.1
+      min_raw_minus_samehour7_mwh: -999.0
+      max_raw_minus_samehour7_mwh_exclusive: -25.0
+      correction_mwh: 14.0
+    - name: july_days2to3_90_92_clear_negative_state_peak_capture
+      enabled: true
+      source: hot_ramp_peak_targeted_july_days2to3_90_92_clear_negative_state
+      months:
+      - 7
+      min_forecast_day: 2
+      max_forecast_day: 3
+      hours:
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      min_maxtemp_f: 90.0
+      max_maxtemp_f_exclusive: 92.5
+      max_cloud_cover_norm: 0.1
+      min_raw_minus_samehour7_mwh: -25.0
+      max_raw_minus_samehour7_mwh_exclusive: -10.0
+      correction_mwh: 6.0
+    - name: july_days4to7_95_98_clear_neutral_state_peak_capture
+      enabled: true
+      source: hot_ramp_peak_targeted_july_days4to7_95_98_clear_neutral_state
+      months:
+      - 7
+      min_forecast_day: 4
+      max_forecast_day: 7
+      hours:
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      min_maxtemp_f: 95.0
+      max_maxtemp_f_exclusive: 98.0
+      max_cloud_cover_norm: 0.1
+      min_raw_minus_samehour7_mwh: -10.0
+      max_raw_minus_samehour7_mwh_exclusive: 10.0
+      correction_mwh: 7.0
+    - name: july_days4to7_95_98_clear_mild_negative_state_peak_capture
+      enabled: true
+      source: hot_ramp_peak_targeted_july_days4to7_95_98_clear_mild_negative_state
+      months:
+      - 7
+      min_forecast_day: 4
+      max_forecast_day: 7
+      hours:
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      min_maxtemp_f: 95.0
+      max_maxtemp_f_exclusive: 98.0
+      max_cloud_cover_norm: 0.1
+      min_raw_minus_samehour7_mwh: -15.0
+      max_raw_minus_samehour7_mwh_exclusive: -10.0
+      correction_mwh: 4.0
+    - name: july_days4to7_95_100_clear_high_state_peak_capture
+      enabled: true
+      source: hot_ramp_peak_targeted_july_days4to7_95_100_clear_high_state
+      months:
+      - 7
+      min_forecast_day: 4
+      max_forecast_day: 7
+      hours:
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      min_maxtemp_f: 95.0
+      max_maxtemp_f_exclusive: 100.0
+      max_cloud_cover_norm: 0.1
+      min_raw_minus_samehour7_mwh: 25.0
+      max_raw_minus_samehour7_mwh_exclusive: 50.0
+      correction_mwh: 6.0
+    - name: july_long_98_100_clear_negative_state_peak_capture
+      enabled: true
+      source: hot_ramp_peak_targeted_july_long_98_100_clear_negative_state
+      months:
+      - 7
+      min_forecast_day: 8
+      max_forecast_day: 16
+      hours:
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      min_maxtemp_f: 98.0
+      max_maxtemp_f_exclusive: 100.0
+      max_cloud_cover_norm: 0.1
+      min_raw_minus_samehour7_mwh: -25.0
+      max_raw_minus_samehour7_mwh_exclusive: -10.0
+      correction_mwh: 8.0
+    - name: july_long_90_92_clear_negative_state_peak_capture
+      enabled: true
+      source: hot_ramp_peak_targeted_july_long_90_92_clear_negative_state
+      months:
+      - 7
+      min_forecast_day: 8
+      max_forecast_day: 16
+      hours:
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      min_maxtemp_f: 90.0
+      max_maxtemp_f_exclusive: 92.5
+      max_cloud_cover_norm: 0.1
+      min_raw_minus_samehour7_mwh: -25.0
+      max_raw_minus_samehour7_mwh_exclusive: -10.0
+      correction_mwh: 8.0
+  heat_persistence_peak_capture:
+    enabled: true
+    shadow_mode: false
+    model_version: heat_persistence_peak_capture_guarded_prod_v1
+    source: heat_persistence_peak_guarded_prod
+    min_training_days: 3
+    min_lookup_days: 2
+    train_enforce_forecast_day: false
+    train_min_maxtemp_f: 95.0
+    train_min_consecutive_extreme_days100: 1.0
+    train_min_dailymax_3day_mean_f: 95.0
+    min_maxtemp_f: 100.0
+    min_consecutive_extreme_days100: 3.0
+    min_dailymax_3day_mean_f: 100.0
+    max_dailymax_ramp_1day_f: 2.0
+    strong_min_maxtemp_f: 100.0
+    strong_min_consecutive_extreme_days100: 3.0
+    moderate_min_maxtemp_f: 95.0
+    moderate_min_consecutive_days: 5.0
+    min_forecast_day: 1
+    max_forecast_day: 7
+    hours:
+    - 16
+    - 17
+    - 18
+    - 19
+    - 20
+    max_cloud_cover_norm: 0.4
+    spread_hours: 1.0
+    persistence_floor_mwh: 0.0
+    strong_persistence_floor_mwh: 9.0
+    cap_mwh: 9.0
+    strong_cap_mwh: 9.0
+    min_abs_correction_mwh: 0.25
+    floor_applies_without_positive_anchor: true
+    allow_anchorless_fallback: false
+    allow_anchorless_shadow_fallback: true
+    recent_anchor_days: 3
+    warmer_scenario_fraction: 0.25
+    cooling_underway_guard:
+      enabled: true
+      mode: all
+      min_hour: 18
+      min_drop_from_dailymax_f: 5.0
+      min_forecast_drop_next3hr_f: 6.0
+      min_delta_breeze_cooling_signal: 1.0
+      min_delta_breeze_post_peak_load_decay_signal: 1.0
+      blocked_source: heat_persistence_peak_cooling_underway_blocked
+  operational_residual_learner:
+    enabled: true
+    shadow_mode: false
+    production_scope: capped_full_shadow
+    capped_full_shadow_cap_mwh: 6.0
+    model_version: operational_residual_capped_full_shadow_v1
+    min_rows: 336
+    backtest_min_train_rows: 336
+    target_clip_mwh: 30.0
+    learning_rate: 0.05
+    max_iter: 80
+    max_leaf_nodes: 12
+    min_samples_leaf: 24
+    l2_regularization: 4.0
+    blend: 0.35
+    cap_mwh: 6.0
+    total_cap_mwh: 8.0
+    hot_peak:
+      enabled: true
+      min_rows: 48
+      min_samples_leaf: 12
+      min_maxtemp_f: 90.0
+      hours:
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      blend: 0.45
+      cap_mwh: 6.0
+      structural_shadow:
+        enabled: true
+        source: global+hot_peak_structural_residual
+        min_rows: 48
+        min_samples_leaf: 12
+        min_maxtemp_f: 90.0
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 1
+        max_forecast_day: 16
+        blend: 0.3
+        cap_mwh: 5.0
+        total_cap_mwh: 5.0
+        min_positive_correction_mwh: 1.0
+        allow_negative_correction: false
+        respect_cooling_underway_guard: true
+        below_min_source: hot_peak_structural_below_min_correction
+        no_positive_source: hot_peak_structural_no_positive_correction
+        cooling_underway_guard:
+          enabled: true
+          mode: all
+          min_drop_from_dailymax_f: 5.0
+          min_forecast_drop_next3hr_f: 6.0
+          cap_positive_correction_mwh: 0.0
+          blocked_source: hot_peak_structural_cooling_underway_guard_blocked
+      broad_shadow:
+        enabled: true
+        source: global+hot_peak_broad_shadow
+        min_maxtemp_f: 90.0
+        hours:
+        - 16
+        - 17
+        - 18
+        - 19
+        - 20
+        min_forecast_day: 1
+        max_forecast_day: 16
+        blend: 0.45
+        cap_mwh: 6.0
+        total_cap_mwh: 8.0
+        min_abs_correction_mwh: 0.25
+        allow_negative_correction: false
+        no_positive_source: hot_peak_broad_no_positive_correction
+        below_min_source: hot_peak_broad_below_min_correction
+        positive_gate:
+          enabled: true
+          min_raw_minus_samehour_7day_mean_mwh: 8.0
+          max_raw_minus_samehour_7day_mean_mwh: 45.0
+          min_raw_minus_samehour_yesterday_mwh: 0.0
+          max_final_minus_raw_forecast_mwh: 18.0
+          max_cloud_cover_norm: 0.4
+          allow_negative_correction: false
+          blocked_source: hot_peak_broad_low_forecast_gate_blocked
+        cooling_underway_guard:
+          enabled: true
+          mode: all
+          min_drop_from_dailymax_f: 5.0
+          min_forecast_drop_next3hr_f: 6.0
+          cap_positive_correction_mwh: 0.0
+          blocked_source: hot_peak_broad_cooling_underway_guard_blocked
+      positive_gate:
+        enabled: true
+        min_raw_minus_samehour_7day_mean_mwh: 8.0
+        max_raw_minus_samehour_7day_mean_mwh: 45.0
+        min_raw_minus_samehour_yesterday_mwh: 0.0
+        max_final_minus_raw_forecast_mwh: 18.0
+        min_forecast_day: 1
+        max_forecast_day: 16
+        max_cloud_cover_norm: 0.4
+        allow_negative_correction: false
+        live_ramp_gate:
+          enabled: true
+          source: global+hot_peak_live_ramp_gate
+          min_forecast_day: 1
+          max_forecast_day: 1
+          hours:
+          - 17
+          - 18
+          - 19
+          min_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.2
+          min_lag1_mwh: 330.0
+          min_lag1_minus_base_forecast_mwh: 0.0
+          min_lag1_minus_samehour_yesterday_mwh: 10.0
+          min_lag1_minus_samehour_7day_mean_mwh: 35.0
+          min_live_ramp_1hr_mwh: 4.0
+        blocked_source: hot_peak_low_forecast_gate_blocked
+        cooling_underway_guard:
+          enabled: true
+          mode: all
+          min_drop_from_dailymax_f: 5.0
+          min_forecast_drop_next3hr_f: 6.0
+          cap_positive_correction_mwh: 0.0
+          blocked_source: hot_peak_cooling_underway_guard_blocked
+  recent_residual:
+    enabled: true
+    recent_hours: 48
+    same_hour_days: 7
+    min_weather_bucket_count: 6
+    blend: 0.85
+    cap_mwh: 9.0
+    decay_hours: 96
+    min_decay: 0.25
+    day1_scale: 0.35
+    horizon_regime_scales:
+      forecast_day_scales:
+        days2to3: 0.45
+        days4to7: 1.0
+        days8plus: 1.0
+      summer_clear_hot_days2to7:
+        enabled: true
+        min_maxtemp_f: 90.0
+        max_cloud_cover_norm: 0.2
+        scale: 0.0
+    hot_peak:
+      min_maxtemp_f: 90.0
+      hours:
+      - 16
+      - 17
+      - 18
+      - 19
+      - 20
+      default_scale: 0.0
+      season_scales:
+        Summer: 0.0
+    ar_residual:
+      enabled: false
+      lookback_hours: 168
+      min_pairs: 24
+      max_lag_gap_hours: 1.5
+      phi_shrink_k: 72.0
+      phi_cap: 0.4
+      blend: 0.35
+      same_hour_blend: 0.2
+      same_hour_days: 7
+      cap_mwh: 4.0
+      decay_hours: 36.0
+      min_decay: 0.0
+      forecast_day_scales:
+        day1: 1.0
+        days2to3: 0.45
+        days4to7: 0.15
+        days8plus: 0.0
+    origin_day_state:
+      enabled: false
+      lookback_days: 7
+      min_day_hours: 12
+      min_days: 2
+      min_total_hours: 36
+      latest_day_weight: 0.65
+      require_latest_recent_same_sign: true
+      shrink_days: 6.0
+      shrink_hours: 96.0
+      state_cap_mwh: 5.0
+      min_abs_state_mwh: 0.5
+      blend: 0.45
+      hourgroup_blend: 0.15
+      same_hour_blend: 0.1
+      require_component_same_sign: true
+      same_sign_threshold_mwh: 0.25
+      min_same_sign_run_hours: 4
+      short_run_scale: 0.5
+      cap_mwh: 2.0
+      decay_days: 5.0
+      min_decay: 0.0
+      forecast_day_scales:
+        day1: 0.35
+        days2to3: 0.45
+        days4to7: 0.25
+        days8plus: 0.08
+      cap_by_forecast_day:
+        day1: 1.0
+        days2to3: 1.5
+        days4to7: 1.0
+        days8plus: 0.5
+    weights:
+      recent_mean: 0.35
+      last24_mean: 0.2
+      same_hour: 0.11187865767976685
+      hourgroup: 0.06
+      global: 0.03
+      temp_hourgroup: 0.08
+      cloud_hourgroup: 0.05
+      solar_hourgroup: 0.03
+      solar_loss_hourgroup: 0.08
+      temp_cloud_hourgroup: 0.09377899446551476
+diagnostics:
+  enabled: true
+  training_weight_diagnostic: true
+  top_n: 100
+  min_segment_count: 6
+  stage_aware: true
+  lead_time_diagnostics: true
+  band_coverage_diagnostics: true
+  benchmark_baselines: true
+  catboost_benchmark: true
+  optuna_tuning_harness: true
+tuning:
+  optuna:
+    enabled: false
+    n_trials: 40
+    objective_weights:
+      overall_mae: 0.4
+      peak_mae: 0.25
+      daily_peak_miss: 0.2
+      warm_peak_bias: 0.1
+      cloudy_midday_mae: 0.05

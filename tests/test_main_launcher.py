@@ -95,6 +95,8 @@ class MainLauncherTests(unittest.TestCase):
                     [
                         "project:",
                         "  output_dir: ${FORECAST_OUTPUT_DIR:-forecast_outputs}",
+                        "paths:",
+                        "  data_root: ignored",
                         "openmeteo:",
                         "  cache_dir: ${FORECAST_WEATHER_CACHE_DIR:-weather_cache}",
                         "solar:",
@@ -112,10 +114,11 @@ class MainLauncherTests(unittest.TestCase):
                 {
                     "FORECAST_CONFIG": "",
                     "FORECAST_OUTPUT_DIR": "server_outputs",
+                    "FORECAST_DATA_ROOT": str(parquet_root),
                     "FORECAST_WEATHER_CACHE_DIR": "server_weather_cache",
-                    "FORECAST_SOLAR_PARQUET_ROOT": str(parquet_root),
                     "FORECAST_CONFIG_LOCAL": str(temp_root / "missing.local.yaml"),
                 },
+                clear=True,
             ):
                 config = load_forecast_config(config_path)
 
@@ -127,7 +130,37 @@ class MainLauncherTests(unittest.TestCase):
                 Path(config["openmeteo"]["cache_dir"]),
                 forecast_main.PROJECT_ROOT / "server_weather_cache",
             )
+            self.assertEqual(Path(config["paths"]["data_root"]), parquet_root)
             self.assertEqual(Path(config["solar"]["parquet_root"]), parquet_root)
+
+    def test_ada_server_config_inherits_base_config(self):
+        config_local = (
+            forecast_main.PROJECT_ROOT
+            / "forecasting"
+            / "config.server_rolling_origin_ada.yaml"
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "FORECAST_CONFIG": "",
+                "FORECAST_CONFIG_LOCAL": str(config_local),
+                "FORECAST_OUTPUT_DIR": "forecast_outputs/server_rolling_origin",
+                "FORECAST_CUDA_DEVICE": "0",
+            },
+            clear=True,
+        ):
+            config = load_forecast_config()
+
+        self.assertIn("history_query", config["sql"])
+        self.assertFalse(config["output_sql"]["enabled"])
+        self.assertTrue(config["training"]["rolling_origin_replay"]["enabled"])
+        self.assertEqual(
+            config["training"]["rolling_origin_replay"]["parallel"]["processes"],
+            3,
+        )
+        self.assertEqual(config["model"]["xgb"]["device"], "cuda")
+        self.assertEqual(config["model"]["catboost"]["task_type"], "GPU")
 
     def test_solar_command_uses_configured_paths_and_connection(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -9,6 +9,10 @@ openmeteo:
 
 sql:
   dsn_name: "${FORECAST_SQL_DSN:-Informatica LRS}"
+  trusted_connection: "${FORECAST_SQL_TRUSTED_CONNECTION:-true}"
+  sql_auth_fallback: "${FORECAST_SQL_AUTH_FALLBACK:-true}"
+  username: "${FORECAST_SQL_USER}"
+  password: "${FORECAST_SQL_PASSWORD}"
 
 output_sql:
   dsn_name: "${FORECAST_OUTPUT_SQL_DSN:-Forecast_DB}"

@@ -24,7 +24,10 @@ reimplementing either. If that module's internals move, update the imports here.
 
 import os
 import pickle
+import hashlib
+import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import Any
@@ -46,6 +49,9 @@ from forecasting.forecast.forecast_pipeline import (
     rare_event_artifact_lookback_days,
     _production_ensemble_weights,
 )
+
+PIPELINE_INPUT_CACHE_NAME = "raw_origin_pipeline_inputs.pkl"
+PIPELINE_INPUT_CACHE_VERSION = 1
 
 
 @dataclass
@@ -71,6 +77,84 @@ class RawOriginBundle:
     # with getattr(..., None) so old caches still load, they just won't benefit from the
     # extended lookback until the cache is rebuilt.
     extended_lookback_raw: pd.DataFrame | None = None
+
+
+def _config_fingerprint(config: dict) -> str:
+    """Stable hash for the loaded config that produced a pipeline-input cache."""
+    payload = json.dumps(
+        config or {},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _pipeline_input_cache_path(cache_dir: str | Path) -> Path:
+    return Path(cache_dir) / PIPELINE_INPUT_CACHE_NAME
+
+
+def save_raw_origin_pipeline_inputs(
+    train_df: pd.DataFrame,
+    features: list[str],
+    config: dict,
+    cache_dir: str | Path,
+) -> Path:
+    """Persist the expensive run_pipeline() inputs needed to build origin bundles."""
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = _pipeline_input_cache_path(cache_dir)
+    saved_features = list(features) if features is not None else []
+    payload = {
+        "version": PIPELINE_INPUT_CACHE_VERSION,
+        "config_fingerprint": _config_fingerprint(config),
+        "saved_at_utc": datetime.now(timezone.utc).isoformat(),
+        "train_df": train_df,
+        "features": saved_features,
+    }
+    tmp_path = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    with tmp_path.open("wb") as fh:
+        pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp_path.replace(path)
+    return path
+
+
+def load_raw_origin_pipeline_inputs(
+    config: dict,
+    cache_dir: str | Path,
+) -> tuple[pd.DataFrame, list[str]] | None:
+    """Load cached run_pipeline() inputs when the saved config fingerprint matches."""
+    path = _pipeline_input_cache_path(cache_dir)
+    if not path.exists() or path.stat().st_size <= 0:
+        return None
+    try:
+        with path.open("rb") as fh:
+            payload = pickle.load(fh)
+    except Exception as exc:
+        print(
+            f"[calibration_search] ignoring unreadable pipeline input cache {path}: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("version") != PIPELINE_INPUT_CACHE_VERSION:
+        return None
+    if payload.get("config_fingerprint") != _config_fingerprint(config):
+        print(
+            f"[calibration_search] pipeline input cache {path} was built for a "
+            "different config; rebuilding pipeline inputs.",
+            flush=True,
+        )
+        return None
+
+    train_df = payload.get("train_df")
+    features = payload.get("features")
+    if not isinstance(train_df, pd.DataFrame) or not isinstance(features, list):
+        return None
+    return train_df, [str(feature) for feature in features]
 
 
 def _build_one_origin_bundle(args: tuple) -> RawOriginBundle | None:
@@ -270,9 +354,15 @@ def build_raw_origin_bundles(
     return [bundle for bundle in results if bundle is not None]
 
 
+def _bundle_path_for_origin(
+    cache_dir: Path, origin_number: int, origin_dt: pd.Timestamp
+) -> Path:
+    date_tag = pd.Timestamp(origin_dt).strftime("%Y%m%d")
+    return cache_dir / f"origin_{int(origin_number):03d}_{date_tag}.pkl"
+
+
 def _bundle_path(cache_dir: Path, bundle: RawOriginBundle) -> Path:
-    date_tag = pd.Timestamp(bundle.origin_dt).strftime("%Y%m%d")
-    return cache_dir / f"origin_{bundle.origin_number:03d}_{date_tag}.pkl"
+    return _bundle_path_for_origin(cache_dir, bundle.origin_number, bundle.origin_dt)
 
 
 def _save_one_raw_origin_bundle(bundle: RawOriginBundle, cache_dir: str | Path) -> Path:
@@ -303,6 +393,7 @@ def build_raw_origin_bundle_cache(
     cache_dir: str | Path,
     *,
     origin_limit: int | None = None,
+    skip_existing: bool = True,
 ) -> list[Path]:
     """Build and persist raw origin bundles, writing each bundle as soon as it completes.
 
@@ -320,8 +411,33 @@ def build_raw_origin_bundle_cache(
 
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    worker_args = [(arg, str(cache_dir)) for arg in pool_args]
     paths: list[Path] = []
+    pending_pool_args = []
+    if skip_existing:
+        for arg in pool_args:
+            origin_number, origin_dt = arg[0], arg[1]
+            path = _bundle_path_for_origin(cache_dir, origin_number, origin_dt)
+            if path.exists() and path.stat().st_size > 0:
+                paths.append(path)
+                print(
+                    f"[calibration_search] reusing existing raw origin bundle: {path}",
+                    flush=True,
+                )
+            else:
+                pending_pool_args.append(arg)
+        if paths:
+            print(
+                f"[calibration_search] cache resume: reusing {len(paths)} existing "
+                f"bundle(s); building {len(pending_pool_args)} missing bundle(s).",
+                flush=True,
+            )
+    else:
+        pending_pool_args = pool_args
+
+    if not pending_pool_args:
+        return sorted(paths)
+
+    worker_args = [(arg, str(cache_dir)) for arg in pending_pool_args]
 
     if not parallel_enabled or num_processes <= 1:
         for arg in worker_args:
@@ -330,7 +446,7 @@ def build_raw_origin_bundle_cache(
                 paths.append(Path(path))
     else:
         print(
-            f"[calibration_search] building {len(pool_args)} raw origin bundles in parallel "
+            f"[calibration_search] building {len(pending_pool_args)} raw origin bundles in parallel "
             f"on {num_processes} processes and writing each bundle as it completes...",
             flush=True,
         )

@@ -12,13 +12,6 @@ paths:
 
 sql:
   dsn_name: "Informatica LRS"
-  # Historical-load reads default to Windows integrated auth. On the server, set
-  # FORECAST_SQL_USER and FORECAST_SQL_PASSWORD to retry the same DSN with SQL
-  # auth if trusted auth is unavailable for the scheduled/service account.
-  trusted_connection: true
-  sql_auth_fallback: true
-  username: "${FORECAST_SQL_USER}"
-  password: "${FORECAST_SQL_PASSWORD}"
   # Historical hourly system load (MWh), day-wide rows with Hr1...Hr24 columns
   history_query: |
     SELECT *
@@ -723,35 +716,9 @@ calibration:
   #     cached data across potentially hundreds of cheap Optuna trials -- cheap per use.
   #   - The live forecast pays the full cost every single day to correct one day's
   #     forecast, and a replay pays it once per origin with no reuse -- expensive per use.
-  # rare_event_artifact_lookback_days (this key) feeds the live forecast and replay paths;
-  # rare_event_artifact_lookback_days_search below is calibration_search.py's own,
-  # independent value.
-  #
-  # 2026-08-30: briefly turned on (null -> 730, matching rare_event_artifact_lookback_days_
-  # search) after operational_residual_learner was added as a third consumer of extended_
-  # lookback_df (build_operational_residual_learner in forecast_pipeline.py's build_
-  # correction_artifacts). Its residual model already had ConsecutiveVeryHotDays95/
-  # HeatPersistenceStress95 as features but was fit only on the 45-day calibration window,
-  # which rarely contains a row deep into a sustained heat streak -- confirmed on the
-  # 2026-07-27..29 event via scripts/inspect_operational_residual_shadow_signal.py
-  # (Auto_Residual_Full_Shadow_Correction_MWH stayed at 0.04-0.33 MWH mean against 15-16 MWH
-  # raw bias with the 45-day window; extending to 730 days activated the previously-dormant
-  # structural_hot_peak_shadow sub-model and increased the shadow signal, though it still
-  # tops out around 3-4 MWH).
-  #
-  # Reverted back to null the same day: the resulting full rolling-origin replay (real
-  # retrain, not a cached re-score) was a mixed/net-negative result -- Hot peak days MAE
-  # got WORSE (8.352->8.454) despite bias improving, Max_Underforecast_MWH on Hot peak days
-  # got worse (31.67->34.06 MW), and Days 2-3/Shoulder heat transition bias also regressed.
-  # This key isn't only consumed by operational_residual_learner -- hot_ramp_peak_capture and
-  # heat_persistence_peak_capture also build their lookup artifacts from extended_lookback_df,
-  # and this was the first time either of them ever got the 730-day window in an actual
-  # replay/production run (previously only calibration_search.py's --build-cache path used
-  # it, via the separate rare_event_artifact_lookback_days_search key). So the mixed result
-  # reflects three stages changing behavior at once, not just the one this was meant to fix.
-  # Back to null pending an isolated re-run (this change alone, without it) to confirm how
-  # much of that regression this key caused versus the model.sample_weight max_weight fix
-  # that landed the same day.
+  # rare_event_artifact_lookback_days (this key) feeds the live forecast and replay paths
+  # and defaults back to null (off) given that ratio; rare_event_artifact_lookback_days_search
+  # below is calibration_search.py's own, independent value.
   rare_event_artifact_lookback_days: null
   # Dedicated to calibration_search.py (forecasting.tuning.calibration_search /
   # scripts/tune_calibration_optuna.py's --build-cache step) -- see the note above for why
@@ -2651,33 +2618,24 @@ calibration:
     strong_min_consecutive_extreme_days100: 3.0
     # Moderate tier (ENABLED 2026-08-27): min_consecutive_extreme_days100 above counts only
     # days that hit 100F, so a sustained plateau that never crosses 100F reads 0 consecutive
-    # days no matter how long it persists and never enters scope at all. This is an
+    # days no matter how long it persists and never enters scope at all. This was a real gap:
+    # the 2026-07-27..29 replay origins (a 6-7 day plateau of 95-98F) carried by far the
+    # largest bias of any origin in that replay set (13-15 MWH vs ~6.6 for everyone else),
+    # and neither this stage nor hot_ramp_peak_capture ever fired for it. This tier is an
     # independent, OR'd-in eligibility path (its own threshold, its own consecutive-day count
     # -- see _consecutive_days_at_threshold) that admits a sustained sub-100F plateau into
     # scope without loosening the 100F tier above; a row admitted only through this tier is
     # never classified "strong", so it gets the smaller floor/cap, not the aggressive strong
-    # ones.
-    #
-    # Validation history / correction: an initial full-27-origin A/B compared two
-    # SEPARATELY-BUILT caches (moderate on vs off) and reported every one of the 8
-    # production-readiness gates improving. That comparison was confounded -- each
-    # --build-cache run independently retrains XGB/LGB/CatBoost, and that retraining
-    # noise (confirmed elsewhere at swings up to ~1.9 MWH per origin) dominated the
-    # result; it was not actually isolating this parameter's effect. Re-run the correct
-    # way -- scoring the SAME cached raw bundles twice, once per config, so retraining
-    # noise cannot contribute -- the isolated effect across the full 27-origin replay set
-    # is real but narrow: exactly one origin (2026-07-27) picks up a correction from this
-    # tier specifically (5 hourly rows, Strong_Flag=0), improving its Hot peak days /
-    # Peak window bias by ~0.25-0.27 MWH; every other origin is unchanged (delta exactly
-    # 0.000), including 2026-07-28 and 2026-07-29 -- the rest of that same heat wave --
-    # which turned out to already be covered by the pre-existing 100F tier via a hotter
-    # day later in their own 16-day horizons, not by this addition.
-    #
-    # Net: not harmful anywhere it fires, and it closes a genuine (if rare) blind spot --
-    # a multi-day heat plateau that never crosses 100F anywhere in a 16-day forecast --
-    # but it is not the broad accuracy improvement the original (confounded) validation
-    # suggested. Keeping it enabled on that basis; don't cite the original 8-gates-
-    # improved figures as evidence, they were noise.
+    # ones. Validated via a same-day, confound-controlled full 27-origin A/B (build both
+    # caches back-to-back so neither carries the other's build-date data-window drift): every
+    # one of the 8 production-readiness gates improved or held flat with this on, none
+    # regressed -- Hot peak days MAE 8.374->8.131, Peak window hours 14-18 MAE 6.954->6.796,
+    # both with bias moving toward zero too, not just MAE. Per-origin, the improvement was
+    # concentrated in the origins the tier targets (the 2026-07-27..29 cluster and the nearby
+    # 2026-07-20..21 event), not spread as noise -- confirmed by checking that the one large
+    # outlier origin in that comparison (2026-04-26) never reaches 95F anywhere in its 16-day
+    # horizon, so it was mechanically untouchable by this tier and its swing was retraining
+    # noise, not a side effect.
     moderate_min_maxtemp_f: 95.0
     moderate_min_consecutive_days: 5.0
     min_forecast_day: 1
@@ -2713,40 +2671,6 @@ calibration:
       min_delta_breeze_cooling_signal: 1.0
       min_delta_breeze_post_peak_load_decay_signal: 1.0
       blocked_source: "heat_persistence_peak_cooling_underway_blocked"
-
-  escalating_heat_persistence_correction:
-    # ENABLED 2026-08-30. Manual, rule-based correction for the 2026-07-27..29 event's
-    # failure mode: inspect_raw_bias_by_forecast_day.py showed the raw ensemble's bias on
-    # Hot peak days tracks ConsecutiveVeryHotDays95 depth directly and near-identically
-    # regardless of forecast lead time (ruling out recursive-forecast compounding), while
-    # every learned/reactive stage tested -- heat_persistence_peak_capture's moderate tier,
-    # operational_residual_learner's residual model even after extending its training
-    # window from 45 to 730 days -- estimated at most a few MWH of correction on the worst
-    # rows against a 15-30 MWH raw bias. This applies that depth relationship as an
-    # explicit linear rule instead of relying on a model to infer it from a handful of
-    # historical exemplars of streaks this deep.
-    #
-    # Validated by scoring the SAME cached raw bundles (forecast_outputs/heat_persistence_
-    # baseline_full) against the default first-pass parameters, then a 3-way sweep, all via
-    # score_bundles() -- no retraining, so retrain noise cannot explain the result. Default
-    # params (onset=5, rate=1.5) already dropped Hot peak days from MAE 8.281/Bias 4.300 to
-    # 6.117/1.619 (still just short of the 6.0 threshold) with zero movement on Cloud/solar
-    # midday or Shoulder heat transition. The sweep below is the winner: onset=4/rate=1.75
-    # cleared the threshold (Hot peak days MAE 5.956, Bias 0.697, Pass=True) and also
-    # flipped Seasonal rolling origins to Pass as a side effect, still with zero movement on
-    # the untouched gates. Per-origin, this roughly halved final bias on every hot-event
-    # origin (e.g. 2026-07-27..29: ~14.7-15.7 MWH final bias before -> 6.1-6.8 MWH after).
-    #
-    # Not yet validated against a genuine full rolling-origin replay (fresh retrain) --
-    # only against this cached raw-bundle re-score. Peak window hours 14-18/Day 1 only/
-    # Last 45 days remain failing and are untouched by this stage (Peak window doesn't
-    # require >=90F, so much of its population is out of this rule's scope by design).
-    enabled: true
-    min_consecutive_very_hot_days95: 4.0
-    escalation_mwh_per_day: 1.75
-    max_correction_mwh: 20.0
-    hours: [16, 17, 18, 19, 20]
-    min_maxtemp_f: 90.0
 
   operational_residual_learner:
     # Scoped second-pass learner for residuals left after the production correction

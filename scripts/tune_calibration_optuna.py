@@ -65,6 +65,8 @@ from forecasting.tuning.calibration_search import (
     RawOriginBundle,
     build_raw_origin_bundle_cache,
     load_raw_origin_bundles,
+    load_raw_origin_pipeline_inputs,
+    save_raw_origin_pipeline_inputs,
     score_bundles,
 )
 from forecasting.tuning.optuna_tuning import (
@@ -114,22 +116,44 @@ def scorecard_for(bundles: list[RawOriginBundle], config: dict) -> pd.DataFrame:
     return build_search_scorecard(replay_df, config)
 
 
-def build_cache(config: dict, cache_dir: Path, origin_limit: int | None) -> None:
-    from forecasting.forecast.forecast_pipeline import run_pipeline
+def build_cache(
+    config: dict,
+    cache_dir: Path,
+    origin_limit: int | None,
+    *,
+    skip_existing: bool = True,
+    rebuild_pipeline_inputs: bool = False,
+) -> None:
+    cached_inputs = None
+    if not rebuild_pipeline_inputs:
+        cached_inputs = load_raw_origin_pipeline_inputs(config, cache_dir)
 
-    print(
-        "Running the full pipeline once to build train_df/features for the replay cache...",
-        flush=True,
-    )
-    results = run_pipeline(config)
-    train_df = results["historical_fit_df"]
-    features = results.get("features", [])
+    if cached_inputs is not None:
+        train_df, features = cached_inputs
+        print(
+            f"Loaded cached pipeline inputs from {cache_dir} "
+            f"({len(train_df)} training rows, {len(features)} features).",
+            flush=True,
+        )
+    else:
+        from forecasting.forecast.forecast_pipeline import run_pipeline
+
+        print(
+            "Running the full pipeline once to build train_df/features for the replay cache...",
+            flush=True,
+        )
+        results = run_pipeline(config)
+        train_df = results["historical_fit_df"]
+        features = results.get("features", [])
+        path = save_raw_origin_pipeline_inputs(train_df, features, config, cache_dir)
+        print(f"Saved pipeline inputs for future resumes: {path}", flush=True)
     paths = build_raw_origin_bundle_cache(
         train_df,
         features,
         config,
         cache_dir=cache_dir,
         origin_limit=origin_limit,
+        skip_existing=skip_existing,
     )
     if not paths:
         raise SystemExit(
@@ -617,6 +641,16 @@ def main() -> None:
         help="Cap the number of origins used when building the cache (useful for a quick smoke test)",
     )
     parser.add_argument(
+        "--rebuild-existing-cache",
+        action="store_true",
+        help="Rebuild origin bundles even when origin_*.pkl files already exist in --cache-dir.",
+    )
+    parser.add_argument(
+        "--rebuild-pipeline-input-cache",
+        action="store_true",
+        help="Rerun the full pipeline setup even when cached train_df/features match the config.",
+    )
+    parser.add_argument(
         "--n-trials", type=int, default=50, help="Optuna trials per repeat"
     )
     parser.add_argument(
@@ -678,7 +712,13 @@ def main() -> None:
     config = load_forecast_config(args.config)
 
     if args.build_cache:
-        build_cache(config, args.cache_dir, args.origin_limit)
+        build_cache(
+            config,
+            args.cache_dir,
+            args.origin_limit,
+            skip_existing=not args.rebuild_existing_cache,
+            rebuild_pipeline_inputs=args.rebuild_pipeline_input_cache,
+        )
         return
 
     weights = json.loads(args.objective_weights) if args.objective_weights else None

@@ -8,15 +8,111 @@ from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
 
-def _make_sql_engine(dsn_name: str):
+def _as_bool(value: object, *, default: bool) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
+
+
+def _coerce_sql_config(sql_config: dict | str) -> dict:
+    if isinstance(sql_config, str):
+        return {"dsn_name": sql_config}
+    return dict(sql_config or {})
+
+
+def _sql_connection_attempts(sql_config: dict | str) -> list[tuple[str, str]]:
+    cfg = _coerce_sql_config(sql_config)
+    dsn_name = str(cfg.get("dsn_name") or "").strip()
+    if not dsn_name:
+        raise ValueError("sql.dsn_name is required for hourly system-load loading.")
+
+    username = str(cfg.get("username") or cfg.get("user") or "").strip()
+    password = str(cfg.get("password") or "")
+    has_sql_auth = bool(username and password)
+    trusted_connection = _as_bool(
+        cfg.get("trusted_connection"),
+        default=True,
+    )
+    sql_auth_fallback = _as_bool(cfg.get("sql_auth_fallback"), default=True)
+
+    attempts: list[tuple[str, str]] = []
+    if trusted_connection:
+        attempts.append(
+            (
+                "trusted connection",
+                f"DSN={dsn_name};Trusted_Connection=yes;",
+            )
+        )
+    if has_sql_auth and (sql_auth_fallback or not trusted_connection):
+        attempts.append(("SQL auth", f"DSN={dsn_name};UID={username};PWD={password};"))
+    if not attempts:
+        attempts.append(
+            (
+                "trusted connection",
+                f"DSN={dsn_name};Trusted_Connection=yes;",
+            )
+        )
+    return attempts
+
+
+def _scrub_sql_error(exc: BaseException, secrets: list[str]) -> str:
+    message = f"{type(exc).__name__}: {exc}"
+    for secret in secrets:
+        if secret:
+            message = message.replace(secret, "***")
+    return message
+
+
+def _make_sql_engine_from_odbc(odbc: str):
     try:
         from sqlalchemy import create_engine
     except Exception as exc:
         raise RuntimeError(
             "SQLAlchemy is required for SQL Server loading. Install with `pip install sqlalchemy pyodbc`."
         ) from exc
-    odbc = f"DSN={dsn_name};Trusted_Connection=yes;"
     return create_engine(f"mssql+pyodbc:///?odbc_connect={quote_plus(odbc)}")
+
+
+def _make_sql_engine(dsn_name: str):
+    return _make_sql_engine_from_odbc(f"DSN={dsn_name};Trusted_Connection=yes;")
+
+
+def _read_sql_query_with_auth_fallback(
+    query: str, sql_config: dict | str
+) -> pd.DataFrame:
+    cfg = _coerce_sql_config(sql_config)
+    password = str(cfg.get("password") or "")
+    secrets = [password, quote_plus(password) if password else ""]
+    errors: list[str] = []
+
+    for label, odbc in _sql_connection_attempts(cfg):
+        engine = None
+        try:
+            engine = _make_sql_engine_from_odbc(odbc)
+            return pd.read_sql_query(query, engine)
+        except Exception as exc:
+            errors.append(f"{label}: {_scrub_sql_error(exc, secrets)}")
+        finally:
+            if engine is not None:
+                try:
+                    engine.dispose()
+                except Exception:
+                    pass
+
+    raise RuntimeError(
+        "Failed to load hourly system MWh using configured SQL connection attempts:\n"
+        + "\n".join(errors)
+    )
 
 
 def actuals_import_cutoff_dt(
@@ -61,10 +157,10 @@ def load_hourly_system_mwh(config: dict) -> pd.DataFrame:
     Returns columns: DT (tz-aware), MWH (float)
     """
     tz = ZoneInfo(config["project"]["timezone"])
-    engine = _make_sql_engine(config["sql"]["dsn_name"])
+    sql_config = config["sql"]
     query = config["sql"]["history_query"]
 
-    df = pd.read_sql_query(query, engine)
+    df = _read_sql_query_with_auth_fallback(query, sql_config)
 
     # Expected columns: YEAR, MONTH, DAY, Hr1..Hr24
     hour_cols = [c for c in df.columns if str(c).lower().startswith("hr")]

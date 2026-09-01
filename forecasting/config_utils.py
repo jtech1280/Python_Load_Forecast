@@ -20,7 +20,13 @@ _ENV_TOKEN_RE = re.compile(
 
 _ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
     "FORECAST_OUTPUT_DIR": ("project", "output_dir"),
+    "FORECAST_DATA_ROOT": ("paths", "data_root"),
     "FORECAST_SQL_DSN": ("sql", "dsn_name"),
+    "FORECAST_SQL_USER": ("sql", "username"),
+    "FORECAST_SQL_USERNAME": ("sql", "username"),
+    "FORECAST_SQL_PASSWORD": ("sql", "password"),
+    "FORECAST_SQL_TRUSTED_CONNECTION": ("sql", "trusted_connection"),
+    "FORECAST_SQL_AUTH_FALLBACK": ("sql", "sql_auth_fallback"),
     "FORECAST_OUTPUT_SQL_DSN": ("output_sql", "dsn_name"),
     "FORECAST_FIVE_MIN_DSN": ("five_min_load", "dsn_name"),
     "FORECAST_LOCAL_WEATHER_DSN": ("local_weather", "dsn_name"),
@@ -34,6 +40,7 @@ _ENV_OVERRIDES: dict[str, tuple[str, ...]] = {
 
 _PATH_KEYS: set[tuple[str, ...]] = {
     ("project", "output_dir"),
+    ("paths", "data_root"),
     ("openmeteo", "cache_dir"),
     ("btm", "tsv_path"),
     ("solar", "parquet_root"),

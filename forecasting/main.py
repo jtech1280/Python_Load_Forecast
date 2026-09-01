@@ -630,6 +630,12 @@ def main(argv: list[str] | None = None):
         help="Override rolling replay origin count",
     )
     parser.add_argument(
+        "--replay-processes",
+        type=int,
+        default=None,
+        help="Override concurrent rolling replay origin worker processes",
+    )
+    parser.add_argument(
         "--replay-origin-step-days",
         type=int,
         default=None,
@@ -754,6 +760,11 @@ def main(argv: list[str] | None = None):
         config.setdefault("training", {}).setdefault("rolling_origin_replay", {})[
             "max_origins"
         ] = int(args.replay_max_origins)
+    if args.replay_processes is not None:
+        replay_cfg = config.setdefault("training", {}).setdefault(
+            "rolling_origin_replay", {}
+        )
+        replay_cfg.setdefault("parallel", {})["processes"] = int(args.replay_processes)
     if args.replay_origin_step_days is not None:
         config.setdefault("training", {}).setdefault("rolling_origin_replay", {})[
             "origin_step_days"

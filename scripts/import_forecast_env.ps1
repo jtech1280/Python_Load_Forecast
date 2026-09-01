@@ -36,3 +36,32 @@ foreach ($name in @(".env", ".env.local")) {
         }
     }
 }
+
+function Set-DefaultIfEmpty {
+    param(
+        [string]$Name,
+        [string]$Value
+    )
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return
+    }
+    if ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($Name, "Process"))) {
+        [Environment]::SetEnvironmentVariable($Name, $Value, "Process")
+    }
+}
+
+if ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable("FORECAST_DATA_ROOT", "Process")) -and
+    [string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable("FORECAST_SOLAR_PARQUET_ROOT", "Process"))) {
+    foreach ($candidate in @("D:\PY_LRS", "C:\PY_LRS")) {
+        if (Test-Path $candidate) {
+            Set-DefaultIfEmpty -Name "FORECAST_DATA_ROOT" -Value $candidate
+            Set-DefaultIfEmpty -Name "FORECAST_SOLAR_PARQUET_ROOT" -Value $candidate
+            break
+        }
+    }
+}
+elseif ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable("FORECAST_SOLAR_PARQUET_ROOT", "Process"))) {
+    Set-DefaultIfEmpty `
+        -Name "FORECAST_SOLAR_PARQUET_ROOT" `
+        -Value ([Environment]::GetEnvironmentVariable("FORECAST_DATA_ROOT", "Process"))
+}

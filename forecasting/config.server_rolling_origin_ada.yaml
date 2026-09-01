@@ -1,0 +1,71 @@
+# Server-only local override for RTX 4000 Ada rolling-origin replay.
+#
+# This file is intentionally partial. Use it through FORECAST_CONFIG_LOCAL, which
+# keeps forecasting/config.yaml as the base config and overlays only these server
+# performance settings. The launcher at scripts/run_rolling_origin_replay_ada_server.ps1
+# sets that environment variable for the Python process.
+
+project:
+  output_dir: "${FORECAST_OUTPUT_DIR:-forecast_outputs/server_rolling_origin}"
+
+output_sql:
+  enabled: false
+
+training:
+  rolling_origin_replay:
+    enabled: true
+    max_origins: 27
+    skip_prophet: true
+    skip_calibration_prophet: true
+    skip_catboost: false
+    log_timing: true
+    allow_concurrent: false
+    parallel:
+      enabled: true
+      # Full Ada server default. The replay runner divides CPU threads per
+      # worker, so three origins keeps the 24-core VM and RTX 4000 Ada busier
+      # without asking every process for every CPU thread.
+      processes: 3
+      # The base config keeps this true for small workstation GPUs. The Ada server
+      # should have enough VRAM for controlled origin-level concurrency.
+      serial_when_catboost_gpu: false
+
+hardware:
+  performance_mode: "server_ada_rolling_origin"
+  cpu_threads: -1
+  max_workers: -1
+  set_thread_env: true
+  overwrite_thread_env: true
+  # Keep model-level XGB/LGB concurrency off while origin-level multiprocessing is
+  # on. This avoids nested parallelism fighting for the same GPU and CPU cores.
+  parallel_tree_training: false
+  force_parallel_cpu_training: false
+  use_gpu: true
+  xgb_gpu_api: "cuda"
+  # Start with LightGBM CPU. Use the launcher -UseLightGbmGpu switch only for a
+  # separate benchmark run after the XGB/CatBoost GPU path is stable.
+  use_lgb_gpu: false
+  # Fail fast on this server profile if the requested GPU backend is unavailable.
+  fallback_to_cpu: false
+
+model:
+  xgb:
+    tree_method: "hist"
+    device: "cuda"
+    gpu_api: "cuda"
+    n_jobs: -1
+
+  lgb:
+    use_gpu: false
+    n_jobs: -1
+
+  catboost:
+    enabled: true
+    blend_into_production: true
+    require_gpu: true
+    task_type: "GPU"
+    devices: "${FORECAST_CUDA_DEVICE:-0}"
+    # CatBoost's default can reserve nearly all free VRAM. This setting is sized
+    # for three concurrent replay-origin workers on one RTX 4000 Ada.
+    gpu_ram_part: 0.25
+    thread_count: -1
