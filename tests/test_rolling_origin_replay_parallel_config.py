@@ -6,7 +6,9 @@ from unittest.mock import patch
 import pandas as pd
 
 from forecasting.backtest.rolling_origin_replay import (
+    _score_weather_scenarios,
     _serial_replay_required_for_catboost_gpu,
+    _weather_scenario_max_workers,
     _worker_config_for_parallel_replay,
     run_rolling_origin_replay,
 )
@@ -197,6 +199,139 @@ class RollingOriginReplayCatBoostGpuExecutionTests(unittest.TestCase):
         pool_cls.assert_not_called()
         self.assertEqual(run_single.call_count, 2)
         self.assertEqual(result["origin_number"].tolist(), [1, 2])
+
+
+class WeatherScenarioMaxWorkersTests(unittest.TestCase):
+    def test_defaults_to_serial(self):
+        self.assertEqual(_weather_scenario_max_workers({}, n_scenarios=4), 1)
+
+    def test_configured_value_is_used(self):
+        config = {
+            "training": {
+                "rolling_origin_replay": {"parallel": {"weather_scenario_workers": 4}}
+            }
+        }
+        self.assertEqual(_weather_scenario_max_workers(config, n_scenarios=4), 4)
+
+    def test_capped_at_scenario_count(self):
+        config = {
+            "training": {
+                "rolling_origin_replay": {"parallel": {"weather_scenario_workers": 10}}
+            }
+        }
+        self.assertEqual(_weather_scenario_max_workers(config, n_scenarios=4), 4)
+
+    def test_single_scenario_is_always_serial(self):
+        config = {
+            "training": {
+                "rolling_origin_replay": {"parallel": {"weather_scenario_workers": 8}}
+            }
+        }
+        self.assertEqual(_weather_scenario_max_workers(config, n_scenarios=1), 1)
+
+    def test_zero_scenarios_is_serial(self):
+        self.assertEqual(_weather_scenario_max_workers({}, n_scenarios=0), 1)
+
+
+class ScoreWeatherScenariosTests(unittest.TestCase):
+    """Serial (default) and parallel (opted-in via config) execution of
+    _score_weather_scenarios must produce identical results -- scenarios are
+    independent, read-only inference against the same already-trained models."""
+
+    def _scenario_defs(self) -> list[dict]:
+        return [
+            {"name": "warmer", "temperature_delta_f": 3.0},
+            {"name": "cooler", "temperature_delta_f": -3.0},
+            {"name": "cloudier_solar_loss", "cloud_cover_delta_norm": 0.30},
+            {"name": "clearer_high_solar", "cloud_cover_delta_norm": -0.30},
+        ]
+
+    def _fake_raw_prediction_frame(self, *, future_frame, **kwargs):
+        # Echo the scenario's marker column back as a distinguishable, deterministic
+        # per-scenario result -- lets the test verify each call got the right scenario
+        # frame, in any execution order.
+        return pd.DataFrame({"Marker": future_frame["Marker"].tolist()})
+
+    def _run(self, config: dict) -> dict[str, pd.DataFrame]:
+        def fake_make_scenario_frame(base_future_frame, scenario):
+            return pd.DataFrame({"Marker": [scenario["name"]] * 3})
+
+        base_future_frame = pd.DataFrame({"Marker": ["base"] * 3})
+        with (
+            patch(
+                "forecasting.backtest.rolling_origin_replay.make_weather_scenario_frame",
+                side_effect=fake_make_scenario_frame,
+            ),
+            patch(
+                "forecasting.backtest.rolling_origin_replay._raw_prediction_frame",
+                side_effect=self._fake_raw_prediction_frame,
+            ),
+        ):
+            return _score_weather_scenarios(
+                self._scenario_defs(),
+                base_future_frame,
+                target=pd.DataFrame(),
+                hist=pd.DataFrame(),
+                features=[],
+                ensemble_weights={},
+                xgb_model=None,
+                lgb_model=None,
+                prophet_fit=None,
+                prophet_features=[],
+                catboost_model=None,
+                origin_dt=pd.Timestamp("2026-07-01"),
+                origin_number=1,
+                config=config,
+            )
+
+    def test_serial_and_parallel_produce_identical_results(self):
+        serial_result = self._run({})
+        parallel_result = self._run(
+            {
+                "training": {
+                    "rolling_origin_replay": {
+                        "parallel": {"weather_scenario_workers": 4}
+                    }
+                }
+            }
+        )
+
+        self.assertEqual(set(serial_result.keys()), {"warmer", "cooler", "cloudier_solar_loss", "clearer_high_solar"})
+        self.assertEqual(set(serial_result.keys()), set(parallel_result.keys()))
+        for name in serial_result:
+            pd.testing.assert_frame_equal(serial_result[name], parallel_result[name])
+
+    def test_empty_scenario_result_is_dropped(self):
+        def fake_make_scenario_frame(base_future_frame, scenario):
+            return pd.DataFrame({"Marker": [scenario["name"]]})
+
+        with (
+            patch(
+                "forecasting.backtest.rolling_origin_replay.make_weather_scenario_frame",
+                side_effect=fake_make_scenario_frame,
+            ),
+            patch(
+                "forecasting.backtest.rolling_origin_replay._raw_prediction_frame",
+                return_value=pd.DataFrame(),
+            ),
+        ):
+            result = _score_weather_scenarios(
+                self._scenario_defs(),
+                pd.DataFrame({"Marker": ["base"]}),
+                target=pd.DataFrame(),
+                hist=pd.DataFrame(),
+                features=[],
+                ensemble_weights={},
+                xgb_model=None,
+                lgb_model=None,
+                prophet_fit=None,
+                prophet_features=[],
+                catboost_model=None,
+                origin_dt=pd.Timestamp("2026-07-01"),
+                origin_number=1,
+                config={},
+            )
+        self.assertEqual(result, {})
 
 
 if __name__ == "__main__":

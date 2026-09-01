@@ -285,6 +285,18 @@ training:
       # when multiple replay origins train concurrently. Keep origin replay serial
       # whenever CatBoost GPU is active; set false only on a larger dedicated GPU.
       serial_when_catboost_gpu: true
+      # NOT YET VALIDATED IN PRODUCTION (added 2026-09-01). Scores the 4 independent
+      # weather scenarios (warmer/cooler/cloudier/clearer) per origin concurrently via a
+      # thread pool instead of sequentially -- pure inference against already-trained
+      # models (no retraining, no shared mutable state between scenarios), so serial and
+      # parallel execution produce identical numbers. This is unrelated to the
+      # serial_when_catboost_gpu constraint above: that's about concurrent *training*
+      # processes each loading their own GPU context; CatBoost's .predict() call here
+      # runs on CPU regardless of the model's training device. Defaults to 1 (serial,
+      # unchanged behavior) -- raise to e.g. 4 after verifying in your environment that
+      # threaded inference doesn't destabilize anything (BLAS/OpenMP oversubscription is
+      # the main theoretical risk, not correctness).
+      weather_scenario_workers: 1
     horizon_days: 16
     calibration_days: 45
     origin_selection: "fixed" # Fixed set keeps tuning passes apples-to-apples; remove fixed_origins to rebalance.

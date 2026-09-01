@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import Pool, cpu_count
 import os
 from pathlib import Path
@@ -929,6 +930,85 @@ def _raw_prediction_frame(
     return _add_origin_metadata(out, origin_dt, origin_number)
 
 
+def _weather_scenario_max_workers(config: dict | None, n_scenarios: int) -> int:
+    """Worker count for scoring independent weather scenarios concurrently.
+
+    Each scenario just runs recursive_forecast's already-trained XGB/LGB/CatBoost
+    models against a different weather input -- no retraining, no shared mutable
+    state between scenarios, so this is safe to parallelize across threads (unlike
+    the origin-level multiprocessing parallelism, which retrains full models per
+    origin and is deliberately serialized when CatBoost GPU is enabled to avoid
+    concurrent-process GPU memory aborts; CatBoost's own .predict() runs on CPU
+    regardless of training device, so that constraint doesn't apply here).
+    Defaults to 1 (serial, unchanged behavior) -- opt in via
+    training.rolling_origin_replay.parallel.weather_scenario_workers once verified
+    in your environment.
+    """
+    if n_scenarios <= 1:
+        return 1
+    parallel_cfg = (_replay_cfg(config).get("parallel", {}) or {})
+    workers = _as_int(parallel_cfg.get("weather_scenario_workers", 1), default=1, minimum=1)
+    return min(workers, n_scenarios)
+
+
+def _score_weather_scenarios(
+    scenario_defs: list[dict[str, Any]],
+    base_future_frame: pd.DataFrame,
+    *,
+    target: pd.DataFrame,
+    hist: pd.DataFrame,
+    features: list[str],
+    ensemble_weights: dict[str, float],
+    xgb_model,
+    lgb_model,
+    prophet_fit,
+    prophet_features: list[str],
+    catboost_model,
+    origin_dt: pd.Timestamp,
+    origin_number: int,
+    config: dict | None,
+) -> dict[str, pd.DataFrame]:
+    """Runs _raw_prediction_frame once per weather scenario against the same
+    already-trained models, optionally concurrently (see
+    _weather_scenario_max_workers). Serial and parallel execution produce
+    identical results -- scenarios don't interact, and prediction reads the
+    fitted models without mutating them."""
+
+    def _run(scenario: dict[str, Any]) -> tuple[str, pd.DataFrame]:
+        name = str(scenario.get("name", "scenario"))
+        scenario_frame = make_weather_scenario_frame(base_future_frame, scenario)
+        scenario_raw = _raw_prediction_frame(
+            target=target,
+            future_frame=scenario_frame,
+            hist=hist,
+            features=features,
+            ensemble_weights=ensemble_weights,
+            xgb_model=xgb_model,
+            lgb_model=lgb_model,
+            prophet_fit=prophet_fit,
+            prophet_features=prophet_features,
+            catboost_model=catboost_model,
+            origin_dt=origin_dt,
+            origin_number=origin_number,
+            config=config,
+        )
+        return name, scenario_raw
+
+    max_workers = _weather_scenario_max_workers(config, len(scenario_defs))
+    results: dict[str, pd.DataFrame] = {}
+    if max_workers > 1:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            for name, scenario_raw in pool.map(_run, scenario_defs):
+                if not scenario_raw.empty:
+                    results[name] = scenario_raw
+    else:
+        for scenario in scenario_defs:
+            name, scenario_raw = _run(scenario)
+            if not scenario_raw.empty:
+                results[name] = scenario_raw
+    return results
+
+
 def _origin_raw_forecasts(
     train_df: pd.DataFrame,
     features: list[str],
@@ -1053,26 +1133,22 @@ def _origin_raw_forecasts(
     ):
         started = time.perf_counter()
         realized_future = target.drop(columns=["MWH"]).copy()
-        for scenario in scenario_defs:
-            name = str(scenario.get("name", "scenario"))
-            scenario_frame = make_weather_scenario_frame(realized_future, scenario)
-            scenario_raw = _raw_prediction_frame(
-                target=target,
-                future_frame=scenario_frame,
-                hist=hist,
-                features=trained_features,
-                ensemble_weights=ensemble_weights,
-                xgb_model=xgb_model,
-                lgb_model=lgb_model,
-                prophet_fit=prophet_fit,
-                prophet_features=prophet_features,
-                catboost_model=catboost_model,
-                origin_dt=origin_dt,
-                origin_number=origin_number,
-                config=config,
-            )
-            if not scenario_raw.empty:
-                realized_scenarios[name] = scenario_raw
+        realized_scenarios = _score_weather_scenarios(
+            scenario_defs,
+            realized_future,
+            target=target,
+            hist=hist,
+            features=trained_features,
+            ensemble_weights=ensemble_weights,
+            xgb_model=xgb_model,
+            lgb_model=lgb_model,
+            prophet_fit=prophet_fit,
+            prophet_features=prophet_features,
+            catboost_model=catboost_model,
+            origin_dt=origin_dt,
+            origin_number=origin_number,
+            config=config,
+        )
         _log_stage(
             "realized weather scenarios",
             started,
@@ -1113,28 +1189,22 @@ def _origin_raw_forecasts(
     weather_scenarios: dict[str, pd.DataFrame] = {}
     if not weather_realism_future.empty:
         started = time.perf_counter()
-        for scenario in scenario_defs:
-            name = str(scenario.get("name", "scenario"))
-            scenario_frame = make_weather_scenario_frame(
-                weather_realism_future, scenario
-            )
-            scenario_raw = _raw_prediction_frame(
-                target=target,
-                future_frame=scenario_frame,
-                hist=hist,
-                features=trained_features,
-                ensemble_weights=ensemble_weights,
-                xgb_model=xgb_model,
-                lgb_model=lgb_model,
-                prophet_fit=prophet_fit,
-                prophet_features=prophet_features,
-                catboost_model=catboost_model,
-                origin_dt=origin_dt,
-                origin_number=origin_number,
-                config=config,
-            )
-            if not scenario_raw.empty:
-                weather_scenarios[name] = scenario_raw
+        weather_scenarios = _score_weather_scenarios(
+            scenario_defs,
+            weather_realism_future,
+            target=target,
+            hist=hist,
+            features=trained_features,
+            ensemble_weights=ensemble_weights,
+            xgb_model=xgb_model,
+            lgb_model=lgb_model,
+            prophet_fit=prophet_fit,
+            prophet_features=prophet_features,
+            catboost_model=catboost_model,
+            origin_dt=origin_dt,
+            origin_number=origin_number,
+            config=config,
+        )
         _log_stage(
             "previous-run weather scenarios",
             started,
