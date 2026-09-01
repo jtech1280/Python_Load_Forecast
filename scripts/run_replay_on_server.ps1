@@ -1,6 +1,6 @@
 param(
     [string]$RunLabel = "",
-    [string]$FixedOriginsFile = "forecast_outputs\fixed_replay_origins_hot_peak_summers_20260531.txt",
+    [string]$FixedOriginsFile = "",
     [int]$ReplayMaxOrigins = 20,
     [ValidateSet("safe", "gpu-priority", "cpu-only")]
     [string]$BackendMode = "safe",
@@ -32,6 +32,11 @@ if (![string]::IsNullOrWhiteSpace($ServerConfigLocal)) {
         throw "Server override config not found: $ServerConfigLocal"
     }
     $env:FORECAST_CONFIG_LOCAL = $ServerConfigLocal
+}
+elseif (![string]::IsNullOrWhiteSpace($env:FORECAST_CONFIG_LOCAL) -and
+    [System.IO.Path]::GetFileName($env:FORECAST_CONFIG_LOCAL).Equals("config.server_rolling_origin_ada.yaml", [System.StringComparison]::OrdinalIgnoreCase)) {
+    Write-Warning "Ignoring stale Ada server FORECAST_CONFIG_LOCAL for generic replay. Pass -ServerConfigLocal to use it explicitly."
+    Remove-Item Env:\FORECAST_CONFIG_LOCAL -ErrorAction SilentlyContinue
 }
 
 if (![string]::IsNullOrWhiteSpace($CudaDevice)) {

@@ -347,6 +347,7 @@ def configure_logging(verbose: bool = False) -> None:
         level=logging.DEBUG if verbose else logging.INFO,
         format=LOG_FORMAT,
         datefmt="%Y-%m-%d %H:%M:%S",
+        force=True,
     )
 
 

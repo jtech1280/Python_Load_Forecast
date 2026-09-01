@@ -733,6 +733,9 @@ def main(argv: list[str] | None = None):
         config.setdefault("model", {}).setdefault("xgb", {})["device"] = "cpu"
         config.setdefault("model", {}).setdefault("xgb", {})["tree_method"] = "hist"
         config.setdefault("model", {}).setdefault("lgb", {})["use_gpu"] = False
+        cat_cfg = config.setdefault("model", {}).setdefault("catboost", {})
+        cat_cfg["require_gpu"] = False
+        cat_cfg["task_type"] = "CPU"
     elif args.use_gpu:
         config.setdefault("hardware", {})["use_gpu"] = True
         config.setdefault("model", {}).setdefault("xgb", {})["device"] = "cuda"

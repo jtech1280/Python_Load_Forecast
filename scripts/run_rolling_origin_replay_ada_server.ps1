@@ -131,6 +131,7 @@ $LogPath = Join-Path $LogDir "rolling_origin_replay_$RunLabel.log"
 $StatusPath = Join-Path $LogDir "rolling_origin_replay_$RunLabel.status.json"
 $SummaryPath = Join-Path $LogDir "rolling_origin_replay_$RunLabel.summary.txt"
 $GpuMonitorPath = Join-Path $LogDir "rolling_origin_replay_$RunLabel.gpu.csv"
+$GpuPreflightPath = Join-Path $LogDir "rolling_origin_replay_$RunLabel.gpu_preflight.py"
 
 $argsList = @(
     "-u",
@@ -191,6 +192,13 @@ import warnings
 
 import numpy as np
 import xgboost as xgb
+
+warnings.filterwarnings(
+    "ignore",
+    message="CUDA path could not be detected.*",
+    category=UserWarning,
+    module=r"cupy\._environment",
+)
 
 warning_text = ""
 X = np.arange(128, dtype=np.float32).reshape(64, 2)
@@ -253,10 +261,20 @@ except Exception as exc:
 print(f"GPU preflight ok: xgboost={xgb.__version__}, xgb_device={device}, cupy_devices={device_count}")
 '@
 
-    $preflight = & $PythonExe -c $preflightCode 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    Set-Content -Path $GpuPreflightPath -Value $preflightCode -Encoding UTF8
+    $preflightExitCode = 1
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $preflight = & $PythonExe $GpuPreflightPath 2>&1
+        $preflightExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($preflightExitCode -ne 0) {
         $preflightText = ($preflight | Out-String).Trim()
-        throw "Python GPU preflight failed before replay started. $preflightText"
+        throw "Python GPU preflight failed before replay started. Preflight script: $GpuPreflightPath. $preflightText"
     }
     $preflight | ForEach-Object { Write-Host $_ }
 }
@@ -315,8 +333,17 @@ if ($nvidiaSmi -and $GpuMonitorIntervalSec -gt 0) {
 }
 
 try {
-    & $PythonExe @argsList *> $LogPath
-    $exitCode = $LASTEXITCODE
+    $replayExitCode = 1
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $PythonExe @argsList *> $LogPath
+        $replayExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    $exitCode = $replayExitCode
 
     $artifacts = @(
         "production_readiness_scorecard.csv",
