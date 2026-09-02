@@ -43,6 +43,54 @@ class BuildMatchedScopeTests(unittest.TestCase):
         )
         self.assertTrue(scoped.empty)
 
+    def test_months_filter_keeps_only_matching_calendar_months(self):
+        dt = pd.date_range("2026-07-27", periods=48, freq="h", tz="America/Los_Angeles")
+        load_df = pd.DataFrame({"DT": dt, "MWH": np.arange(len(dt), dtype=float)})
+        daily_max = pd.DataFrame(
+            {
+                "Date": pd.to_datetime(["2026-07-27", "2026-07-28"]),
+                "Temperature_DailyMax": [96.0, 97.0],
+            }
+        )
+        scoped = inspect_mod.build_matched_scope(
+            load_df,
+            daily_max,
+            hot_peak_hours={16, 17, 18},
+            temp_band_low=94.0,
+            temp_band_high=99.0,
+            months={8},
+        )
+        self.assertTrue(scoped.empty)
+
+        scoped_july = inspect_mod.build_matched_scope(
+            load_df,
+            daily_max,
+            hot_peak_hours={16, 17, 18},
+            temp_band_low=94.0,
+            temp_band_high=99.0,
+            months={7},
+        )
+        self.assertEqual(len(scoped_july), 6)
+
+    def test_none_months_pools_all_months(self):
+        dt = pd.date_range("2026-07-27", periods=48, freq="h", tz="America/Los_Angeles")
+        load_df = pd.DataFrame({"DT": dt, "MWH": np.arange(len(dt), dtype=float)})
+        daily_max = pd.DataFrame(
+            {
+                "Date": pd.to_datetime(["2026-07-27", "2026-07-28"]),
+                "Temperature_DailyMax": [96.0, 97.0],
+            }
+        )
+        scoped = inspect_mod.build_matched_scope(
+            load_df,
+            daily_max,
+            hot_peak_hours={16, 17, 18},
+            temp_band_low=94.0,
+            temp_band_high=99.0,
+            months=None,
+        )
+        self.assertEqual(len(scoped), 6)
+
 
 class YearlySummaryTests(unittest.TestCase):
     def test_groups_by_year_with_expected_stats(self):

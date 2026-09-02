@@ -27,6 +27,13 @@ Usage:
         --config forecasting/config.yaml \\
         --event-start 2026-07-27 --event-end 2026-07-29 \\
         --temp-band-low 94 --temp-band-high 99
+
+    # August-only (--months 8), to check whether a pooled multi-month comparison is
+    # hiding a month-specific pattern:
+    python scripts/inspect_load_level_at_matched_temperature.py \\
+        --config forecasting/config.yaml \\
+        --event-start 2026-08-01 --event-end 2026-08-10 \\
+        --temp-band-low 94 --temp-band-high 99 --months 8
 """
 
 import argparse
@@ -52,18 +59,24 @@ def build_matched_scope(
     hot_peak_hours: set[int],
     temp_band_low: float,
     temp_band_high: float,
+    months: set[int] | None = None,
 ) -> pd.DataFrame:
     """Hourly load rows restricted to hot-peak hours on days whose
-    Temperature_DailyMax falls in [temp_band_low, temp_band_high]."""
+    Temperature_DailyMax falls in [temp_band_low, temp_band_high], optionally
+    further restricted to a set of calendar months (e.g. {8} for August-only,
+    so a pooled multi-month comparison doesn't hide a month-specific pattern)."""
     df = load_df.copy()
     df["Date"] = pd.to_datetime(df["DT"].dt.tz_localize(None).dt.date)
     df["Hour"] = df["DT"].dt.hour
     df["Year"] = df["DT"].dt.year
+    df["Month"] = df["DT"].dt.month
 
     merged = df.merge(daily_max[["Date", "Temperature_DailyMax"]], on="Date", how="inner")
     scope = merged["Hour"].isin(hot_peak_hours) & merged["Temperature_DailyMax"].between(
         temp_band_low, temp_band_high
     )
+    if months:
+        scope &= merged["Month"].isin(months)
     return merged.loc[scope].reset_index(drop=True)
 
 
@@ -96,6 +109,14 @@ def main() -> int:
     parser.add_argument("--temp-band-low", type=float, default=94.0)
     parser.add_argument("--temp-band-high", type=float, default=99.0)
     parser.add_argument("--hot-peak-hours", nargs="+", type=int, default=[16, 17, 18, 19, 20])
+    parser.add_argument(
+        "--months",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Restrict to these calendar months (e.g. --months 8 for August-only). "
+        "Default: no month restriction (pools all months).",
+    )
     args = parser.parse_args()
 
     config = load_forecast_config(args.config)
@@ -110,18 +131,23 @@ def main() -> int:
         raise SystemExit("No daily max temperature rows could be built from the historical archive.")
 
     hot_peak_hours = set(args.hot_peak_hours)
-    scoped = build_matched_scope(load_df, daily_max, hot_peak_hours, args.temp_band_low, args.temp_band_high)
+    months = set(args.months) if args.months else None
+    scoped = build_matched_scope(
+        load_df, daily_max, hot_peak_hours, args.temp_band_low, args.temp_band_high, months=months
+    )
     if scoped.empty:
+        month_note = f" and month in {sorted(months)}" if months else ""
         print(
             f"No hours matched hour in {sorted(hot_peak_hours)} and "
-            f"Temperature_DailyMax in [{args.temp_band_low}, {args.temp_band_high}]."
+            f"Temperature_DailyMax in [{args.temp_band_low}, {args.temp_band_high}]{month_note}."
         )
         return 0
 
     summary = yearly_summary(scoped)
+    month_label = f", month(s) {sorted(months)}" if months else ""
     print(
         f"\n=== Actual load at hour {sorted(hot_peak_hours)} on days with "
-        f"Temperature_DailyMax in [{args.temp_band_low}, {args.temp_band_high}]F, by year ==="
+        f"Temperature_DailyMax in [{args.temp_band_low}, {args.temp_band_high}]F{month_label}, by year ==="
     )
     print(summary.to_string(index=False, float_format=lambda x: f"{x:.2f}"))
 
