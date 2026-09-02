@@ -118,6 +118,39 @@ class MainTests(unittest.TestCase):
         # The July 31 row must not leak into an August-only summary.
         self.assertNotIn("origin_01", out.split("Origins whose horizon")[0])
 
+    def test_tz_aware_dt_keeps_local_wall_clock_month(self):
+        """Regression test: converting to UTC before dropping the tz label shifts the
+        wall-clock hour and can push a late-evening PDT timestamp into the next UTC day
+        (and, near a month boundary, the next month) -- DT must be parsed keeping the
+        local calendar date, not the UTC-shifted one."""
+        df = pd.DataFrame(
+            {
+                # 2026-07-31 23:00 PDT is 2026-08-01 06:00 UTC -- must still count as July.
+                "DT": ["2026-07-31 23:00:00-07:00"],
+                "Replay_Origin_ID": ["origin_01"],
+                "Forecast_Day": [1],
+                "Actual_MWH": [500.0],
+                "Final_Backtest_Forecast_MWH": [490.0],
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rolling_origin_replay_results.csv"
+            df.to_csv(path, index=False)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                sys.argv = [
+                    "prog",
+                    "--results-path",
+                    str(path),
+                    "--year",
+                    "2026",
+                    "--month",
+                    "7",
+                ]
+                rc = inspect_mod.main()
+        self.assertEqual(rc, 0)
+        self.assertIn("Actual_Sum_MWH: 500.00", buf.getvalue())
+
     def test_missing_file_raises(self):
         sys.argv = [
             "prog",

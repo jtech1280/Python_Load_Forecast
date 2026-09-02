@@ -71,16 +71,30 @@ def main() -> int:
     if not path.exists():
         raise SystemExit(f"Results file not found: {path}")
 
-    df = pd.read_csv(path)
+    df = pd.read_csv(path, low_memory=False)
     if "DT" not in df.columns:
         raise SystemExit(f"{path} has no DT column -- is this a rolling-origin replay results CSV?")
-    df["DT"] = pd.to_datetime(df["DT"], errors="coerce", utc=True).dt.tz_localize(None)
+    # Parse as-is (don't force a UTC conversion first) so a tz-aware local timestamp like
+    # "2026-08-05 10:00:00-07:00" keeps its local wall-clock date/hour when the tz label is
+    # dropped, instead of shifting by the UTC offset and potentially crossing a day/month
+    # boundary.
+    parsed = pd.to_datetime(df["DT"], errors="coerce")
+    if getattr(parsed.dt, "tz", None) is not None:
+        parsed = parsed.dt.tz_localize(None)
+    df["DT"] = parsed
+
+    n_unparsed = int(df["DT"].isna().sum())
+    if n_unparsed:
+        print(f"Warning: {n_unparsed} of {len(df)} DT values failed to parse and were dropped.")
+    if df["DT"].notna().any():
+        print(f"DT range in file: {df['DT'].min()} to {df['DT'].max()}")
 
     month_df = df[(df["DT"].dt.year == args.year) & (df["DT"].dt.month == args.month)]
     if month_df.empty:
         raise SystemExit(
             f"No rows found for {args.year}-{args.month:02d} in {path}. "
-            "Check the replay's fixed_origins/horizon actually covers this month."
+            "Check the replay's fixed_origins/horizon actually covers this month "
+            "(see the DT range printed above)."
         )
     if args.forecast_col not in month_df.columns:
         raise SystemExit(f"Column {args.forecast_col!r} not found. Available: {sorted(month_df.columns)}")
