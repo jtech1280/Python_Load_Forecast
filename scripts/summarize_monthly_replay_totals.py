@@ -55,6 +55,25 @@ def monthly_totals(df: pd.DataFrame, forecast_col: str) -> dict:
     }
 
 
+def parse_dt_as_local_wall_clock(dt_series: pd.Series, timezone: str) -> pd.Series:
+    """Parses a DT column that may mix tz-aware timestamps at different UTC
+    offsets (e.g. -07:00 PDT and -08:00 PST rows in the same replay results
+    file, since a year-long fixed_origins set spans DST transitions) or be
+    entirely naive already.
+
+    pandas refuses to parse a column with genuinely mixed offsets unless told
+    utc=True, which brings every row to a single shared instant -- but simply
+    dropping the tz label after that (as an earlier version of this script
+    did) keeps the UTC-shifted clock time, not the local one, silently
+    shifting some rows across a day or month boundary. tz_convert to the
+    actual project timezone before dropping the label re-derives each row's
+    correct local wall-clock time, respecting whatever DST was in effect for
+    that specific date.
+    """
+    parsed = pd.to_datetime(dt_series, errors="coerce", utc=True)
+    return parsed.dt.tz_convert(timezone).dt.tz_localize(None)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--results-path", default="forecast_outputs/rolling_origin_replay_results.csv")
@@ -65,6 +84,11 @@ def main() -> int:
         default="Final_Backtest_Forecast_MWH",
         help="Which forecast column to sum (default: Final_Backtest_Forecast_MWH, the fully-corrected replay forecast).",
     )
+    parser.add_argument(
+        "--timezone",
+        default="America/Los_Angeles",
+        help="Project timezone for interpreting DT (default: America/Los_Angeles, matching config.project.timezone).",
+    )
     args = parser.parse_args()
 
     path = Path(args.results_path)
@@ -74,14 +98,7 @@ def main() -> int:
     df = pd.read_csv(path, low_memory=False)
     if "DT" not in df.columns:
         raise SystemExit(f"{path} has no DT column -- is this a rolling-origin replay results CSV?")
-    # Parse as-is (don't force a UTC conversion first) so a tz-aware local timestamp like
-    # "2026-08-05 10:00:00-07:00" keeps its local wall-clock date/hour when the tz label is
-    # dropped, instead of shifting by the UTC offset and potentially crossing a day/month
-    # boundary.
-    parsed = pd.to_datetime(df["DT"], errors="coerce")
-    if getattr(parsed.dt, "tz", None) is not None:
-        parsed = parsed.dt.tz_localize(None)
-    df["DT"] = parsed
+    df["DT"] = parse_dt_as_local_wall_clock(df["DT"], args.timezone)
 
     n_unparsed = int(df["DT"].isna().sum())
     if n_unparsed:
