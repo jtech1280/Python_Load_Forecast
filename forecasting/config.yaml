@@ -1924,6 +1924,48 @@ calibration:
           max_solar_loss_mw: 0.50
           max_forecast_mwh: 255.0
           holiday: false
+        - name: july_august_he14_15_hot_90_95_lift
+          # 2026-09-03 rolling replay counterfactual: HE14-15 carried the
+          # failing peak-window gate; July/August temp-bin lifts reduced
+          # peak-window MAE 6.395 -> 6.078 without moving HE16-20 hot peak.
+          adjustment_mwh: 2.0
+          months: [7, 8]
+          hours: [14, 15]
+          min_forecast_day: 1
+          max_forecast_day: 16
+          min_maxtemp_f: 90.0
+          max_maxtemp_f: 95.0
+          max_cloud_cover_norm: 0.80
+          holiday: false
+        - name: july_august_he14_15_hot_95_100_lift
+          adjustment_mwh: 6.0
+          months: [7, 8]
+          hours: [14, 15]
+          min_forecast_day: 1
+          max_forecast_day: 16
+          min_maxtemp_f: 95.0
+          max_maxtemp_f: 100.0
+          max_cloud_cover_norm: 0.80
+          holiday: false
+        - name: july_august_he14_15_hot_100_105_lift
+          adjustment_mwh: 9.0
+          months: [7, 8]
+          hours: [14, 15]
+          min_forecast_day: 1
+          max_forecast_day: 16
+          min_maxtemp_f: 100.0
+          max_maxtemp_f: 105.0
+          max_cloud_cover_norm: 0.80
+          holiday: false
+        - name: july_august_he14_15_hot_105_plus_lift
+          adjustment_mwh: 10.0
+          months: [7, 8]
+          hours: [14, 15]
+          min_forecast_day: 1
+          max_forecast_day: 16
+          min_maxtemp_f: 105.0
+          max_cloud_cover_norm: 0.80
+          holiday: false
         - name: september_day4to7_mild_peak_down
           adjustment_mwh: 0.0
           months: [9]
