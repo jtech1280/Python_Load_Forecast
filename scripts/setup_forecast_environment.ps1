@@ -40,8 +40,20 @@ function Test-PythonCandidate {
         "-c",
         "import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)"
     )
-    & $Candidate.File @probeArgs *> $null
-    return $LASTEXITCODE -eq 0
+    $exitCode = 1
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $Candidate.File @probeArgs *> $null
+        $exitCode = $LASTEXITCODE
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    return $exitCode -eq 0
 }
 
 function Resolve-BasePython {
