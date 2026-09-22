@@ -2802,6 +2802,35 @@ calibration:
     hours: [16, 17, 18, 19, 20]
     min_maxtemp_f: 90.0
 
+  extreme_heat_magnitude_correction:
+    # NOT YET VALIDATED (added 2026-09-22). Companion to escalating_heat_persistence_
+    # correction for a distinct failure mode it structurally cannot reach: a real ~2-week
+    # production run (Ada server) found its single worst post-correction miss was
+    # 2026-09-09..10 (100.7F/103.8F, ~20-23 MWH residual at the worst hot-peak hours) --
+    # a sudden, isolated 1-2 day spike (Sep 7 was only 89F) that never builds streak depth
+    # (ConsecutiveVeryHotDays95 peaked at 2, well under the persistence rule's 4-day
+    # onset), so that rule never fires for it regardless of tuning. This applies a second,
+    # independent rule keyed on absolute temperature instead of streak duration: once
+    # Temperature_DailyMax crosses min_maxtemp_f, add a correction scaling with degrees
+    # above it. Scoped to max_consecutive_very_hot_days95 <= the persistence rule's own
+    # onset (4) so the two rules partition the space -- a day that's both deep in a streak
+    # and extremely hot stays owned by the persistence rule, not double-corrected here.
+    #
+    # Parameters are a first-pass estimate from only 2 real data points (Sep 9 needed
+    # roughly 15-23 MWH at 2.7F above a 98F onset; Sep 10 needed roughly 18-21 MWH at 5.8F
+    # above onset -- those two points don't imply a single clean linear rate, so
+    # escalation_mwh_per_degree=4.0 was picked to reasonably split the difference rather
+    # than fit either exactly). Needs the same score_bundles()-based validation the
+    # persistence rule got before enabling -- there is no cached origin near 2026-09-09
+    # yet, so either add one to training.rolling_origin_replay.fixed_origins or validate
+    # against a real backtest/replay run that covers this date range. Starts disabled.
+    enabled: false
+    min_maxtemp_f: 98.0
+    max_consecutive_very_hot_days95: 4.0
+    escalation_mwh_per_degree: 4.0
+    max_correction_mwh: 30.0
+    hours: [16, 17, 18, 19, 20]
+
   operational_residual_learner:
     # Scoped second-pass learner for residuals left after the production correction
     # chain. The full residual signal is promoted only through a small per-row cap
